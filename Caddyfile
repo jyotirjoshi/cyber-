@@ -1,0 +1,66 @@
+{
+	# Global options
+	email {$LETSENCRYPT_EMAIL:admin@example.com}
+}
+
+{$DOMAIN_NAME:localhost} {
+	# Encode responses with gzip and zstd
+	encode gzip zstd
+
+	# Security headers
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# Route API and WebSocket calls to FastAPI backend
+	handle /api/* {
+		reverse_proxy api:8000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	handle /ws {
+		reverse_proxy api:8000 {
+			header_up Host {host}
+			header_up Connection "Upgrade"
+			header_up Upgrade "websocket"
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy api:8000
+	}
+
+	handle /readyz {
+		reverse_proxy api:8000
+	}
+
+	handle /docs {
+		reverse_proxy api:8000
+	}
+
+	handle /openapi.json {
+		reverse_proxy api:8000
+	}
+
+	# Route DefectDojo vulnerability management UI
+	handle /dojo/* {
+		uri strip_prefix /dojo
+		reverse_proxy defectdojo-nginx:8080
+	}
+
+	# Default fallback to Next.js frontend
+	handle {
+		reverse_proxy frontend:3000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+}

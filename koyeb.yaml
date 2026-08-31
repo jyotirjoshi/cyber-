@@ -1,0 +1,16 @@
+name: cynux-backend
+services:
+  - name: api
+    git:
+      repository: github.com/your-username/cyber-ai
+      branch: main
+    docker:
+      dockerfile: docker/backend.Dockerfile
+    routes:
+      - path: /
+        port: 8000
+    env:
+      - key: CYNUX_ENVIRONMENT
+        value: production
+      - key: CYNUX_API_PREFIX
+        value: /api/v1

@@ -1,0 +1,57 @@
+services:
+  # ======================================================================
+  # Cynux FastAPI Web Service
+  # ======================================================================
+  - type: web
+    name: cynux-api
+    env: docker
+    dockerfilePath: ./docker/backend.Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: CYNUX_ENVIRONMENT
+        value: production
+      - key: CYNUX_DEBUG
+        value: "false"
+      - key: CYNUX_API_PREFIX
+        value: /api/v1
+      - key: CYNUX_DB__HOST
+        fromDatabase:
+          name: cynux-db
+          property: host
+      - key: CYNUX_DB__PORT
+        fromDatabase:
+          name: cynux-db
+          property: port
+      - key: CYNUX_DB__NAME
+        fromDatabase:
+          name: cynux-db
+          property: database
+      - key: CYNUX_DB__USER
+        fromDatabase:
+          name: cynux-db
+          property: user
+      - key: CYNUX_DB__PASSWORD
+        fromDatabase:
+          name: cynux-db
+          property: password
+      - key: CYNUX_REDIS__URL
+        fromService:
+          type: redis
+          name: cynux-redis
+          property: connectionString
+      - key: CYNUX_SECURITY__JWT_SECRET
+        generateValue: true
+      - key: CYNUX_SECURITY__CREDENTIAL_ENCRYPTION_KEY
+        generateValue: true
+      - key: CYNUX_LLM__PROVIDER
+        value: anthropic
+      - key: CYNUX_LLM__ANTHROPIC_API_KEY
+        sync: false
+
+databases:
+  - name: cynux-db
+    databaseName: cynux
+    user: cynux
+    plan: free

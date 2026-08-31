@@ -1,0 +1,18 @@
+# Cynux — Instant Cloudflare Tunnel Expose Manifest
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
+#
+# To view your generated HTTPS public URL:
+#   docker compose logs cloudflared | grep -o 'https://.*\.trycloudflare\.com'
+#
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --url http://frontend:3000
+    networks:
+      - cynux_net
+    restart: unless-stopped
+    depends_on:
+      - frontend
