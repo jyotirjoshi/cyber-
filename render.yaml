@@ -1,5 +1,20 @@
 services:
   # ======================================================================
+  # Cynux Next.js Frontend Web Service
+  # ======================================================================
+  - type: web
+    name: cynux-frontend
+    env: docker
+    dockerfilePath: ./docker/frontend.Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: NEXT_PUBLIC_API_BASE_URL
+        value: https://cynux-api.onrender.com
+      - key: NEXT_PUBLIC_WS_BASE_URL
+        value: wss://cynux-api.onrender.com
+
+  # ======================================================================
   # Cynux FastAPI Web Service
   # ======================================================================
   - type: web
@@ -17,12 +32,11 @@ services:
       - key: CYNUX_API_PREFIX
         value: /api/v1
       - key: CYNUX_PUBLIC_BASE_URL
-        value: https://cynux-api.onrender.com
+        value: https://cynux-frontend.onrender.com
       - key: CYNUX_ALLOWED_HOSTS
-        value: .onrender.com,cynux-api.onrender.com,localhost
+        value: .onrender.com,cynux-api.onrender.com,cynux-frontend.onrender.com,localhost
       - key: CYNUX_CORS_ORIGINS
-        value: https://cyber-rho-bice.vercel.app,https://cynux-frontend.vercel.app,http://localhost:3000
-
+        value: https://cynux-frontend.onrender.com,https://cyber-rho-bice.vercel.app,http://localhost:3000
       - key: CYNUX_DB__HOST
         fromDatabase:
           name: cynux-db
