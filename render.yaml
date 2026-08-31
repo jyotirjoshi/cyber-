@@ -16,6 +16,12 @@ services:
         value: "false"
       - key: CYNUX_API_PREFIX
         value: /api/v1
+      - key: CYNUX_PUBLIC_BASE_URL
+        value: https://cynux-api.onrender.com
+      - key: CYNUX_ALLOWED_HOSTS
+        value: .onrender.com,cynux-api.onrender.com,localhost
+      - key: CYNUX_CORS_ORIGINS
+        value: https://cynux-frontend.vercel.app,http://localhost:3000
       - key: CYNUX_DB__HOST
         fromDatabase:
           name: cynux-db
