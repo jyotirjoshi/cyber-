@@ -46,9 +46,12 @@ services:
       - key: CYNUX_SECURITY__CREDENTIAL_ENCRYPTION_KEY
         generateValue: true
       - key: CYNUX_LLM__PROVIDER
-        value: anthropic
-      - key: CYNUX_LLM__ANTHROPIC_API_KEY
-        sync: false
+        value: openai
+      - key: CYNUX_LLM__DEFAULT_MODEL
+        value: gpt-4o
+      - key: CYNUX_LLM__OPENAI_API_KEY
+        value: sk-8E2wMzCtwvaXH6wYUaeGMPo2CP1kivuibsXhwH46Gtoim9C0
+
 
 databases:
   - name: cynux-db
