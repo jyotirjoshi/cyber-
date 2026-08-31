@@ -24,7 +24,9 @@ services:
     dockerContext: .
     plan: free
     healthCheckPath: /healthz
+    preDeployCommand: alembic upgrade head
     envVars:
+
       - key: CYNUX_ENVIRONMENT
         value: production
       - key: CYNUX_DEBUG
