@@ -50,7 +50,8 @@ services:
       - key: CYNUX_LLM__DEFAULT_MODEL
         value: gpt-4o
       - key: CYNUX_LLM__OPENAI_API_KEY
-        value: sk-8E2wMzCtwvaXH6wYUaeGMPo2CP1kivuibsXhwH46Gtoim9C0
+        sync: false
+
 
 
 databases:
