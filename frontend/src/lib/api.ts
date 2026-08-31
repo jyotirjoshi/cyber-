@@ -78,11 +78,12 @@ import type {
 const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, "");
 
 const API_BASE = stripTrailingSlash(
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "https://cynux-api.onrender.com",
 );
 const WS_BASE = stripTrailingSlash(
-  process.env.NEXT_PUBLIC_WS_BASE_URL ?? "ws://localhost:8000",
+  process.env.NEXT_PUBLIC_WS_BASE_URL ?? "wss://cynux-api.onrender.com",
 );
+
 const API_PREFIX = "/api/v1";
 
 // ---------------------------------------------------------------------------
