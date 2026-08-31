@@ -52,7 +52,13 @@ services:
       - key: CYNUX_LLM__OPENAI_API_KEY
         sync: false
 
-
+  # ======================================================================
+  # Cynux Redis Service
+  # ======================================================================
+  - type: redis
+    name: cynux-redis
+    plan: free
+    ipAllowList: []
 
 databases:
   - name: cynux-db
