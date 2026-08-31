@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-bg text-fg antialiased;
+    font-family: theme("fontFamily.sans");
+  }
+
+  /* Default border color to the design line token (Tailwind Preflight sets gray). */
+  *,
+  ::before,
+  ::after {
+    border-color: theme("colors.line");
+  }
+
+  ::selection {
+    background: rgba(79, 140, 255, 0.3);
+  }
+
+  :focus-visible {
+    outline: 2px solid theme("colors.primary.DEFAULT");
+    outline-offset: 2px;
+  }
+
+  /* Thin dark scrollbars */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2a3550 transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #263148;
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #33405e;
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  .container-app {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8;
+  }
+}

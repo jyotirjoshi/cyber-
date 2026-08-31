@@ -1,0 +1,110 @@
+{#
+  One finding, included from report.html once per finding with the loop variable `f`.
+  Included with_context (Jinja default), so `audience` and `unverifiable_text` from the
+  parent namespace are in scope here.
+
+  Every value is scanner- or provider-derived and therefore untrusted: this partial is on
+  the autoescape path and contains no `| safe`. `code_patch` in particular is remediation
+  text that may quote attacker-controlled strings -- it renders inside <pre> as escaped
+  text, never as markup.
+
+  The finding.intelligence dict is the FR-020 tri-state: when no enrichment row exists it
+  carries only `in_kev` (None), `unavailable` and `epss_score`, so the KEV/EPSS blocks
+  below guard every optional key rather than assuming it is present.
+#}
+<div class="finding">
+  <div class="head">
+    <h4>{{ f.title }}</h4>
+    <span class="badge {{ f.severity | sevclass }}">{{ f.severity }}</span>
+  </div>
+
+  <div class="meta">
+    {% if f.priority %}<span class="pill">{{ f.priority }}</span>{% endif %}
+    {% if f.risk_score is not none %}Risk {{ f.risk_score }}/100 &middot; {% endif %}
+    {% if f.scanner %}{{ f.scanner }} &middot; {% endif %}
+    {% if f.status %}{{ f.status }}{% endif %}
+    {% if f.asset %}<br>Asset: {{ f.asset.name }}{% if f.asset.endpoint %} ({{ f.asset.endpoint }}){% endif %}
+    {% elif f.endpoint %}<br>{{ f.endpoint }}{% endif %}
+    {% if f.component %}<br>Component: {{ f.component }}{% if f.component_version %} {{ f.component_version }}{% endif %}{% endif %}
+    {% if f.cve_ids %}<br>CVE: {{ f.cve_ids | join(", ") }}{% endif %}
+    {% if f.cwe %} &middot; CWE-{{ f.cwe }}{% endif %}
+    {% if f.cvss_score is not none %} &middot; CVSS {{ f.cvss_score }}{% endif %}
+  </div>
+
+  {# ---- Exploitation intelligence: tri-state, unavailable != negative (FR-020/FR-024) ---- #}
+  <div class="intel">
+    <div><strong>CISA KEV:</strong>
+      {% if "cisa_kev" in f.intelligence.unavailable %}
+        <span class="u">{{ unverifiable_text }}</span>
+      {% elif f.intelligence.in_kev is none %}
+        Not determined
+      {% elif f.intelligence.in_kev %}
+        <span class="badge kev">Actively exploited</span>
+        {% if f.intelligence.kev_date_added %}(added {{ f.intelligence.kev_date_added }}){% endif %}
+        {% if f.intelligence.kev_ransomware_use == "known" %} &middot; known ransomware use{% endif %}
+      {% else %}
+        Not listed
+      {% endif %}
+    </div>
+    <div><strong>EPSS:</strong>
+      {% if "epss" in f.intelligence.unavailable %}
+        <span class="u">{{ unverifiable_text }}</span>
+      {% elif f.intelligence.epss_score is not none %}
+        {{ f.intelligence.epss_score | percent }} probability
+        {% if f.intelligence.epss_percentile is not none %}({{ f.intelligence.epss_percentile | percent }} pctl){% endif %}
+      {% else %}
+        —
+      {% endif %}
+    </div>
+  </div>
+
+  {# ---- AI analysis ---- #}
+  {% if f.analysis.explanation %}
+    {% for para in f.analysis.explanation | paragraphs %}<p>{{ para }}</p>{% endfor %}
+  {% endif %}
+  {% if f.analysis.business_impact %}
+    <h5>Business impact</h5>
+    {% for para in f.analysis.business_impact | paragraphs %}<p>{{ para }}</p>{% endfor %}
+  {% endif %}
+  {% if audience == "technical" and f.analysis.attack_scenario %}
+    <h5>Attack scenario</h5>
+    {% for para in f.analysis.attack_scenario | paragraphs %}<p>{{ para }}</p>{% endfor %}
+  {% endif %}
+  {% if f.analysis.skipped_reason %}
+    <p class="muted">Analysis not performed: {{ f.analysis.skipped_reason }}</p>
+  {% elif f.analysis.ai_generated %}
+    <p class="ai-note">AI-generated analysis; every factual claim is cited to a source below,
+    and unsupported claims were replaced with "{{ unverifiable_text }}".</p>
+  {% endif %}
+
+  {# ---- Remediation (technical only) ---- #}
+  {% if audience == "technical" and f.remediations %}
+    {% for r in f.remediations %}
+    <h5>Remediation{% if r.approach %} — {{ r.approach }}{% endif %}
+      {% if r.effort %}<span class="muted">({{ r.effort }} effort)</span>{% endif %}</h5>
+    {% if r.summary %}<p>{{ r.summary }}</p>{% endif %}
+    {% if r.steps %}
+      <ul class="steps">{% for step in r.steps %}<li>{{ step }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if r.code_patch %}
+      <pre>{{ r.code_patch }}</pre>
+    {% endif %}
+    {% if r.configuration_change %}<p><strong>Configuration:</strong> {{ r.configuration_change }}</p>{% endif %}
+    {% if r.verification %}<p><strong>Verify:</strong> {{ r.verification }}</p>{% endif %}
+    {% if r.side_effects %}<p><strong>Side effects:</strong> {{ r.side_effects }}</p>{% endif %}
+    {% if r.references %}
+      <p class="muted">References: {% for ref in r.references %}{{ ref }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+    {% endif %}
+    {% if r.ai_generated %}<p class="ai-note">AI-generated remediation guidance; verify before applying.</p>{% endif %}
+    {% endfor %}
+  {% endif %}
+
+  {# ---- Evidence source catalog (FR-024 traceability, technical only) ---- #}
+  {% if audience == "technical" and f.evidence %}
+    <p class="muted">Sources:
+      {% for source_id, block in f.evidence.items() %}
+        {{ source_id }} ({{ block.provider }}){% if not loop.last %}; {% endif %}
+      {% endfor %}
+    </p>
+  {% endif %}
+</div>

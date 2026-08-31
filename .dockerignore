@@ -1,0 +1,40 @@
+# Keep Docker build contexts small and free of secrets/build junk.
+
+# VCS / editor / OS
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+
+# Secrets and local env
+.env
+*.env
+!.env.example
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+backend/.venv/
+backend/venv/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.pytest_cache/
+backend/htmlcov/
+backend/.coverage
+backend/tests/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/npm-debug.log*
+
+# Docs and infra artifacts not needed at build time
+docs/
+*.md
+!backend/README.md
+install.cmd
+.claude/

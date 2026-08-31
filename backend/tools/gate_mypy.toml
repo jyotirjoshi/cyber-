@@ -1,0 +1,38 @@
+# Gate-only mypy config -- mirrors [tool.mypy] in pyproject.toml verbatim, and adds one
+# extra per-module skip so the per-file gate is robust on a polluted dev box.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The canonical config lives in pyproject.toml and is authoritative; this file exists only
+# because mypy cannot *merge* an extra per-module override on top of pyproject (a config
+# file replaces, never extends). Every [tool.mypy] key below is copied from pyproject so the
+# strictness applied to Cynux code is identical -- the *only* addition is the ``transformers``
+# override, for the same reason pyproject already skips ``numpy``: it is not a Cynux
+# dependency, it arrives only as transitive global-site pollution on this machine, and a
+# clean venv/CI never installs it. mypy 1.8.0 additionally raises an INTERNAL ERROR parsing
+# transformers' ``sam_hq`` model, which aborts the whole run before it can check our file.
+# Skipping it (mypy treats the module as ``Any`` and never parses its source) checks Cynux
+# code, not stray packages. Run: ``mypy --config-file tools/gate_mypy.toml <path>``.
+#
+# Keep this in sync with pyproject.toml [tool.mypy] if that section ever changes.
+
+[tool.mypy]
+python_version = "3.11"
+plugins = []
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["alembic/versions/"]
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+module = ["transformers", "transformers.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

@@ -1,0 +1,131 @@
+[project]
+name = "cynux-backend"
+version = "1.1.0"
+description = "Cynux - AI-powered security assessment and security operations platform"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+dependencies = [
+  # --- Web / API ---
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "python-multipart==0.0.20",
+  "websockets==14.1",
+  "pydantic==2.10.4",
+  "pydantic-settings==2.7.0",
+  "email-validator==2.2.0",
+
+  # --- Persistence ---
+  "SQLAlchemy[asyncio]==2.0.36",
+  "asyncpg==0.30.0",
+  "alembic==1.14.0",
+  # psycopg is required by langgraph-checkpoint-postgres (it does not use asyncpg)
+  "psycopg[binary,pool]==3.2.3",
+
+  # --- Queue / cache / pubsub ---
+  "redis[hiredis]==5.2.1",
+
+  # --- Agent ---
+  "langgraph==0.2.60",
+  "langgraph-checkpoint-postgres==2.0.9",
+  "langsmith==0.2.10",
+
+  # --- LLM provider SDKs (gateway picks at runtime; none is a default) ---
+  "anthropic==0.42.0",
+  "openai==1.59.6",
+  "google-genai==0.5.0",
+
+  # --- Scanner execution ---
+  "docker==7.1.0",
+
+  # --- Integrations ---
+  "httpx==0.28.1",
+  "boto3==1.35.90",
+  "aiosmtplib==3.0.2",
+
+  # --- Security ---
+  "cryptography==44.0.0",
+  "PyJWT==2.10.1",
+  "argon2-cffi==23.1.0",
+
+  # --- Reporting ---
+  "Jinja2==3.1.5",
+  "weasyprint==63.1",
+
+  # --- Observability ---
+  "structlog==24.4.0",
+  "opentelemetry-sdk==1.29.0",
+  "opentelemetry-exporter-otlp-proto-http==1.29.0",
+  "opentelemetry-instrumentation-fastapi==0.50b0",
+  "opentelemetry-instrumentation-sqlalchemy==0.50b0",
+  "opentelemetry-instrumentation-redis==0.50b0",
+  "opentelemetry-instrumentation-httpx==0.50b0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.4",
+  "pytest-asyncio==0.25.0",
+  "pytest-cov==6.0.0",
+  "ruff==0.8.6",
+  "mypy==1.14.1",
+  "types-boto3==1.0.2",
+  "asgi-lifespan==2.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4", "SIM", "RUF"]
+ignore = [
+  "E501",    # line length is handled by the formatter
+  "B008",    # FastAPI Depends() in defaults is idiomatic
+  "S104",    # binding 0.0.0.0 inside a container is intended
+  "RUF012",  # ClassVar annotations not required for our declarative config
+]
+
+[tool.ruff.lint.per-file-ignores]
+# S105/S106/S311: tests construct fake tokens and passwords on purpose.
+# S108: the sandbox tests pass "/tmp" and "/tmp; rm -rf /" as *inputs* to the mount and
+#   argv validators. The literals are the thing under test, so flagging them as insecure
+#   temp-file usage is exactly backwards.
+"tests/*" = ["S101", "S105", "S106", "S108", "S311"]
+"alembic/*" = ["E402", "F401"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = []
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["alembic/versions/"]
+
+# numpy is not a Cynux dependency -- it arrives transitively, and its bundled stubs use
+# `type` statements that mypy only parses when python_version >= 3.12. Skipping them lets
+# python_version stay pinned to the version we actually target.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

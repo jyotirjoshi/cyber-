@@ -1,0 +1,283 @@
+{#
+  Cynux assessment report (FR-030 / FR-039).
+
+  Rendered by app.reporting.render with autoescape=True. Every value here originates from
+  scanner output or a remote host and is therefore untrusted -- there is deliberately no
+  `| safe` anywhere in this file, and none may be added to a scanner-derived value. The
+  context is spread into the top-level namespace by app.reporting.generate.
+
+  `audience` is "executive" or "technical": the executive variant leads with impact and
+  omits scanner detail, evidence blocks and code patches; the technical variant includes
+  everything.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ title }}</title>
+<style>
+  @page { size: A4; margin: 20mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #1a1f2b; font-size: 11pt; line-height: 1.45; margin: 0;
+  }
+  h1, h2, h3, h4 { color: #0f1729; line-height: 1.2; }
+  h1 { font-size: 24pt; margin: 0 0 4pt; }
+  h2 { font-size: 15pt; margin: 22pt 0 8pt; border-bottom: 2px solid #e3e8f0; padding-bottom: 4pt; }
+  h3 { font-size: 12.5pt; margin: 14pt 0 6pt; }
+  h4 { font-size: 11pt; margin: 10pt 0 4pt; }
+  p { margin: 0 0 8pt; }
+  a { color: #1d4ed8; text-decoration: none; }
+  .muted { color: #5b6472; }
+  .section { page-break-inside: avoid; }
+  table { width: 100%; border-collapse: collapse; margin: 6pt 0 12pt; font-size: 10pt; }
+  th, td { text-align: left; padding: 5pt 7pt; border-bottom: 1px solid #e3e8f0; vertical-align: top; }
+  th { background: #f5f7fb; font-weight: 600; color: #38414f; }
+  code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+  pre {
+    background: #0f1729; color: #e6edf3; padding: 10pt; border-radius: 5px;
+    font-size: 8.5pt; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+  }
+  .cover { padding: 12pt 0 18pt; border-bottom: 3px solid #0f1729; margin-bottom: 12pt; }
+  .cover .brand { font-size: 10pt; letter-spacing: 3px; text-transform: uppercase; color: #1d4ed8; font-weight: 700; }
+  .kv { display: flex; flex-wrap: wrap; gap: 4pt 24pt; margin-top: 8pt; }
+  .kv div { min-width: 150pt; }
+  .kv .label { font-size: 8.5pt; text-transform: uppercase; letter-spacing: 1px; color: #6b7280; }
+  .badge { display: inline-block; padding: 1pt 7pt; border-radius: 10px; font-size: 8.5pt; font-weight: 700;
+           text-transform: uppercase; letter-spacing: .3px; color: #fff; }
+  .sev-critical { background: #7f1d1d; }
+  .sev-high     { background: #b91c1c; }
+  .sev-medium   { background: #b45309; }
+  .sev-low      { background: #1d4ed8; }
+  .sev-info     { background: #4b5563; }
+  .pill { display: inline-block; padding: 1pt 7pt; border-radius: 10px; font-size: 8.5pt; font-weight: 600;
+          background: #eef2ff; color: #3730a3; }
+  .kev  { background: #7f1d1d; color: #fff; }
+  .counts { display: flex; gap: 8pt; flex-wrap: wrap; margin: 8pt 0 4pt; }
+  .count-card { flex: 1 1 90pt; border: 1px solid #e3e8f0; border-radius: 6px; padding: 8pt 10pt; text-align: center; }
+  .count-card .n { font-size: 20pt; font-weight: 700; }
+  .count-card .l { font-size: 8pt; text-transform: uppercase; letter-spacing: 1px; color: #6b7280; }
+  .banner { border-left: 4px solid #b45309; background: #fffbeb; padding: 9pt 12pt; border-radius: 4px; margin: 10pt 0; }
+  .banner.ok { border-left-color: #15803d; background: #f0fdf4; }
+  .finding { page-break-inside: avoid; border: 1px solid #e3e8f0; border-radius: 6px; padding: 11pt 13pt; margin: 9pt 0; }
+  .finding .head { display: flex; justify-content: space-between; gap: 10pt; align-items: baseline; }
+  .finding .meta { font-size: 9pt; color: #5b6472; margin: 3pt 0 6pt; }
+  .intel { display: flex; gap: 8pt 18pt; flex-wrap: wrap; font-size: 9.5pt; margin: 6pt 0; }
+  .intel .u { color: #b45309; font-style: italic; }
+  .foot { margin-top: 16pt; padding-top: 8pt; border-top: 1px solid #e3e8f0; font-size: 8.5pt; color: #6b7280; }
+  .ai-note { font-size: 8.5pt; color: #6b7280; font-style: italic; }
+  ul.steps { margin: 4pt 0 8pt; padding-left: 18pt; }
+  ul.steps li { margin-bottom: 3pt; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="brand">Cynux Security Assessment</div>
+  <h1>{{ title }}</h1>
+  <div class="muted">{{ assessment.title }} &middot; Assessment #{{ assessment.reference }}</div>
+  <div class="kv">
+    <div><div class="label">Generated</div>{{ generated_at | humandate }}</div>
+    <div><div class="label">Audience</div>{{ audience | capitalize }}</div>
+    <div><div class="label">Scope</div>{{ assessment.scope }} / {{ assessment.depth }}</div>
+    <div><div class="label">Status</div>{{ assessment.status }}</div>
+    <div><div class="label">Duration</div>{{ assessment.duration_seconds | humanduration }}</div>
+  </div>
+</div>
+
+{% if degradations or intelligence_unavailable %}
+<div class="banner">
+  <strong>This report is based on incomplete data.</strong>
+  {% if degradations %}{{ degradations | length }} coverage degradation(s) occurred{% endif %}
+  {% if intelligence_unavailable %}; threat intelligence was unavailable from:
+    {{ intelligence_unavailable | join(", ") }}{% endif %}.
+  See the appendix. A reader who does not know the data was incomplete will over-trust it.
+</div>
+{% else %}
+<div class="banner ok"><strong>No coverage degradations were recorded</strong> for this assessment.</div>
+{% endif %}
+
+{# ---------------- Executive summary ---------------- #}
+<div class="section">
+  <h2>Executive summary</h2>
+  {% for para in executive_summary | paragraphs %}
+  <p>{{ para }}</p>
+  {% else %}
+  <p class="muted">No executive summary was produced.</p>
+  {% endfor %}
+  {% if summary_ai_generated %}
+  <p class="ai-note">This summary was generated by an AI model ({{ ai_model or "unspecified" }}) from the
+  statistics below and reviewed for invented facts. Figures are computed, not model-authored.</p>
+  {% endif %}
+
+  <div class="counts">
+    <div class="count-card"><div class="n">{{ summary.total }}</div><div class="l">Findings</div></div>
+    <div class="count-card"><div class="n">{{ summary.by_severity.critical }}</div><div class="l">Critical</div></div>
+    <div class="count-card"><div class="n">{{ summary.by_severity.high }}</div><div class="l">High</div></div>
+    <div class="count-card"><div class="n">{{ summary.by_severity.medium }}</div><div class="l">Medium</div></div>
+    <div class="count-card"><div class="n">{{ summary.in_kev }}</div><div class="l">In CISA KEV</div></div>
+    <div class="count-card"><div class="n">{{ asset_count }}</div><div class="l">Assets</div></div>
+  </div>
+  {% if summary.kev_undetermined %}
+  <p class="muted">Exploitation status could not be determined for {{ summary.kev_undetermined }}
+  finding(s): {{ unverifiable_text }}</p>
+  {% endif %}
+</div>
+
+{# ---------------- Scope & authorization ---------------- #}
+<div class="section">
+  <h2>Scope &amp; authorization</h2>
+  <h3>Targets</h3>
+  <table>
+    <thead><tr><th>Target</th><th>Type</th><th>Host</th><th>Port</th><th>Hosts</th></tr></thead>
+    <tbody>
+    {% for t in scope.targets %}
+      <tr><td>{{ t.raw_value }}</td><td>{{ t.target_type }}</td><td>{{ t.host }}</td>
+          <td>{{ t.port if t.port is not none else "—" }}</td><td>{{ t.host_count }}</td></tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No targets recorded.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if scope.approval %}
+  <h3>Human approval (FR-011)</h3>
+  <p>Before any scanner ran, the proposed scope was presented for approval and a person
+  {{ scope.approval.decision }} it{% if scope.approval.resolved_at %} on
+  {{ scope.approval.resolved_at | humandate }}{% endif %}. Risk level:
+  <span class="pill">{{ scope.approval.risk_level }}</span></p>
+  <table>
+    <thead><tr><th></th><th>Assets</th><th>Scanners</th></tr></thead>
+    <tbody>
+      <tr><td>Proposed by agent</td><td>{{ scope.approval.requested_asset_count }}</td>
+          <td>{{ scope.approval.requested_scanners | join(", ") or "—" }}</td></tr>
+      <tr><td>Authorized by operator</td><td>{{ scope.approval.approved_asset_count }}</td>
+          <td>{{ scope.approval.approved_scanners | join(", ") or "—" }}</td></tr>
+    </tbody>
+  </table>
+  {% if scope.approval.resolution_note %}<p class="muted">Note: {{ scope.approval.resolution_note }}</p>{% endif %}
+  {% else %}
+  <div class="banner"><strong>No granted scan approval is on record</strong> for this assessment.</div>
+  {% endif %}
+
+  {% if scope.authorizations %}
+  <h3>Authorization attestations</h3>
+  {% for a in scope.authorizations %}
+  <p><strong>{{ a.target }}</strong> — {{ "confirmed" if a.confirmed else "not confirmed" }}
+  via {{ a.method }}{% if a.confirmed_at %} on {{ a.confirmed_at | humandate }}{% endif %}.<br>
+  <span class="muted">{{ a.attestation_text }}</span></p>
+  {% endfor %}
+  {% endif %}
+</div>
+
+{# ---------------- Methodology & tools ---------------- #}
+<div class="section">
+  <h2>Methodology &amp; tools</h2>
+  <p class="muted">Cynux does not reimplement scanning. Findings come from the tools below,
+  each run in an isolated, egress-only sandbox; vulnerabilities are deduplicated and stored
+  in DefectDojo. Tool versions are the container image tags that actually executed.</p>
+  <table>
+    <thead><tr><th>Tool</th><th>Version</th><th>Status</th><th>Targets</th>
+      <th>Findings</th>{% if audience == "technical" %}<th>Duration</th>{% endif %}</tr></thead>
+    <tbody>
+    {% for m in methodology %}
+      <tr>
+        <td>{{ m.tool }}</td>
+        <td>{{ m.version or "—" }}</td>
+        <td>{{ m.status }}{% if m.failure_code %} <span class="muted">({{ m.failure_code }})</span>{% endif %}</td>
+        <td>{{ m.target_count }}</td>
+        <td>{{ m.findings_imported }}</td>
+        {% if audience == "technical" %}<td>{{ m.duration_seconds | humanduration }}</td>{% endif %}
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">No scanner jobs ran.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{# ---------------- Asset inventory ---------------- #}
+<div class="section">
+  <h2>Asset inventory</h2>
+  <p class="muted">{{ asset_count }} asset(s) discovered;
+  {{ assets | selectattr("selected_for_scanning") | list | length }} selected for scanning.</p>
+  {% if audience == "technical" and assets %}
+  <table>
+    <thead><tr><th>Asset</th><th>Type</th><th>Service</th><th>Criticality</th>
+      <th>Exposed</th><th>Scanned</th></tr></thead>
+    <tbody>
+    {% for a in assets %}
+      <tr>
+        <td>{{ a.endpoint }}{% if a.http_title %}<br><span class="muted">{{ a.http_title }}</span>{% endif %}</td>
+        <td>{{ a.asset_type }}</td>
+        <td>{{ a.service or "—" }}{% if a.technology %} <span class="muted">({{ a.technology | join(", ") }})</span>{% endif %}</td>
+        <td><span class="pill">{{ a.criticality }}</span></td>
+        <td>{{ "yes" if a.internet_exposed else "no" }}</td>
+        <td>{{ "yes" if a.selected_for_scanning else "no" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{# ---------------- Findings by priority ---------------- #}
+<div class="section">
+  <h2>Findings by priority</h2>
+  {% if not findings %}
+  <p class="muted">No findings were imported for this assessment.</p>
+  {% endif %}
+  {% set buckets = [("P1", "Priority 1"), ("P2", "Priority 2"), ("P3", "Priority 3"),
+                    ("P4", "Priority 4"), ("P5", "Priority 5")] %}
+  {% for code, label in buckets %}
+    {% set group = findings | selectattr("priority", "equalto", code) | list %}
+    {% if group %}
+    <h3>{{ label }} <span class="muted">({{ group | length }})</span></h3>
+      {% for f in group %}{% include "_finding.html" %}{% endfor %}
+    {% endif %}
+  {% endfor %}
+  {% set unprioritized = findings | selectattr("priority", "none") | list %}
+  {% if unprioritized %}
+  <h3>Unprioritized <span class="muted">({{ unprioritized | length }})</span></h3>
+    {% for f in unprioritized %}{% include "_finding.html" %}{% endfor %}
+  {% endif %}
+</div>
+
+{# ---------------- Appendix ---------------- #}
+<div class="section">
+  <h2>Appendix</h2>
+
+  <h3>Coverage degradations</h3>
+  {% if degradations %}
+  <table>
+    <thead><tr><th>Stage</th><th>Component</th><th>Impact</th><th>Reason</th></tr></thead>
+    <tbody>
+    {% for d in degradations %}
+      <tr><td>{{ d.stage }}</td><td>{{ d.component }}</td><td>{{ d.impact }}</td><td>{{ d.reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">None recorded.</p>
+  {% endif %}
+
+  <h3>Threat-intelligence availability</h3>
+  {% if intelligence_unavailable %}
+  <p>The following providers were unreachable while this assessment ran. Where their answer
+  is missing below, the correct reading is "{{ unverifiable_text }}" — not a negative result.</p>
+  <ul>{% for p in intelligence_unavailable %}<li>{{ p }}</li>{% endfor %}</ul>
+  {% else %}
+  <p class="muted">All configured intelligence providers responded.</p>
+  {% endif %}
+
+  <div class="foot">
+    Generated by Cynux on {{ generated_at | humandate }}. This is a point-in-time snapshot;
+    the underlying findings may have changed since. Every intelligence claim is attributable to
+    a named source; claims that could not be supported read
+    "{{ unverifiable_text }}".
+  </div>
+</div>
+
+</body>
+</html>
