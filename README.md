@@ -95,55 +95,58 @@ target under assessment.
 
 ## Prerequisites
 
-- **Docker** with the **Compose v2** plugin (`docker compose version`).
-- An **LLM API key** — Anthropic by default. This is the one value you must
-  supply by hand; Cynux ships with no default provider and the worker refuses to
-  start without one.
-- **GNU Make** is optional but convenient. On Windows, run `make` from Git Bash,
-  or run the underlying `docker compose ...` commands (shown by `make help`)
-  directly.
-- ~4 GB free RAM for the core stack; noticeably more if you also run the bundled
-  DefectDojo.
+- **Python 3.11+** and **Node.js 22+** (for Native execution without Docker).
+- **PostgreSQL 16** & **Redis 7** (or cloud-managed databases on Render/Neon/Upstash).
+- **LLM API Key** — OpenAI (`CYNUX_LLM__OPENAI_API_KEY`) or Anthropic (`CYNUX_LLM__ANTHROPIC_API_KEY`).
+- *(Optional)* **Docker & Docker Compose v2** if you prefer containerized deployment.
 
 ---
 
 ## Quickstart
 
+### Native Execution (No Docker Required)
+
+1. **Setup Environment**:
+   ```bash
+   cp .env.example .env
+   # Edit .env and set your CYNUX_LLM__OPENAI_API_KEY
+   ```
+
+2. **Start All Services**:
+   - **Windows (PowerShell)**:
+     ```powershell
+     .\start.ps1
+     ```
+   - **Linux / macOS**:
+     ```bash
+     bash start.sh
+     ```
+
+3. **Access Application**:
+   - Frontend Web App: <http://localhost:3000>
+   - FastAPI Backend & Health: <http://localhost:8000/healthz>
+   - Interactive API Docs: <http://localhost:8000/docs>
+
+---
+
+### Cloud Hosting (24/7 Free)
+
+This repository includes native production blueprints for **Render** and **Vercel** (`render.yaml` & `frontend/vercel.json`):
+
+- **Render Blueprint (Backend & Database)**: Deploy natively using Python 3.12 without Docker:
+  👉 [Deploy Backend on Render](https://render.com/deploy?repo=https://github.com/jyotirjoshi/cyber-)
+- **Vercel (Frontend UI)**: Deploy Next.js frontend with 1-click:
+  👉 [Deploy Frontend on Vercel](https://vercel.com/new/clone?repository-url=https://github.com/jyotirjoshi/cyber-&root-directory=frontend)
+
+---
+
+### Docker Deployment (Optional)
+
 ```bash
-# 1. Create your .env from the template
-make env
-
-# 2. Set the one required secret: open .env and fill in
-#    CYNUX_LLM__ANTHROPIC_API_KEY=sk-ant-...
-
-# 3. Generate strong values for every other secret (JWT, Fernet key, DB/MinIO
-#    passwords, DefectDojo secrets). Leaves your LLM key untouched.
-make secrets
-
-# 4. Bring up DefectDojo on its own and wait for it to initialise (~1-2 min the
-#    first time — it migrates its own DB and creates the admin user).
-make defectdojo-up
-make ps            # wait until defectdojo-initializer has Exited (0)
-
-# 5. Mint a DefectDojo API token and write it into .env automatically.
-make defectdojo-token
-
-# 6. Start Cynux.
-make up            # full stack, including the web app at :3000
-# ...or, to run the API/worker without the frontend:
-make up-backend    # data plane + api + worker only
+# Bring up full Docker stack
+make up            # Full stack at :3000
 ```
 
-Then:
-
-- API health: <http://localhost:8000/healthz> and <http://localhost:8000/readyz>
-- API docs: <http://localhost:8000/docs>
-- Frontend (when built): <http://localhost:3000>
-- MinIO console: <http://localhost:9001>
-- DefectDojo: <http://localhost:8080>
-
-If you change `.env` afterwards, `make restart` rebuilds and restarts `api` and
-`worker` so they pick up the new values.
 
 ### Using an external DefectDojo
 
