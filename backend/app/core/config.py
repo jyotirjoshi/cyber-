@@ -157,43 +157,52 @@ class SecuritySettings(BaseSettings):
 
 
 class ScannerSettings(BaseSettings):
-    """FR-012 / FR-014 sandbox parameters."""
+    """FR-012 / FR-014 scanner execution parameters (native subprocess mode).
+
+    Scanners run as local processes rather than Docker containers. Install the
+    required binaries and point these settings at them (or ensure they are on PATH).
+    """
 
     model_config = _cfg("CYNUX_SCANNER__")
 
-    #: None -> docker.from_env(). Set to e.g. tcp://docker-proxy:2375 to run scanners
-    #: through a socket proxy instead of mounting the raw Docker socket.
-    docker_host: str | None = None
-    #: Network the scanner containers join. It must NOT be able to reach postgres,
-    #: redis or minio (SEC-004); docker-compose defines it as egress-only.
-    network: str = "cynux_scanner_net"
-
-    cpu_quota_cores: float = 1.0
-    memory_limit_mb: int = 2048
-    #: Guards against a fork bomb in a compromised scanner image.
-    pids_limit: int = 512
-    #: Writable scratch; the container root filesystem stays read-only.
-    tmpfs_size_mb: int = 1024
     default_timeout_seconds: int = 1800
     max_timeout_seconds: int = 21_600  # 6h ceiling for one scanner job
-    #: UID:GID the scanner process runs as inside the container (nobody:nogroup).
-    run_as_user: str = "65534:65534"
-    #: Concurrent scanner containers per organization (PRD section 57).
+    #: Concurrent scanner jobs per organization (PRD section 57).
     max_concurrent_jobs_per_org: int = 4
-    #: Cynux-wide ceiling so one tenant cannot exhaust the host.
+    #: Cynux-wide ceiling so one host is not overloaded.
     max_concurrent_jobs_global: int = 16
-    #: Host directory bind-mounted per job for artifact hand-off. Cleared after upload.
+    #: Host directory used as the working directory per scanner job. Cleared after upload.
     artifact_workdir: str = "/var/lib/cynux/artifacts"
 
-    image_reconftw: str = "six2dez/reconftw:main"
-    image_nmap: str = "instrumentisto/nmap:7.95"
-    image_nuclei: str = "projectdiscovery/nuclei:v3.3.7"
-    image_zap: str = "zaproxy/zap-stable:2.15.0"
+    # -- binary paths --------------------------------------------------------
+    #: Path (or bare name for PATH lookup) of each scanner binary.
+    bin_nmap: str = "nmap"
+    bin_nuclei: str = "nuclei"
+    bin_zap: str = "zap.sh"
+    bin_reconftw: str = "reconftw.sh"
+
+    # Keep image_* attributes so existing adapter code (adapter.image_setting,
+    # adapter.image()) compiles without changes. They now return the binary name/path
+    # instead of a Docker image reference.
+    image_reconftw: str = "reconftw.sh"
+    image_nmap: str = "nmap"
+    image_nuclei: str = "nuclei"
+    image_zap: str = "zap.sh"
+
+    @property
+    def scanner_bins(self) -> dict[str, str]:
+        """Map from short scanner name to binary path, for SubprocessRunner.preflight."""
+        return {
+            "nmap": self.bin_nmap,
+            "nuclei": self.bin_nuclei,
+            "zap": self.bin_zap,
+            "reconftw": self.bin_reconftw,
+        }
 
     @property
     def allowed_images(self) -> frozenset[str]:
-        """Only these images may ever be started. A model-supplied image name can
-        therefore never reach the Docker API."""
+        """Kept for backward compatibility with sandbox.validate_image calls.
+        Returns the set of configured binary paths."""
         return frozenset({self.image_reconftw, self.image_nmap, self.image_nuclei, self.image_zap})
 
 
@@ -625,7 +634,6 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
                 "CYNUX_DEFECTDOJO__API_TOKEN). It is the vulnerability-management "
                 "source of truth (FR-016); Cynux will not substitute its own store."
             )
-
     # --- optional integrations: warn, never silently substitute -------------
     if not settings.dify.configured:
         warnings.append(

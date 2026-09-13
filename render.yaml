@@ -1,32 +1,16 @@
 services:
   # ======================================================================
-  # Cynux Next.js Frontend Web Service
-  # ======================================================================
-  - type: web
-    name: cynux-frontend
-    env: docker
-    dockerfilePath: ./docker/frontend.Dockerfile
-    dockerContext: .
-    plan: free
-    envVars:
-      - key: NEXT_PUBLIC_API_BASE_URL
-        value: https://cynux-api.onrender.com
-      - key: NEXT_PUBLIC_WS_BASE_URL
-        value: wss://cynux-api.onrender.com
-
-  # ======================================================================
-  # Cynux FastAPI Web Service
+  # Cynux FastAPI Web Service (Native Python 3.12 - No Docker)
   # ======================================================================
   - type: web
     name: cynux-api
-    env: docker
-    dockerfilePath: ./docker/backend.Dockerfile
-    dockerContext: .
+    env: python
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT
     plan: free
     healthCheckPath: /healthz
-    preDeployCommand: alembic upgrade head
+    preDeployCommand: cd backend && alembic upgrade head
     envVars:
-
       - key: CYNUX_ENVIRONMENT
         value: production
       - key: CYNUX_DEBUG
@@ -34,11 +18,11 @@ services:
       - key: CYNUX_API_PREFIX
         value: /api/v1
       - key: CYNUX_PUBLIC_BASE_URL
-        value: https://cynux-frontend.onrender.com
+        value: https://cynux-api.onrender.com
       - key: CYNUX_ALLOWED_HOSTS
-        value: .onrender.com,cynux-api.onrender.com,cynux-frontend.onrender.com,localhost
+        value: .onrender.com,cynux-api.onrender.com,localhost
       - key: CYNUX_CORS_ORIGINS
-        value: https://cynux-frontend.onrender.com,https://cyber-rho-bice.vercel.app,http://localhost:3000
+        value: https://cyber-rho-bice.vercel.app,http://localhost:3000
       - key: CYNUX_DB__HOST
         fromDatabase:
           name: cynux-db

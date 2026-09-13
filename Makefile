@@ -1,81 +1,78 @@
-# Cynux — operator entrypoint. `make help` lists everything.
+# Cynux — native (no-Docker) development entrypoint. `make help` lists everything.
 #
-# Requires Docker + the Compose v2 plugin. On Windows run these from Git Bash
-# (or run the underlying `docker compose ...` commands from the README directly).
+# Prerequisites:
+#   * Python 3.11+  (cd backend && pip install -e ".[dev]")
+#   * Node.js 22+   (cd frontend && npm install)
+#   * PostgreSQL 16 running on localhost:5432
+#   * Redis 7       running on localhost:6379
+#   * MinIO (optional, for artifact storage) on localhost:9000
+#
+# Copy .env.example to .env and fill in secrets before running anything.
 
-COMPOSE ?= docker compose
 PYTHON  ?= python
+NPM     ?= npm
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env secrets build up up-backend up-defectdojo defectdojo-up down down-v restart logs ps \
-        migrate defectdojo-token shell-api shell-worker psql redis-cli \
-        backend-gate clean
+.PHONY: help env secrets install install-backend install-frontend \
+        migrate api worker frontend dev \
+        lint typecheck test backend-gate clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| sort \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+# ── Setup ──────────────────────────────────────────────────────────────────
 
 env: ## Create .env from .env.example if it does not exist
-	@if [ ! -f .env ]; then cp .env.example .env && echo "created .env — edit it, then run 'make secrets'"; else echo ".env already exists"; fi
+	@if [ ! -f .env ]; then cp .env.example .env && echo "created .env — edit it and fill in secrets"; else echo ".env already exists"; fi
 
 secrets: ## Regenerate the CHANGE-ME secrets in .env in place (keeps your LLM key)
 	$(PYTHON) docker/gen-secrets.py .env
 
-build: ## Build the api/worker and frontend images
-	$(COMPOSE) build
+install: install-backend install-frontend ## Install all dependencies
 
-up: ## Start the core stack (postgres, redis, minio, api, worker, frontend)
-	$(COMPOSE) up -d --build
+install-backend: ## Install Python dependencies (editable, with dev extras)
+	cd backend && pip install -e ".[dev]"
 
-up-backend: ## Start the backend only (data plane + api + worker, no frontend)
-	$(COMPOSE) up -d --build postgres redis minio minio-init migrate api worker
+install-frontend: ## Install Node dependencies
+	cd frontend && $(NPM) install
 
-up-defectdojo: ## Start the core stack plus the bundled DefectDojo
-	$(COMPOSE) --profile defectdojo up -d --build
+# ── Database ───────────────────────────────────────────────────────────────
 
-defectdojo-up: ## Start ONLY DefectDojo (do this before 'make defectdojo-token')
-	$(COMPOSE) --profile defectdojo up -d \
-		defectdojo-postgres defectdojo-redis defectdojo-initializer \
-		defectdojo-uwsgi defectdojo-celeryworker defectdojo-celerybeat defectdojo-nginx
+migrate: ## Run database migrations (alembic upgrade head)
+	cd backend && alembic upgrade head
 
-down: ## Stop the stack (keep volumes)
-	$(COMPOSE) --profile defectdojo down
+# ── Run services (each in its own terminal) ────────────────────────────────
 
-down-v: ## Stop the stack and delete all volumes (DESTRUCTIVE)
-	$(COMPOSE) --profile defectdojo down -v
+api: ## Start the FastAPI server on :8000
+	cd backend && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port 8000 --reload
 
-restart: ## Restart api and worker (after a code or .env change)
-	$(COMPOSE) up -d --build api worker
+worker: ## Start the background worker
+	cd backend && $(PYTHON) -m app.worker
 
-logs: ## Tail logs for all services
-	$(COMPOSE) logs -f --tail=100
+frontend: ## Start the Next.js dev server on :3000
+	cd frontend && $(NPM) run dev
 
-ps: ## Show service status
-	$(COMPOSE) --profile defectdojo ps
+# ── Code quality ───────────────────────────────────────────────────────────
 
-migrate: ## Run database migrations once (alembic upgrade head)
-	$(COMPOSE) run --rm migrate
+lint: ## Run ruff linter + formatter check
+	cd backend && ruff check app && ruff format --check app
 
-defectdojo-token: ## Mint a DefectDojo API token and write it into .env
-	$(PYTHON) docker/defectdojo-token.py .env
+typecheck: ## Run mypy type checks
+	cd backend && mypy app
 
-shell-api: ## Open a shell in a throwaway api container
-	$(COMPOSE) run --rm --no-deps api /bin/bash
+test: ## Run pytest (single pass, no watch)
+	cd backend && pytest --tb=short -q
 
-shell-worker: ## Open a shell in a throwaway worker container (root)
-	$(COMPOSE) run --rm --no-deps --user 0:0 worker /bin/bash
-
-psql: ## Open psql against the Cynux database
-	$(COMPOSE) exec postgres psql -U $${CYNUX_DB__USER:-cynux} -d $${CYNUX_DB__NAME:-cynux}
-
-redis-cli: ## Open redis-cli
-	$(COMPOSE) exec redis redis-cli
-
-backend-gate: ## Run the offline backend gate (verify + ruff + mypy)
+backend-gate: ## Run the full offline gate (verify + ruff + mypy)
 	cd backend && $(PYTHON) tools/verify.py && ruff check app && ruff format --check app && mypy app
 
-clean: ## Remove built images and dangling build cache
-	-$(COMPOSE) --profile defectdojo down
-	-docker image rm cynux-backend:local cynux-frontend:local 2>/dev/null || true
+# ── Misc ───────────────────────────────────────────────────────────────────
+
+clean: ## Remove Python bytecode, build artefacts and Next.js cache
+	find backend -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find backend -name "*.pyc" -delete 2>/dev/null || true
+	rm -rf backend/.mypy_cache backend/dist backend/cynux_backend.egg-info
+	rm -rf frontend/.next frontend/node_modules/.cache

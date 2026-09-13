@@ -3,19 +3,18 @@
 Two package-wide conventions, both of which exist because the alternative is a security bug
 rather than an inconvenience:
 
-**A scanner that ran and failed is a result, not an exception.**  ``DockerRunner.run`` returns a
-:class:`~app.scanners.base.ScannerResult` with a non-zero ``exit_code`` for a Nuclei run that
-crashed, a Nmap scan that timed out, and a ZAP baseline that reported warnings.  FR-040 requires
-an assessment to degrade rather than collapse when one tool fails, and that is only possible if
-the failure arrives as data.  Exceptions are reserved for "running this at all was wrong or
-impossible": an argv that failed validation, an image outside the allow-list, an unreachable
-Docker daemon.
+**A scanner that ran and failed is a result, not an exception.**  ``SubprocessRunner.run``
+returns a :class:`~app.scanners.base.ScannerResult` with a non-zero ``exit_code`` for a
+Nuclei run that crashed, a Nmap scan that timed out, and a ZAP baseline that reported warnings.
+FR-040 requires an assessment to degrade rather than collapse when one tool fails, and that is
+only possible if the failure arrives as data.  Exceptions are reserved for "running this at all
+was wrong or impossible": an argv that failed validation, a binary outside the allow-list, or a
+binary that is not installed.
 
-**Nothing outside :mod:`app.scanners.sandbox` passes options to Docker.**  There is deliberately
-no hook for an adapter to add a capability, a mount or an environment variable of its own
-choosing.  An adapter declares *what to run*; the sandbox decides *what it may do*.  Adding a
-fifth scanner therefore cannot weaken the isolation the other four run under, which is the whole
-reason FR-014's guarantees are checkable.
+**Argv validation guards every scanner invocation.**  There is no shell involved:
+``asyncio.create_subprocess_exec`` takes a list. Every element is checked against
+:data:`~app.scanners.sandbox.ARGV_SAFE` before execution, so a target that acquired a ``;``
+still cannot become a second command.
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ from app.scanners.registry import (
     get_adapter,
     scan_type_for,
 )
-from app.scanners.runner import DockerRunner
+from app.scanners.runner import DockerRunner, SubprocessRunner
 from app.scanners.sandbox import (
     ALLOWED_ENV_NAMES,
     ALLOWED_WORK_MOUNTS,
@@ -70,7 +69,8 @@ __all__ = [
     "WORK_MOUNT",
     "ArtifactFile",
     "DiscoveredAsset",
-    "DockerRunner",
+    "DockerRunner",       # alias for SubprocessRunner
+    "SubprocessRunner",
     "ScannerAdapter",
     "ScannerRequest",
     "ScannerResult",

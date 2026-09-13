@@ -35,9 +35,6 @@ dependencies = [
   "openai==1.59.6",
   "google-genai==0.5.0",
 
-  # --- Scanner execution ---
-  "docker==7.1.0",
-
   # --- Integrations ---
   "httpx==0.28.1",
   "boto3==1.35.90",

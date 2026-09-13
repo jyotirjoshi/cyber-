@@ -30,7 +30,7 @@ from redis.asyncio.client import Redis
 from app.core.config import Settings
 from app.integrations.storage import ObjectStorage
 from app.llm.gateway import LLMGateway, get_gateway
-from app.scanners.runner import DockerRunner
+from app.scanners.runner import SubprocessRunner as DockerRunner
 from app.services.events import EventBus, EventEmitter
 
 log = structlog.get_logger(__name__)
@@ -51,7 +51,7 @@ class AgentDeps:
     #: Tenant-agnostic object store handle. Every operation re-checks the ``org/{id}/`` key
     #: prefix, so sharing one handle across tenants cannot cross an isolation boundary.
     storage: ObjectStorage
-    #: The sandboxed Docker runner. Owned by this instance and closed by :meth:`aclose`.
+    #: The subprocess-based scanner runner. Owned by this instance and closed by :meth:`aclose`.
     runner: DockerRunner
     #: Redis connection pool. Shared with the worker, which owns its lifecycle; not closed
     #: here.
