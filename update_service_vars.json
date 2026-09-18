@@ -1,0 +1,9 @@
+{
+  "serviceId": "b868ef59-fbed-4734-b455-c6892f5f088c",
+  "input": {
+    "buildCommand": "pip install -e backend/",
+    "startCommand": "python -m alembic -c backend/alembic.ini upgrade head && python -m uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port $PORT --workers 2",
+    "healthcheckPath": "/healthz",
+    "healthcheckTimeout": 120
+  }
+}

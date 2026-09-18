@@ -1,0 +1,3 @@
+mutation UpdateService($serviceId: String!, $input: ServiceInstanceUpdateInput!) {
+  serviceInstanceUpdate(serviceId: $serviceId, input: $input)
+}

@@ -1,0 +1,13 @@
+{
+  "query": "mutation CreateProject($input: ProjectCreateInput!) { projectCreate(input: $input) { id name } }",
+  "variables": {
+    "input": {
+      "name": "cynux-backend",
+      "workspaceId": "b696f72a-f8ec-4708-8764-3a0a005d220c",
+      "repo": {
+        "fullRepoName": "jyotirjoshi/cyber-",
+        "branch": "main"
+      }
+    }
+  }
+}
