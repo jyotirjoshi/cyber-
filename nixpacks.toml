@@ -13,7 +13,7 @@ nixPkgs = [
 ]
 
 [phases.install]
-cmds = ["cd backend && pip install -e ."]
+cmds = ["pip install -e backend/"]
 
 [start]
-cmd = "cd backend && alembic upgrade head && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT --workers 2"
+cmd = "python -m alembic -c backend/alembic.ini upgrade head && python -m uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT --workers 2 --app-dir backend"

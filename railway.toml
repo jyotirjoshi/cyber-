@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "cd backend && alembic upgrade head && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT --workers 2"
+startCommand = "python -m alembic -c backend/alembic.ini upgrade head && python -m uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT --workers 2 --app-dir backend"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 120
 restartPolicyType = "on_failure"
