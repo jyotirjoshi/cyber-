@@ -1,10 +1,9 @@
 [build]
 builder = "nixpacks"
-buildCommand = "cd backend && pip install -e ."
 
 [deploy]
-startCommand = "cd backend && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT"
+startCommand = "cd backend && alembic upgrade head && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT --workers 2"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 60
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
