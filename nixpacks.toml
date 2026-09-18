@@ -1,0 +1,19 @@
+[phases.setup]
+nixPkgs = [
+  "python312",
+  "python312Packages.pip",
+  "libpango",
+  "pango",
+  "harfbuzz",
+  "fontconfig",
+  "cairo",
+  "gdk-pixbuf",
+  "libffi",
+  "dejavu_fonts",
+]
+
+[phases.install]
+cmds = ["cd backend && pip install -e ."]
+
+[start]
+cmd = "cd backend && alembic upgrade head && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port $PORT"
