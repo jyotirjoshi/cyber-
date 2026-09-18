@@ -705,6 +705,10 @@ export interface FindingDetailOut extends FindingOut {
   ai_explanation: string | null;
   ai_business_impact: string | null;
   ai_attack_scenario: string | null;
+  /** New elite-analysis fields from ELITE_FINDING_ANALYSIS_SYSTEM */
+  ai_adversary_profile: string | null;
+  ai_mitre_tactics: string[] | null;
+  ai_detection_hint: string | null;
   /** Citations backing every AI claim above (FR-024). Never render a claim without these. */
   ai_evidence: Array<Record<string, unknown>>;
   ai_model: string | null;

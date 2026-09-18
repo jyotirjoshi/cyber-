@@ -101,6 +101,10 @@ class Finding(Base, TenantMixin, TimestampMixin):
     ai_explanation: Mapped[str | None] = mapped_column(Text)
     ai_business_impact: Mapped[str | None] = mapped_column(Text)
     ai_attack_scenario: Mapped[str | None] = mapped_column(Text)
+    #: Elite analysis fields from ELITE_FINDING_ANALYSIS_SYSTEM
+    ai_adversary_profile: Mapped[str | None] = mapped_column(Text)
+    ai_mitre_tactics: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    ai_detection_hint: Mapped[str | None] = mapped_column(Text)
     #: Every claim the model made, each paired with the source that supports it.
     #: The hallucination guard (FR-024) rejects an analysis whose claims are not all
     #: represented here, so this doubles as the evidence trail shown in the UI.

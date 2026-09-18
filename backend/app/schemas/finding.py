@@ -158,6 +158,10 @@ class FindingDetailOut(FindingOut):
     ai_explanation: str | None = None
     ai_business_impact: str | None = None
     ai_attack_scenario: str | None = None
+    #: New elite-analysis fields from ELITE_FINDING_ANALYSIS_SYSTEM
+    ai_adversary_profile: str | None = None
+    ai_mitre_tactics: list[str] | None = None
+    ai_detection_hint: str | None = None
     #: Citations backing every AI claim above. See the module docstring (FR-024).
     ai_evidence: list[dict[str, Any]] = Field(default_factory=list)
     ai_model: str | None = None

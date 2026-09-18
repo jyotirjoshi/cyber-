@@ -75,7 +75,8 @@ from app.llm.guard import (
     collect_evidence_ids,
     verify_claims,
 )
-from app.llm.prompts import FINDING_ANALYSIS_SYSTEM, build_evidence_prompt
+from app.llm.prompts import build_evidence_prompt
+from app.llm.prompts_enhanced import ELITE_FINDING_ANALYSIS_SYSTEM
 from app.schemas.common import PaginationParams
 from app.schemas.finding import FindingFilter
 from app.services import audit as audit_service
@@ -158,6 +159,10 @@ class _AnalysisOut(BaseModel):
     confidence: str = Field(default="medium", max_length=20)
     confidence_reason: str = Field(default="", max_length=1000)
     likely_false_positive: bool = False
+    # New elite fields — optional so old model calls degrade gracefully
+    adversary_profile: str | None = Field(default=None, max_length=2000)
+    mitre_tactics: list[str] = Field(default_factory=list)
+    detection_hint: str | None = Field(default=None, max_length=1000)
 
 
 _ANALYSIS_SCHEMA: dict[str, Any] = {
@@ -171,6 +176,9 @@ _ANALYSIS_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "confidence_reason": {"type": "string", "maxLength": 1000},
         "likely_false_positive": {"type": "boolean"},
+        "adversary_profile": {"type": ["string", "null"], "maxLength": 2000},
+        "mitre_tactics": {"type": "array", "items": {"type": "string", "maxLength": 60}},
+        "detection_hint": {"type": ["string", "null"], "maxLength": 1000},
     },
 }
 
@@ -550,7 +558,7 @@ async def analyze_finding(
     provider, model = gateway.resolve("reasoning")
     instruction = _analysis_instruction(finding, evidence=evidence, degradations=degradations)
     messages = [
-        LLMMessage(role="system", content=FINDING_ANALYSIS_SYSTEM),
+        LLMMessage(role="system", content=ELITE_FINDING_ANALYSIS_SYSTEM),
         LLMMessage(role="user", content=instruction),
     ]
 
@@ -603,6 +611,11 @@ async def analyze_finding(
     finding.ai_explanation = explanation.stripped_text
     finding.ai_business_impact = impact.stripped_text
     finding.ai_attack_scenario = scenario.stripped_text
+    # Elite fields — stored verbatim (they contain judgement, not facts, so the guard
+    # does not strip them; the CVE/CVSS hard-checks above already ran over all prose)
+    finding.ai_adversary_profile = result.adversary_profile or None
+    finding.ai_mitre_tactics = list(result.mitre_tactics) if result.mitre_tactics else []
+    finding.ai_detection_hint = result.detection_hint or None
     finding.ai_evidence = _evidence_trail(
         evidence,
         guarded={
@@ -1168,11 +1181,34 @@ def _analysis_instruction(
     degradations: Sequence[str],
 ) -> str:
     lines = [
-        "Analyze this security finding for the engineer who has to fix it.",
-        f"Finding severity as reported by the scanner: {finding.severity}.",
+        "Analyze this security finding with adversarial depth.",
+        f"Finding severity (scanner): {finding.severity}.",
     ]
     if finding.scanner:
         lines.append(f"Reported by: {finding.scanner}.")
+
+    # SSVC context — if the attack_path node ran, the SSVC outcome is in risk_factors
+    risk_factors = finding.risk_factors or {}
+    ssvc = risk_factors.get("ssvc")
+    if ssvc:
+        outcome = ssvc.get("outcome", "")
+        exploitation = ssvc.get("exploitation", "")
+        automatable = ssvc.get("automatable", "")
+        lines.append(
+            f"SSVC triage outcome: {outcome.upper()}. "
+            f"Exploitation evidence: {exploitation}. "
+            f"Automatable at scale: {automatable}."
+        )
+        if outcome in ("act", "attend"):
+            lines.append(
+                "This finding requires urgent attention — reflect that urgency in your "
+                "business impact and attack scenario."
+            )
+
+    # Priority context
+    if finding.priority:
+        lines.append(f"Risk priority band: {finding.priority}. Risk score: {finding.risk_score}.")
+
     if degradations:
         lines.append(
             "The following intelligence sources were unavailable for this finding: "
@@ -1181,6 +1217,10 @@ def _analysis_instruction(
     lines.append(
         "Cite a source id for every factual claim. The ids you may cite are the EVIDENCE "
         "section headings below and nothing else."
+    )
+    lines.append(
+        "Include `adversary_profile`, `mitre_tactics`, and `detection_hint` fields "
+        "in your response — these are required by the current schema."
     )
     return build_evidence_prompt("\n".join(lines), evidence=evidence)
 

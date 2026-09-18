@@ -20,6 +20,7 @@
 
   <div class="meta">
     {% if f.priority %}<span class="pill">{{ f.priority }}</span>{% endif %}
+    {% if f.ssvc %}<span class="pill" style="{% if f.ssvc.outcome=='act' %}background:#fee2e2;color:#991b1b;{% elif f.ssvc.outcome=='attend' %}background:#ffedd5;color:#9a3412;{% elif f.ssvc.outcome=='track*' %}background:#fef9c3;color:#854d0e;{% else %}background:#dcfce7;color:#166534;{% endif %}">SSVC:{{ f.ssvc.outcome | upper }}</span>{% endif %}
     {% if f.risk_score is not none %}Risk {{ f.risk_score }}/100 &middot; {% endif %}
     {% if f.scanner %}{{ f.scanner }} &middot; {% endif %}
     {% if f.status %}{{ f.status }}{% endif %}
@@ -69,6 +70,20 @@
   {% if audience == "technical" and f.analysis.attack_scenario %}
     <h5>Attack scenario</h5>
     {% for para in f.analysis.attack_scenario | paragraphs %}<p>{{ para }}</p>{% endfor %}
+  {% endif %}
+  {% if audience == "technical" and f.analysis.adversary_profile %}
+    <h5>Adversary profile</h5>
+    <p>{{ f.analysis.adversary_profile }}</p>
+  {% endif %}
+  {% if audience == "technical" and f.analysis.mitre_tactics %}
+    <p class="muted"><strong>MITRE ATT&amp;CK tactics:</strong>
+      {% for t in f.analysis.mitre_tactics %}<span class="pill">{{ t }}</span>{% if not loop.last %} {% endif %}{% endfor %}
+    </p>
+  {% endif %}
+  {% if audience == "technical" and f.analysis.detection_hint %}
+    <div style="border-left:3px solid #1d4ed8;background:#eff6ff;padding:6pt 10pt;border-radius:4px;margin:6pt 0;">
+      <strong>Detection hint:</strong> {{ f.analysis.detection_hint }}
+    </div>
   {% endif %}
   {% if f.analysis.skipped_reason %}
     <p class="muted">Analysis not performed: {{ f.analysis.skipped_reason }}</p>

@@ -19,6 +19,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
+import { SSVCBadge, SSVCMatrix } from "@/components/ui/SSVCBadge";
 import { useApiResource, useMutation } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -364,6 +365,47 @@ export default function FindingDetailPage() {
                     </section>
                   )}
 
+                  {/* New adversary profile */}
+                  {f.ai_adversary_profile && (
+                    <section>
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-faint">
+                        Adversary profile
+                      </h4>
+                      <p className="mt-1 whitespace-pre-wrap text-sm text-fg">
+                        {f.ai_adversary_profile}
+                      </p>
+                    </section>
+                  )}
+
+                  {/* MITRE ATT&CK tactics */}
+                  {f.ai_mitre_tactics && f.ai_mitre_tactics.length > 0 && (
+                    <section>
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-faint">
+                        MITRE ATT&CK tactics
+                      </h4>
+                      <div className="mt-1.5 flex flex-wrap gap-2">
+                        {f.ai_mitre_tactics.map((tactic) => (
+                          <span
+                            key={tactic}
+                            className="rounded border border-line bg-surface-2 px-2 py-0.5 text-xs font-medium text-fg"
+                          >
+                            {tactic}
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Detection hint */}
+                  {f.ai_detection_hint && (
+                    <section className="rounded-lg border border-info/30 bg-info/5 p-3">
+                      <h4 className="text-xs font-semibold uppercase tracking-wide text-info">
+                        🔍 Detection hint
+                      </h4>
+                      <p className="mt-1 text-sm text-fg">{f.ai_detection_hint}</p>
+                    </section>
+                  )}
+
                   {/* The evidence (or the explicit unverifiable notice) is mandatory (FR-024). */}
                   <EvidenceBlock evidence={f.ai_evidence} />
 
@@ -459,13 +501,50 @@ export default function FindingDetailPage() {
 
         {/* Sidebar */}
         <div className="space-y-6">
+          {/* SSVC triage */}
+          {(() => {
+            const ssvc = f.risk_factors?.ssvc as
+              | {
+                  outcome?: string;
+                  exploitation?: string;
+                  automatable?: string;
+                  technical_impact?: string;
+                  mission_prevalence?: string;
+                }
+              | undefined;
+            return ssvc ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>SSVC Triage</CardTitle>
+                  <SSVCBadge
+                    outcome={ssvc.outcome}
+                    exploitation={ssvc.exploitation}
+                    automatable={ssvc.automatable}
+                  />
+                </CardHeader>
+                <CardBody>
+                  <SSVCMatrix
+                    exploitation={ssvc.exploitation ?? null}
+                    automatable={ssvc.automatable ?? null}
+                    technicalImpact={ssvc.technical_impact ?? null}
+                    missionPrevalence={ssvc.mission_prevalence ?? null}
+                    outcome={ssvc.outcome ?? null}
+                  />
+                  <p className="mt-3 text-xs text-faint">
+                    Stakeholder-Specific Vulnerability Categorization (CISA SSVC v2.0).
+                    Deterministic — recomputable from the enrichment data.
+                  </p>
+                </CardBody>
+              </Card>
+            ) : null;
+          })()}
+
           {/* Threat intelligence — FR-020: every provider's status is shown; unavailable ≠ safe. */}
           <Card>
             <CardHeader>
               <CardTitle>Threat intelligence</CardTitle>
               {enr && <EnrichmentBadge status={enr.status} />}
-            </CardHeader>
-            <CardBody>
+            </CardHeader>            <CardBody>
               {!enr ? (
                 <p className="text-sm text-muted">
                   No threat intelligence available for this finding.

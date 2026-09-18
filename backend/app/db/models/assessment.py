@@ -87,6 +87,9 @@ class Assessment(Base, TenantMixin, TimestampMixin):
     plan: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
     #: Structured interpretation of the original request (FR-004).
     request_interpretation: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
+    #: Extended intelligence metadata: attack_paths, compound_risks, coverage_gaps.
+    #: Written by the attack_path node; read by the report context and dashboard.
+    extra_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
     #: Denormalized counters. DefectDojo remains the source of truth (FR-016); these
     #: exist so the dashboard and list views do not fan out to it on every render.

@@ -1,266 +1,381 @@
-# Cynux
+# Cynux — AI-Powered Security Assessment Platform
 
-AI-powered security assessment platform. You give it a plain-language objective
-("assess the security posture of staging.example.com"); a LangGraph agent
-interprets it, runs **passive** reconnaissance, discovers assets, and then
-**stops and waits for a human to approve** what gets actively scanned. On
-approval it runs Nmap / Nuclei / OWASP ZAP inside locked-down containers, imports
-the results into **DefectDojo** (the authoritative vulnerability store), enriches
-them with threat intelligence (NVD, CISA KEV, EPSS, MISP), prioritises
-deterministically, drafts **advisory-only** remediation, and can file Jira
-tickets, notify Slack/email, and render a report.
+> **God-tier cybersecurity AI.** Cynux is a full-stack, agentic security assessment platform that
+> combines automated scanning, multi-source threat intelligence, SSVC triage, kill-chain attack
+> path simulation, and adversarial-framing AI analysis into a single operator-controlled pipeline.
 
-> **Project status.** The backend (agent, scanners, integrations, services,
-> API), the web frontend (`frontend/`), and this full self-hosted stack are all
-> in place and pass their offline gates. What has **not** been done for you is a
-> live end-to-end run: the stack must be brought up on a Docker host with your own
-> secrets (LLM key, DefectDojo token) before it does anything. The Quickstart
-> below is that bring-up. `make up` starts the whole system including the web app;
-> `make up-backend` starts everything except the frontend if you prefer to drive
-> the REST API directly.
+---
+
+## What It Does
+
+Cynux runs a deterministic, human-gated assessment pipeline driven by a LangGraph AI agent:
+
+```
+Understand → Plan → Recon → Discover Assets
+    ↓ (human approval gate)
+Execute Scanners → Import Findings → Enrich Intelligence
+    ↓ (NEW)
+Attack Path + SSVC + Correlation → AI Analysis → Prioritize
+    ↓
+Remediate → Create Actions → Generate Report
+```
+
+At every stage the operator sees exactly what the agent proposes, and nothing runs against a target
+without an authorization record and a granted approval. The pipeline degrades gracefully when a
+scanner fails or an intelligence provider is unreachable — it never reports "unknown" as safe.
 
 ---
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph client [Client]
-        UI[Next.js web app]
-    end
-    subgraph app [Cynux — cynux_net]
-        API[FastAPI api]
-        WK[Agent worker]
-        PG[(PostgreSQL)]
-        RD[(Redis streams + pub/sub)]
-        MIN[(MinIO / S3 artifacts)]
-        DD[DefectDojo]
-    end
-    subgraph scan [cynux_scanner_net — egress only]
-        SC[Nmap / Nuclei / ZAP / ReconFTW]
-    end
-    TGT[(Assessment target)]
-
-    UI -- HTTP + WebSocket --> API
-    API <--> PG
-    API <--> RD
-    WK <--> PG
-    WK <--> RD
-    WK <--> MIN
-    WK <--> DD
-    WK -- spawns via host Docker daemon --> SC
-    SC -- egress --> TGT
+```
+frontend/          Next.js 15 (App Router, TypeScript, Tailwind)
+backend/app/
+  agent/           LangGraph pipeline (nodes, graph, prompts, state)
+  api/             FastAPI REST + WebSocket
+  db/              SQLAlchemy models + Alembic migrations
+  integrations/    DefectDojo · NVD · CISA KEV · EPSS · MISP · Jira · Slack · MinIO
+  llm/             Multi-provider gateway (Anthropic · OpenAI · Google)
+  reporting/       Jinja2 HTML + WeasyPrint PDF reports
+  scanners/        Nmap · Nuclei · ZAP · ReconFTW adapters (subprocess, no Docker)
+  services/        Business logic layer
+  worker/          Redis Streams consumer (crash-safe, checkpointed)
 ```
 
-**The assessment lifecycle** (with the human-in-the-loop gate that defines the
-product):
-
-1. Operator submits an objective and attests they are authorised to test the
-   target (FR-006).
-2. Agent interprets the objective and plans.
-3. **Passive** recon + asset discovery only (nothing that touches the target
-   intrusively, FR-008).
-4. **STOP → human approval (FR-011).** The agent surfaces the discovered assets
-   and its proposed active-scan plan. Scanning does **not** proceed until an
-   operator approves; the approved payload is the sole authority for what runs.
-5. Active scanners run in isolated containers (SEC-004).
-6. Findings are imported into **DefectDojo**, which owns parsing, dedup and
-   vulnerability state (FR-016/017/018) — Cynux never re-implements that.
-7. Threat-intel enrichment; unreachable feeds report `UNAVAILABLE` rather than a
-   false negative (FR-020).
-8. Deterministic prioritisation, then advisory-only AI remediation where every
-   claim cites its evidence (FR-024/025).
-9. Optional Jira tickets, Slack/email notifications, and a rendered report.
-
-**Services** (see [`docker-compose.yml`](docker-compose.yml)):
-
-| Service | Purpose |
-| --- | --- |
-| `postgres` | Application database |
-| `redis` | Agent run stream + event pub/sub |
-| `minio` / `minio-init` | S3-compatible artifact store; init creates the bucket |
-| `migrate` | Runs `alembic upgrade head` once, then exits |
-| `api` | FastAPI app (`/healthz`, `/readyz`, REST, WebSocket) |
-| `worker` | LangGraph agent worker; spawns scanner containers |
-| `frontend` | Next.js web app |
-| `defectdojo-*` | Bundled DefectDojo stack (compose profile `defectdojo`) |
-
-**Network isolation (SEC-004).** App and data services share `cynux_net`. The
-scanner containers the worker launches join `cynux_scanner_net`, which **no data
-service is attached to** — a compromised scanner image cannot reach Postgres,
-Redis, or MinIO. That network still has egress, because scanners must reach the
-target under assessment.
+**Infrastructure (run natively — no Docker required):**
+- PostgreSQL 16
+- Redis 7
+- MinIO (or real AWS S3)
+- DefectDojo (vulnerability management source of truth)
 
 ---
 
-## Prerequisites
+## New Capabilities (September 2026)
 
-- **Python 3.11+** and **Node.js 22+** (for Native execution without Docker).
-- **PostgreSQL 16** & **Redis 7** (or cloud-managed databases on Render/Neon/Upstash).
-- **LLM API Key** — OpenAI (`CYNUX_LLM__OPENAI_API_KEY`) or Anthropic (`CYNUX_LLM__ANTHROPIC_API_KEY`).
-- *(Optional)* **Docker & Docker Compose v2** if you prefer containerized deployment.
+### 1. Kill-Chain Attack Path Simulation
+
+The new `attack_path` agent node runs after threat intelligence enrichment. It:
+
+- **Generates up to 3 realistic multi-hop attack paths** from the most exploitable entry
+  point to the highest-criticality crown jewel, grounded in actual scanner findings.
+- **Identifies chokepoints** — the 1-2 remediations that break all discovered paths.
+- **Quantifies blast radius** in business terms.
+- Stores paths in `assessment.extra_data["attack_paths"]` for the report and dashboard.
+
+```python
+# backend/app/services/attack_path.py
+paths = await generate_attack_paths(session, assessment, gateway=gateway, settings=settings)
+# Returns: List[AttackPath] ordered by likelihood (high → low)
+```
+
+### 2. SSVC Triage (CISA Framework)
+
+Every finding now gets an SSVC (Stakeholder-Specific Vulnerability Categorization) decision
+stored in `finding.risk_factors["ssvc"]`:
+
+| Outcome | Meaning |
+|---------|---------|
+| **ACT** | Immediate action — actively exploited, high impact |
+| **ATTEND** | Address within 1 week |
+| **TRACK★** | Monitor closely, ready to act |
+| **TRACK** | Monitor, no immediate action needed |
+
+SSVC is **fully deterministic** — the same enrichment data always produces the same outcome.
+It weighs: exploitation evidence (KEV + EPSS), automatability (CVSS vector + CWE), technical
+impact (scope change, confidentiality/integrity/availability), and mission prevalence
+(asset criticality).
+
+```python
+# backend/app/services/ssvc.py
+result = evaluate_ssvc(finding, enrichment)  # → SSVCResult(outcome=SSVCOutcome.ACT, ...)
+```
+
+### 3. Cross-Finding Correlation Engine
+
+The correlation service detects three things scanners cannot:
+
+- **False positives** — version-detection mismatches, WAF-protected endpoints, scanner artifacts
+- **Duplicate groupings** — same weakness reported under different names by different scanners
+- **Compound risks** — SSRF + IMDSv1 = cloud credential theft; two medium findings → critical chain
+
+Phase 1 is deterministic (SHA-256 fingerprint on CWE + endpoint + asset). Phase 2 uses the AI
+only for genuinely ambiguous cases, keeping token cost bounded.
+
+### 4. Elite Adversarial Finding Analysis
+
+The AI analysis prompt was upgraded from "explain this to a developer" to a senior red-team
+operator's framing. Each finding analysis now includes:
+
+| Field | Content |
+|-------|---------|
+| `explanation` | Root cause, not just symptom — why the code pattern creates the exposure |
+| `business_impact` | Regulatory exposure, revenue risk, specific regulation (GDPR, PCI DSS, etc.) |
+| `attack_scenario` | Concrete kill-chain: the exact request an attacker sends, the tool they use, where they land |
+| `adversary_profile` | Nation-state / organized crime / opportunistic — grounded in KEV/EPSS evidence |
+| `mitre_tactics` | ATT&CK tactic categories this finding directly enables |
+| `detection_hint` | The specific SIEM query or log source that catches exploitation |
+
+All fields are guarded by FR-024: every factual claim must cite a source from the evidence
+block. Unsupported claims are replaced by "Unable to verify from available security intelligence."
+
+### 5. Dashboard Upgrades
+
+The dashboard now shows:
+
+- **Risk Heat Map** — 5×5 likelihood × impact matrix built from severity and priority
+- **SSVC Triage Strip** — counts of ACT / ATTEND / TRACK★ / TRACK across all findings  
+- **Kill-Chain Panel** — attack paths from the most recent completed assessment
+- **Severity/Priority progress bars** — proportional bars instead of plain counts
+
+### 6. Report Upgrades
+
+The PDF/HTML report now includes:
+
+- **Attack Paths appendix** — each kill chain with steps, blast radius, chokepoints
+- **Compound Risks appendix** — multi-finding attack chains
+- **Coverage Gaps** — attack surface not covered by the configured scanners
+- **SSVC badge** next to every finding's priority pill
+- **Detection hint box** (technical audience) — the specific detection logic
+- **Adversary profile** — threat actor context per finding
 
 ---
 
-## Quickstart
+## Getting Started
 
-### Native Execution (No Docker Required)
+### Prerequisites
 
-1. **Setup Environment**:
-   ```bash
-   cp .env.example .env
-   # Edit .env and set your CYNUX_LLM__OPENAI_API_KEY
-   ```
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Python | ≥ 3.11 | Backend |
+| Node.js | ≥ 22 | Frontend |
+| PostgreSQL | 16 | Primary database |
+| Redis | 7 | Job queue, pubsub, caching |
+| MinIO *(optional)* | latest | Artifact storage (or use real S3) |
+| DefectDojo *(optional)* | latest | Vulnerability management |
 
-2. **Start All Services**:
-   - **Windows (PowerShell)**:
-     ```powershell
-     .\start.ps1
-     ```
-   - **Linux / macOS**:
-     ```bash
-     bash start.sh
-     ```
-
-3. **Access Application**:
-   - Frontend Web App: <http://localhost:3000>
-   - FastAPI Backend & Health: <http://localhost:8000/healthz>
-   - Interactive API Docs: <http://localhost:8000/docs>
-
----
-
-### Cloud Hosting (24/7 Free)
-
-This repository includes native production blueprints for **Render** and **Vercel** (`render.yaml` & `frontend/vercel.json`):
-
-- **Render Blueprint (Backend & Database)**: Deploy natively using Python 3.12 without Docker:
-  👉 [Deploy Backend on Render](https://render.com/deploy?repo=https://github.com/jyotirjoshi/cyber-)
-- **Vercel (Frontend UI)**: Deploy Next.js frontend with 1-click:
-  👉 [Deploy Frontend on Vercel](https://vercel.com/new/clone?repository-url=https://github.com/jyotirjoshi/cyber-&root-directory=frontend)
-
----
-
-### Docker Deployment (Optional)
+### 1. Environment
 
 ```bash
-# Bring up full Docker stack
-make up            # Full stack at :3000
+cp .env.example .env
+# Fill in required secrets:
+#   CYNUX_SECURITY__JWT_SECRET       (openssl rand -hex 32)
+#   CYNUX_SECURITY__CREDENTIAL_ENCRYPTION_KEY  (python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+#   CYNUX_DB__PASSWORD
+#   CYNUX_LLM__PROVIDER + API key
 ```
 
+### 2. Install dependencies
 
-### Using an external DefectDojo
+```bash
+# Backend
+cd backend
+pip install -e ".[dev]"
 
-You don't have to run the bundled DefectDojo. Point `CYNUX_DEFECTDOJO__BASE_URL`
-and `CYNUX_DEFECTDOJO__API_TOKEN` at your own instance, skip
-`make defectdojo-up` / `make defectdojo-token`, and just `make up-backend`.
-
----
-
-## Configuration
-
-[`.env.example`](.env.example) is the single source of truth for configuration —
-every variable is documented there and mirrors the settings contract in
-`backend/app/core/config.py`. Conventions:
-
-- Prefix everything with `CYNUX_`.
-- Nested groups use a double underscore: `CYNUX_DB__PASSWORD`,
-  `CYNUX_SCANNER__MEMORY_LIMIT_MB`, and so on.
-- List values accept CSV or JSON.
-
-The API and worker validate their configuration at startup and **fail fast** with
-a clear message if a required secret is missing. Required in every environment:
-`CYNUX_SECURITY__JWT_SECRET` (≥ 32 chars), `CYNUX_SECURITY__CREDENTIAL_ENCRYPTION_KEY`
-(Fernet key), `CYNUX_DB__PASSWORD`, and an LLM provider + key + model. The worker
-additionally requires object storage and DefectDojo to be configured. `make
-secrets` fills the first set for you; the LLM key and the DefectDojo token are the
-two you provide.
-
-### Production hardening
-
-When `CYNUX_ENVIRONMENT=production`, startup validation additionally **refuses to
-boot** if debug is on, if `*` appears in `CYNUX_CORS_ORIGINS` or
-`CYNUX_ALLOWED_HOSTS`, if `CYNUX_PUBLIC_BASE_URL` is not HTTPS, or if DefectDojo
-TLS verification is disabled. Set those correctly before deploying beyond
-localhost.
-
----
-
-## Make targets
-
-Run `make help` for the full list. The ones you'll use most:
-
-| Target | What it does |
-| --- | --- |
-| `make env` | Create `.env` from the template |
-| `make secrets` | Regenerate all change-me secrets in `.env` (keeps your LLM key) |
-| `make defectdojo-up` | Start only DefectDojo |
-| `make defectdojo-token` | Mint a DefectDojo API token into `.env` |
-| `make up` | Start the full stack |
-| `make up-backend` | Start the backend only (no frontend) |
-| `make restart` | Rebuild + restart `api` and `worker` |
-| `make logs` | Tail all logs |
-| `make ps` | Service status |
-| `make migrate` | Run DB migrations once |
-| `make down` / `make down-v` | Stop (keep / delete volumes) |
-| `make backend-gate` | Offline backend gate: verify + ruff + mypy |
-
----
-
-## Security notes for operators
-
-- **Only run this against systems you are authorised to test.** The approval gate
-  (step 4 above) is a deliberate control, not a formality — active scanning is
-  driven solely by what a human approves.
-- **Scanner isolation (SEC-004).** Scanner containers run read-only, non-root,
-  with dropped capabilities, no new privileges, and CPU/memory/PID limits, on an
-  egress-only network with no route to your data services. Only a fixed set of
-  pinned scanner images may be launched.
-- **The Docker socket.** By default the `worker` service mounts
-  `/var/run/docker.sock` and runs as root so it can launch sibling scanner
-  containers via the host daemon. This grants the worker host-level control of
-  Docker — acceptable for a single-tenant self-hosted deployment, but for a
-  hardened setup put a Docker socket proxy in front of it and set
-  `CYNUX_SCANNER__DOCKER_HOST=tcp://docker-proxy:2375`, then drop the root
-  override and socket mount.
-- **Artifact mount.** The worker bind-mounts `CYNUX_ARTIFACT_HOST_DIR` at the
-  same path inside the container on purpose: that path is handed to the host
-  daemon as the bind source for scanner containers, and a bind source is always
-  resolved on the host. Keep the two equal.
-- **Local MinIO and SSE.** `.env.example` sets `CYNUX_STORAGE__SSE=` (empty) so
-  uploads work against KMS-less local MinIO. For real S3, set it to `AES256` (or
-  configure KMS).
-- **Credentials** are encrypted at rest with a Fernet key and are never logged,
-  echoed in errors, or sent to the LLM.
-
----
-
-## Repository layout
-
-```
-backend/        FastAPI app, LangGraph agent, scanners, integrations, services
-  app/          application code (config, db, agent, api, scanners, services, ...)
-  alembic/      database migrations
-  tools/        offline gate (verify.py)
-frontend/       Next.js 15 web app
-docker/         Dockerfiles + operator helper scripts
-docker-compose.yml
-.env.example    configuration contract
-Makefile        operator entrypoint
+# Frontend
+cd frontend
+npm install
 ```
 
-## Troubleshooting
+### 3. Database migrations
 
-- **`worker` keeps restarting** — almost always missing config: no LLM key, or
-  DefectDojo not yet configured. Check `make logs` for the fail-fast message,
-  confirm you ran `make defectdojo-token`, then `make restart`.
-- **`make defectdojo-token` says it can't reach DefectDojo** — DefectDojo isn't
-  finished initialising. Run `make ps` and wait until `defectdojo-initializer`
-  shows `Exited (0)`, then retry.
-- **Port already in use** — override the published port in `.env`
-  (`CYNUX_API_PORT`, `CYNUX_FRONTEND_PORT`, `DEFECTDOJO_PORT`, `CYNUX_POSTGRES_PORT`,
-  `CYNUX_MINIO_API_PORT`, `CYNUX_MINIO_CONSOLE_PORT`).
-- **`api` is up but `/readyz` returns 503** — the database isn't reachable yet;
-  `/readyz` is intentionally strict. `/healthz` (liveness) stays 200 regardless.
-- **Reset everything** — `make down-v` removes all volumes (Postgres, Redis,
-  MinIO, and DefectDojo data). Destructive; use when you want a clean slate.
+```bash
+cd backend
+alembic upgrade head
+```
 
+This runs all three migrations:
+- `0001_initial_schema` — full schema
+- `0002_assessment_metadata_ssvc` — `assessments.extra_data` (attack paths, compound risks)
+- `0003_finding_elite_ai_fields` — `ai_adversary_profile`, `ai_mitre_tactics`, `ai_detection_hint`
+
+### 4. Run
+
+**Linux/macOS:**
+```bash
+bash start.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\start.ps1
+```
+
+**Or start services individually:**
+```bash
+# Terminal 1 — API
+cd backend && uvicorn --factory app.api.app:create_app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2 — Worker
+cd backend && python -m app.worker
+
+# Terminal 3 — Frontend
+cd frontend && npm run dev
+```
+
+Open: http://localhost:3000
+
+---
+
+## Configuration Reference
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `CYNUX_SECURITY__JWT_SECRET` | JWT signing key, ≥ 32 chars |
+| `CYNUX_SECURITY__CREDENTIAL_ENCRYPTION_KEY` | Fernet key for integration credentials |
+| `CYNUX_DB__PASSWORD` | PostgreSQL password |
+| `CYNUX_LLM__PROVIDER` | `anthropic` \| `openai` \| `google` |
+| `CYNUX_LLM__ANTHROPIC_API_KEY` *(or openai/google)* | Provider API key |
+| `CYNUX_LLM__DEFAULT_MODEL` | e.g. `claude-sonnet-4-5` |
+
+### Scanner binaries (native mode)
+
+Cynux runs scanners as local processes. Install the tools and optionally override paths:
+
+```env
+CYNUX_SCANNER__BIN_NMAP=nmap
+CYNUX_SCANNER__BIN_NUCLEI=nuclei
+CYNUX_SCANNER__BIN_ZAP=zap.sh
+CYNUX_SCANNER__BIN_RECONFTW=reconftw.sh
+```
+
+Nmap and Nuclei work out of the box on Linux. On Windows, use WSL or adjust the binary paths.
+
+### LLM roles
+
+Each pipeline role can use a different model:
+
+```env
+CYNUX_LLM__DEFAULT_MODEL=claude-sonnet-4-5
+CYNUX_LLM__ROLE_MODELS={"planning":"claude-haiku-4-5","code_remediation":"claude-opus-4-5"}
+```
+
+---
+
+## Pipeline Deep Dive
+
+### Agent Graph
+
+```
+START
+  └─ understand          Parse objective, detect prompt injection
+  └─ plan                Deterministic plan skeleton + AI rationale
+  └─ recon               ReconFTW passive recon
+  └─ discover_assets     Score + select assets for scanning
+  └─ [route]
+       ├─ (passive depth / no assets selected)
+       │    └─ analyze_findings ──────────────────────────────────────┐
+       └─ (active depth + assets selected)                            │
+            └─ request_approval    ← human gate (FR-011)              │
+            └─ execute_scanners    ← interrupt_before                 │
+            └─ import_findings     DefectDojo import                  │
+            └─ enrich_intelligence NVD + KEV + EPSS + MISP            │
+            └─ attack_path  ← NEW  SSVC + paths + correlation         │
+            └─ analyze_findings ◄──────────────────────────────────────┘
+  └─ prioritize_findings  Deterministic risk score (0-100)
+  └─ remediate_findings   Advisory fix guidance
+  └─ create_actions       Jira tickets + Slack notifications
+  └─ generate_report      HTML + PDF report
+END
+```
+
+### Risk Scoring Formula
+
+```
+score = severity(45) + kev(20) + epss(12) + exposure(10) + criticality(10) + ransomware(3)
+```
+
+Bands: P1 ≥ 75 · P2 ≥ 55 · P3 ≥ 38 · P4 ≥ 18 · P5 < 18
+
+### SSVC Decision Tree
+
+```
+Exploitation=Active + TechnicalImpact=Total           → ACT
+Exploitation=Active + MissionPrevalence=Critical      → ACT
+Exploitation=Active                                   → ATTEND
+Exploitation=PoC + Auto=Yes + Impact=Total + Mission≥Support → ATTEND
+Exploitation=None + Auto=Yes + Impact=Total + Mission=Critical → ATTEND
+Exploitation=PoC                                      → TRACK*
+Exploitation=None + Auto=Yes + Impact=Total           → TRACK*
+(default)                                             → TRACK
+```
+
+---
+
+## Security Design
+
+| Requirement | Implementation |
+|-------------|----------------|
+| **No default provider** | `CYNUX_LLM__PROVIDER` has no default; startup fails without it |
+| **Prompt injection** | Every untrusted value is fenced with `<<<UNTRUSTED label id=NONCE>>>` |
+| **No hallucination** | FR-024: every factual claim requires a cited source; invented CVEs/CVSS raise `UnverifiableClaimError` |
+| **Human approval gate** | `interrupt_before=["execute_scanners"]`; no scan runs without a granted `ScanApproval` row |
+| **Tenant isolation** | Every query includes `organization_id` filter; cross-tenant IDs return 404 |
+| **No secrets in logs** | `str(exc)` is never logged; only `type(exc).__name__` and `user_message` |
+| **No auto-apply** | Remediation patches are stored, never applied; FR-034 enforces this architecturally |
+| **Scanner sandbox** | Argv validated against `ARGV_SAFE` regex; no shell involved in subprocess execution |
+
+---
+
+## Development
+
+```bash
+# Lint + type check
+cd backend
+ruff check app && ruff format --check app && mypy app
+
+# Tests
+pytest --tb=short -q
+
+# Full gate
+python tools/verify.py && ruff check app && mypy app
+```
+
+```bash
+# Frontend
+cd frontend
+npm run lint
+npm run typecheck
+```
+
+---
+
+## New Files Added
+
+### Backend
+
+| File | Purpose |
+|------|---------|
+| `app/services/ssvc.py` | CISA SSVC v2.0 deterministic triage |
+| `app/services/attack_path.py` | Multi-hop kill-chain path generation |
+| `app/services/correlation.py` | False positive detection + compound risk synthesis |
+| `app/agent/nodes/attack_path.py` | Agent node wiring all three services |
+| `app/llm/prompts_enhanced.py` | 8 elite-level security AI prompts |
+| `alembic/versions/0002_*` | `assessments.extra_data` column |
+| `alembic/versions/0003_*` | `findings.ai_adversary_profile/mitre_tactics/detection_hint` |
+
+### Frontend
+
+| File | Purpose |
+|------|---------|
+| `components/ui/RiskHeatmap.tsx` | 5×5 likelihood × impact heat map |
+| `components/ui/AttackPathCard.tsx` | Kill-chain visualizer with chokepoints |
+| `components/ui/SSVCBadge.tsx` | SSVC outcome badge + decision matrix |
+| `app/(app)/dashboard/page.tsx` | Upgraded dashboard with all new panels |
+
+---
+
+## Credits & References
+
+- [CISA SSVC v2.0](https://www.cisa.gov/sites/default/files/publications/cisa-ssvc-guide%200.2.pdf) — triage framework
+- [Spring et al. 2021](https://arxiv.org/abs/1904.04965) — SSVC research paper
+- [FIRST EPSS](https://www.first.org/epss/) — exploit prediction scoring
+- [MITRE ATT&CK](https://attack.mitre.org/) — adversary tactic taxonomy
+- [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) — known exploited vulnerabilities
+- [DefectDojo](https://github.com/DefectDojo/django-DefectDojo) — vulnerability management
+- [LangGraph](https://github.com/langchain-ai/langgraph) — agent state machine
+- [Nuclei](https://github.com/projectdiscovery/nuclei) — vulnerability scanner
+- [Nmap](https://nmap.org/) — network scanner
+- [OWASP ZAP](https://www.zaproxy.org/) — web app scanner
+- [ReconFTW](https://github.com/six2dez/reconftw) — recon framework
