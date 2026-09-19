@@ -81,7 +81,7 @@ class Integration(Base, TenantMixin, TimestampMixin):
         # An unrecognized kind is a row that can be configured through the API and then
         # never used by anything, which looks to an operator like a working integration.
         CheckConstraint(
-            "kind IN ('defectdojo','jira','slack','email','dify','misp','nvd','github','gitlab')",
+            "kind IN ('llm','defectdojo','jira','slack','email','dify','misp','nvd','github','gitlab')",
             name="valid_integration_kind",
         ),
         CheckConstraint(

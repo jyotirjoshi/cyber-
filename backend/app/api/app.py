@@ -76,6 +76,16 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class TrustedHostWithHealthProbe(TrustedHostMiddleware):
+    """Keep host-header protection while accepting Railway's hostless health probe."""
+
+    async def __call__(self, scope: object, receive: object, send: object) -> None:
+        if isinstance(scope, dict) and scope.get("type") == "http" and scope.get("path") == "/healthz":
+            await self.app(scope, receive, send)  # type: ignore[arg-type]
+            return
+        await super().__call__(scope, receive, send)  # type: ignore[arg-type]
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -122,7 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expose_headers=["x-request-id"],
     )
     if list(settings.allowed_hosts) != ["*"]:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
+        app.add_middleware(TrustedHostWithHealthProbe, allowed_hosts=list(settings.allowed_hosts))
     app.add_middleware(RequestContextMiddleware)
 
     install_exception_handlers(app)

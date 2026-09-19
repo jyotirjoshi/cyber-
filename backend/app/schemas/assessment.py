@@ -29,6 +29,8 @@ from app.db.enums import (
     AssessmentStage,
     AssessmentStatus,
     Criticality,
+    EngagementType,
+    ExecutionMode,
     RiskLevel,
     ScannerName,
     Scope,
@@ -64,6 +66,8 @@ class AssessmentCreateIn(BaseModel):
     title: str | None = Field(default=None, max_length=300)
     scope: Scope = Scope.EXTERNAL
     depth: AssessmentDepth = AssessmentDepth.STANDARD
+    engagement_type: EngagementType = EngagementType.WEB_APPLICATION
+    execution_mode: ExecutionMode = ExecutionMode.SUPERVISED
     #: Free-text intent, interpreted by the agent's request-understanding node (FR-004).
     #: Treated as untrusted input for prompt-injection purposes (SEC-005).
     objective: str | None = Field(default=None, max_length=4000)
@@ -209,6 +213,8 @@ class AssessmentOut(BaseModel):
     progress_percent: int = Field(ge=0, le=100)
     scope: Scope
     depth: AssessmentDepth
+    engagement_type: EngagementType
+    execution_mode: ExecutionMode
 
     findings_total: int = 0
     findings_critical: int = 0

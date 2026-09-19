@@ -37,6 +37,7 @@ export type Permission =
   | "asset:tag"
   | "finding:read"
   | "finding:analyze"
+  | "finding:validate"
   | "finding:remediate"
   | "ticket:create"
   | "report:read"
@@ -126,6 +127,27 @@ export type AssessmentDepth = "passive" | "standard" | "deep";
 
 export type Scope = "external" | "internal" | "application" | "code";
 
+export type EngagementType =
+  | "web_application"
+  | "api_security"
+  | "mobile_application"
+  | "llm_agentic_application"
+  | "network_external"
+  | "network_internal"
+  | "active_directory"
+  | "cloud_security"
+  | "code_review"
+  | "threat_modeling"
+  | "attack_surface_monitoring"
+  | "devsecops_pipeline"
+  | "threat_hunting"
+  | "code_remediation"
+  | "red_team"
+  | "supply_chain";
+
+export type ExecutionMode = "supervised" | "background" | "interactive";
+export type ValidationStatus = "unvalidated" | "confirmed" | "rejected" | "recheck_required";
+
 export type AssetStatus = "active" | "inactive" | "unreachable" | "out_of_scope";
 
 export type Criticality = "critical" | "high" | "normal" | "low" | "unknown";
@@ -212,6 +234,7 @@ export type ApprovalKind =
   | "ticket_bulk_create";
 
 export type IntegrationKind =
+  | "llm"
   | "defectdojo"
   | "jira"
   | "slack"
@@ -411,6 +434,8 @@ export interface AssessmentCreateIn {
   title?: string | null;
   scope?: Scope;
   depth?: AssessmentDepth;
+  engagement_type?: EngagementType;
+  execution_mode?: ExecutionMode;
   objective?: string | null;
   authorization: AuthorizationIn;
   notify?: string[];
@@ -509,6 +534,8 @@ export interface AssessmentOut {
   progress_percent: number;
   scope: Scope;
   depth: AssessmentDepth;
+  engagement_type: EngagementType;
+  execution_mode: ExecutionMode;
   findings_total: number;
   findings_critical: number;
   findings_high: number;
@@ -696,12 +723,15 @@ export interface FindingOut {
   risk_factors: Record<string, unknown>;
   asset_criticality: Criticality | null;
   in_kev: boolean | null;
+  validation_status: ValidationStatus;
+  validation_checked_at: IsoDateTime | null;
   first_seen_at: IsoDateTime | null;
   last_seen_at: IsoDateTime | null;
   created_at: IsoDateTime;
 }
 
 export interface FindingDetailOut extends FindingOut {
+  validation_proof: Record<string, unknown>;
   ai_explanation: string | null;
   ai_business_impact: string | null;
   ai_attack_scenario: string | null;
@@ -721,6 +751,12 @@ export interface FindingDetailOut extends FindingOut {
   remediations: RemediationOut[];
   tickets: TicketLinkOut[];
   asset: AssetOut | null;
+}
+
+export interface ValidateFindingIn {
+  status: Exclude<ValidationStatus, "unvalidated">;
+  summary?: string | null;
+  evidence_references?: string[];
 }
 
 export interface FindingFilter {

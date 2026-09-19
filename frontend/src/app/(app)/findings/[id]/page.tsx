@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Field, Select, Textarea } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
@@ -25,7 +26,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
 import { formatDate, formatDateTime, humanize } from "@/lib/format";
-import type { EnrichmentStatus } from "@/lib/types";
+import type { EnrichmentStatus, ValidateFindingIn } from "@/lib/types";
 
 /**
  * FR-024: the exact, verbatim string shown when an AI claim has no backing evidence. It must read
@@ -160,6 +161,7 @@ export default function FindingDetailPage() {
 
   const canRead = can("finding:read");
   const canAnalyze = can("finding:analyze");
+  const canValidate = can("finding:validate");
   const canRemediate = can("finding:remediate");
   const canTicket = can("ticket:create");
 
@@ -194,6 +196,21 @@ export default function FindingDetailPage() {
     },
     onError: (e) =>
       toast({ title: "Couldn't create ticket", description: getErrorMessage(e), tone: "danger" }),
+  });
+  const [validationStatus, setValidationStatus] = React.useState<ValidateFindingIn["status"]>(
+    "confirmed",
+  );
+  const [validationSummary, setValidationSummary] = React.useState("");
+  const [evidenceReferences, setEvidenceReferences] = React.useState("");
+  const validateMut = useMutation((body: ValidateFindingIn) => api.findings.validate(id, body), {
+    onSuccess: (next) => {
+      setData(next);
+      setValidationSummary("");
+      setEvidenceReferences("");
+      toast({ title: "Validation recorded", tone: "ok" });
+    },
+    onError: (e) =>
+      toast({ title: "Couldn't record validation", description: getErrorMessage(e), tone: "danger" }),
   });
 
   if (!canRead) {
@@ -292,6 +309,95 @@ export default function FindingDetailPage() {
                   >
                     View affected asset: {f.asset.name} →
                   </Link>
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Validation</CardTitle>
+              <Badge tone={f.validation_status === "confirmed" ? "ok" : "neutral"}>
+                {humanize(f.validation_status)}
+              </Badge>
+            </CardHeader>
+            <CardBody className="space-y-4">
+              <p className="text-sm text-muted">
+                Validation is an auditable review of the finding. It does not alter DefectDojo
+                triage or run an exploit.
+              </p>
+              {f.validation_checked_at && (
+                <p className="text-xs text-faint">
+                  Last checked {formatDateTime(f.validation_checked_at)}
+                </p>
+              )}
+              {typeof f.validation_proof.summary === "string" && f.validation_proof.summary && (
+                <p className="rounded-lg border border-line bg-surface-2/40 px-3 py-2 text-sm text-fg">
+                  {f.validation_proof.summary}
+                </p>
+              )}
+              {canValidate && (
+                <div className="space-y-3 border-t border-line pt-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Disposition" htmlFor="validation-status">
+                      <Select
+                        id="validation-status"
+                        value={validationStatus}
+                        onChange={(e) =>
+                          setValidationStatus(e.target.value as ValidateFindingIn["status"])
+                        }
+                      >
+                        <option value="confirmed">Confirmed</option>
+                        <option value="rejected">Rejected</option>
+                        <option value="recheck_required">Recheck required</option>
+                      </Select>
+                    </Field>
+                    <Field
+                      label="Evidence references"
+                      htmlFor="validation-evidence"
+                      hint="Optional IDs, comma-separated."
+                    >
+                      <Textarea
+                        id="validation-evidence"
+                        className="min-h-10"
+                        value={evidenceReferences}
+                        onChange={(e) => setEvidenceReferences(e.target.value)}
+                        placeholder="run-42, ticket-123"
+                      />
+                    </Field>
+                  </div>
+                  <Field
+                    label="Review summary"
+                    htmlFor="validation-summary"
+                    hint="Required for a confirmed finding; never include secrets or exploit payloads."
+                  >
+                    <Textarea
+                      id="validation-summary"
+                      value={validationSummary}
+                      onChange={(e) => setValidationSummary(e.target.value)}
+                      placeholder="Describe the non-destructive observation and its scope."
+                    />
+                  </Field>
+                  <Button
+                    size="sm"
+                    loading={validateMut.loading}
+                    disabled={
+                      validationStatus === "confirmed" && validationSummary.trim().length === 0
+                    }
+                    onClick={() =>
+                      void validateMut.run({
+                        status: validationStatus,
+                        summary: validationSummary.trim() || null,
+                        evidence_references: evidenceReferences
+                          .split(",")
+                          .map((value) => value.trim())
+                          .filter(Boolean),
+                      })
+                    }
+                  >
+                    Record validation
+                  </Button>
+                  <InlineError message={validateMut.errorMessage} />
                 </div>
               )}
             </CardBody>

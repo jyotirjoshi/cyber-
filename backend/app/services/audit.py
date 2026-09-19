@@ -102,6 +102,7 @@ class AuditAction:
     FINDING_IMPORT = "finding.import"
     FINDING_STATUS_CHANGE = "finding.status.change"
     FINDING_ANALYZE = "finding.analyze"
+    FINDING_VALIDATE = "finding.validate"
     FINDING_PRIORITIZE = "finding.prioritize"
     FINDING_ENRICH = "finding.enrich"
     REMEDIATION_GENERATE = "remediation.generate"

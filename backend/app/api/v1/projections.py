@@ -50,6 +50,7 @@ from app.db.enums import (
     ScannerName,
     Scope,
     Severity,
+    ValidationStatus,
 )
 from app.db.models.agent import AgentStep
 from app.db.models.assessment import Approval, Assessment, AssessmentTarget
@@ -356,6 +357,8 @@ def _finding_base(finding: Finding, *, in_kev: bool | None) -> dict[str, Any]:
             Criticality(finding.asset_criticality) if finding.asset_criticality else None
         ),
         "in_kev": in_kev,
+        "validation_status": ValidationStatus(finding.validation_status),
+        "validation_checked_at": finding.validation_checked_at,
         "first_seen_at": finding.first_seen_at,
         "last_seen_at": finding.last_seen_at,
         "created_at": finding.created_at,
@@ -437,6 +440,7 @@ async def finding_detail_out(
     )
     return FindingDetailOut(
         **_finding_base(finding, in_kev=in_kev),
+        validation_proof=finding.validation_proof or {},
         ai_explanation=finding.ai_explanation,
         ai_business_impact=finding.ai_business_impact,
         ai_attack_scenario=finding.ai_attack_scenario,

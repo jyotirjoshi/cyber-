@@ -27,7 +27,7 @@ from urllib.parse import quote_plus
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.core.errors import ConfigurationError, NoLLMProviderError
+from app.core.errors import ConfigurationError
 
 Environment = Literal["development", "staging", "production"]
 LLMProvider = Literal["anthropic", "openai", "google"]
@@ -573,28 +573,32 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
     if not settings.db.password.get_secret_value():
         fatal.append("CYNUX_DB__PASSWORD is unset.")
 
-    # --- LLM: no default provider, by design --------------------------------
-    if settings.llm.provider is None and not settings.llm.role_providers:
-        raise NoLLMProviderError()
-
+    # --- LLM: an unconfigured deployment is valid for BYOK -----------------
+    # A platform-owned provider is still validated strictly when supplied.  With no
+    # provider the API starts so an organization admin can add its own key; requests
+    # that actually need AI still fail explicitly in LLMGateway.resolve().
     providers_in_use = {settings.llm.provider, *settings.llm.role_providers.values()}
-    for provider in sorted(p for p in providers_in_use if p):
-        if provider not in ("anthropic", "openai", "google"):
-            fatal.append(
-                f"Unknown LLM provider '{provider}'. Supported: anthropic, openai, google."
-            )
-        elif not settings.llm.key_for(provider):
-            fatal.append(
-                f"LLM provider '{provider}' is selected but "
-                f"CYNUX_LLM__{provider.upper()}_API_KEY is unset."
-            )
+    configured_providers = sorted(p for p in providers_in_use if p)
+    if not configured_providers:
+        warnings.append("No platform LLM is configured; organizations must provide their own key.")
+    else:
+        for provider in configured_providers:
+            if provider not in ("anthropic", "openai", "google"):
+                fatal.append(
+                    f"Unknown LLM provider '{provider}'. Supported: anthropic, openai, google."
+                )
+            elif not settings.llm.key_for(provider):
+                fatal.append(
+                    f"LLM provider '{provider}' is selected but "
+                    f"CYNUX_LLM__{provider.upper()}_API_KEY is unset."
+                )
 
-    missing_roles = sorted(set(REQUIRED_LLM_ROLES) - set(settings.llm.role_models))
-    if not settings.llm.default_model and missing_roles:
-        fatal.append(
-            "CYNUX_LLM__DEFAULT_MODEL is unset and these roles have no explicit model: "
-            f"{', '.join(missing_roles)}. Cynux will not guess a model name."
-        )
+        missing_roles = sorted(set(REQUIRED_LLM_ROLES) - set(settings.llm.role_models))
+        if not settings.llm.default_model and missing_roles:
+            fatal.append(
+                "CYNUX_LLM__DEFAULT_MODEL is unset and these roles have no explicit model: "
+                f"{', '.join(missing_roles)}. Cynux will not guess a model name."
+            )
 
     # --- production hardening -----------------------------------------------
     if settings.is_production:

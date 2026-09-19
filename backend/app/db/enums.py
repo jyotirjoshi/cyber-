@@ -62,6 +62,7 @@ class Permission(StrEnum):
     ASSET_TAG = "asset:tag"
     FINDING_READ = "finding:read"
     FINDING_ANALYZE = "finding:analyze"
+    FINDING_VALIDATE = "finding:validate"
     FINDING_REMEDIATE = "finding:remediate"
     TICKET_CREATE = "ticket:create"
     REPORT_READ = "report:read"
@@ -100,6 +101,7 @@ PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.ASSESSMENT_CANCEL,
             Permission.ASSET_TAG,
             Permission.FINDING_ANALYZE,
+            Permission.FINDING_VALIDATE,
             Permission.FINDING_REMEDIATE,
             Permission.TICKET_CREATE,
             Permission.REPORT_GENERATE,
@@ -240,6 +242,44 @@ class AssessmentDepth(StrEnum):
     PASSIVE = "passive"  # recon only, no active probing
     STANDARD = "standard"  # recon + nmap top ports + nuclei default severity
     DEEP = "deep"  # full port range, all nuclei severities, ZAP active
+
+
+class EngagementType(StrEnum):
+    """The authorized security engagement being performed."""
+
+    WEB_APPLICATION = "web_application"
+    API_SECURITY = "api_security"
+    MOBILE_APPLICATION = "mobile_application"
+    LLM_AGENTIC_APPLICATION = "llm_agentic_application"
+    NETWORK_EXTERNAL = "network_external"
+    NETWORK_INTERNAL = "network_internal"
+    ACTIVE_DIRECTORY = "active_directory"
+    CLOUD_SECURITY = "cloud_security"
+    CODE_REVIEW = "code_review"
+    THREAT_MODELING = "threat_modeling"
+    ATTACK_SURFACE_MONITORING = "attack_surface_monitoring"
+    DEVSECOPS_PIPELINE = "devsecops_pipeline"
+    THREAT_HUNTING = "threat_hunting"
+    CODE_REMEDIATION = "code_remediation"
+    RED_TEAM = "red_team"
+    SUPPLY_CHAIN = "supply_chain"
+
+
+class ExecutionMode(StrEnum):
+    """How an approved engagement is allowed to execute."""
+
+    SUPERVISED = "supervised"
+    BACKGROUND = "background"
+    INTERACTIVE = "interactive"
+
+
+class ValidationStatus(StrEnum):
+    """Disposition of a finding after safe, evidence-backed validation."""
+
+    UNVALIDATED = "unvalidated"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    RECHECK_REQUIRED = "recheck_required"
 
 
 class Scope(StrEnum):
@@ -472,6 +512,7 @@ class ApprovalKind(StrEnum):
 
 
 class IntegrationKind(StrEnum):
+    LLM = "llm"
     DEFECTDOJO = "defectdojo"
     JIRA = "jira"
     SLACK = "slack"
@@ -547,6 +588,8 @@ __all__ = [
     "Criticality",
     "CriticalitySource",
     "EnrichmentStatus",
+    "EngagementType",
+    "ExecutionMode",
     "FindingStatus",
     "IntegrationKind",
     "IntegrationStatus",
@@ -566,5 +609,6 @@ __all__ = [
     "Severity",
     "StepStatus",
     "StrEnum",
+    "ValidationStatus",
     "role_has",
 ]

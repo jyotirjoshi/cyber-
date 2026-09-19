@@ -26,7 +26,9 @@ def upgrade() -> None:
             "extra_data",
             JSONB(),
             nullable=False,
-            server_default="'{}'::jsonb",
+            # A SQL expression, not a quoted Python string.  Passing the string
+            # directly makes SQLAlchemy quote it again as text.
+            server_default=sa.text("'{}'::jsonb"),
         ),
     )
 

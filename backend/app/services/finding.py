@@ -59,6 +59,7 @@ from app.db.enums import (
     Permission,
     Priority,
     Severity,
+    ValidationStatus,
 )
 from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset
@@ -338,6 +339,42 @@ async def get_finding(
     repo: TenantRepository[Finding] = TenantRepository(session, Finding, principal.organization_id)
     options = _DETAIL_OPTIONS if detail else _LIST_OPTIONS
     return await repo.get_or_404(finding_id, *options)
+
+
+async def validate_finding(
+    session: AsyncSession,
+    principal: Principal,
+    finding_id: uuid.UUID,
+    *,
+    status: ValidationStatus,
+    summary: str | None,
+    evidence_references: list[str],
+) -> Finding:
+    """Record an operator's validation decision without changing DefectDojo state."""
+    principal.require(Permission.FINDING_VALIDATE)
+    finding = await get_finding(session, principal, finding_id, detail=False)
+    now = _now()
+    finding.validation_status = status.value
+    finding.validation_checked_at = now
+    finding.validation_proof = {
+        "summary": summary,
+        "evidence_references": evidence_references,
+        "validated_by": principal.email,
+        "validated_at": now.isoformat(),
+    }
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.FINDING_VALIDATE,
+        resource_type="finding",
+        resource_id=finding.id,
+        principal=principal,
+        organization_id=principal.organization_id,
+        detail={
+            "validation_status": status.value,
+            "evidence_references": len(evidence_references),
+        },
+    )
+    return finding
 
 
 async def list_findings(

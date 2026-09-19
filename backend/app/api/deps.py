@@ -36,7 +36,8 @@ from app.db.models.identity import User
 from app.db.session import get_db
 from app.integrations.dify import DifyClient
 from app.integrations.storage import ObjectStorage
-from app.llm.gateway import LLMGateway, get_gateway
+from app.llm.gateway import LLMGateway
+from app.services import integration as integration_service
 from app.schemas.common import PaginationParams, SortParams
 from app.services.auth import authenticate_token, resolve_principal
 from app.services.context import Principal
@@ -75,15 +76,17 @@ def _event_bus(redis: RedisDep, settings: SettingsDep) -> EventBus:
 EventBusDep = Annotated[EventBus, Depends(_event_bus)]
 
 
-def _gateway(settings: SettingsDep) -> LLMGateway:
-    """The process-wide LLM gateway (FR-021, FR-023, FR-024, FR-025).
-
-    A singleton: provider SDK clients and their connection pools are built lazily inside it
-    and shared across every request, so it is never closed per-request -- only when the
-    process shuts down. The gateway's credentials are deployment-wide, not per-tenant, so no
-    integration overlay is applied here.
-    """
-    return get_gateway(settings)
+async def _gateway(
+    settings: SettingsDep, session: DbSession, principal: PrincipalDep
+) -> LLMGateway:
+    """A tenant-scoped gateway using encrypted BYOK credentials when configured."""
+    scoped = await integration_service.resolve_settings(
+        session,
+        principal,
+        IntegrationKind.LLM,
+        settings=settings,
+    )
+    return LLMGateway(scoped)
 
 
 GatewayDep = Annotated[LLMGateway, Depends(_gateway)]

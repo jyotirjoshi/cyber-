@@ -54,6 +54,7 @@ from app.schemas.finding import (
     RemediateIn,
     RemediationOut,
     TicketLinkOut,
+    ValidateFindingIn,
 )
 from app.services import finding as finding_service
 from app.services import remediation as remediation_service
@@ -188,6 +189,27 @@ async def remediate_finding(
         )
     refreshed = await remediation_service.get_remediation(session, principal, remediation.id)
     return remediation_out(refreshed)
+
+
+@router.post("/{finding_id}/validate", response_model=FindingDetailOut)
+async def validate_finding(
+    finding_id: uuid.UUID,
+    payload: ValidateFindingIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> FindingDetailOut:
+    """Record human-reviewed validation evidence without changing DefectDojo triage."""
+    await finding_service.validate_finding(
+        session,
+        principal,
+        finding_id,
+        status=payload.status,
+        summary=payload.summary,
+        evidence_references=payload.evidence_references,
+    )
+    await session.commit()
+    finding = await finding_service.get_finding(session, principal, finding_id, detail=True)
+    return await finding_detail_out(session, principal, finding)
 
 
 @router.post("/{finding_id}/tickets", response_model=TicketLinkOut)

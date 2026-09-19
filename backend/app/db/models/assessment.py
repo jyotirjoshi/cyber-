@@ -34,6 +34,8 @@ from app.db.enums import (
     AssessmentDepth,
     AssessmentStage,
     AssessmentStatus,
+    EngagementType,
+    ExecutionMode,
     Scope,
 )
 
@@ -60,6 +62,16 @@ class Assessment(Base, TenantMixin, TimestampMixin):
     scope: Mapped[str] = mapped_column(String(40), nullable=False, default=Scope.EXTERNAL.value)
     depth: Mapped[str] = mapped_column(
         String(40), nullable=False, default=AssessmentDepth.STANDARD.value
+    )
+    #: Explicitly records the security service the customer authorized. This keeps the
+    #: agent from treating a generic scope as permission to perform a different class
+    #: of testing (for example, an API assessment is not a red-team engagement).
+    engagement_type: Mapped[str] = mapped_column(
+        String(60), nullable=False, default=EngagementType.WEB_APPLICATION.value
+    )
+    #: Background execution is deliberately opt-in; supervised is the safe default.
+    execution_mode: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=ExecutionMode.SUPERVISED.value
     )
 
     status: Mapped[str] = mapped_column(
@@ -172,6 +184,18 @@ class Assessment(Base, TenantMixin, TimestampMixin):
             "scope IN ('external','internal','application','code')", name="valid_scope"
         ),
         CheckConstraint("depth IN ('passive','standard','deep')", name="valid_depth"),
+        CheckConstraint(
+            "engagement_type IN ('web_application','api_security','mobile_application',"
+            "'llm_agentic_application','network_external','network_internal',"
+            "'active_directory','cloud_security','code_review','threat_modeling',"
+            "'attack_surface_monitoring','devsecops_pipeline','threat_hunting',"
+            "'code_remediation','red_team','supply_chain')",
+            name="valid_engagement_type",
+        ),
+        CheckConstraint(
+            "execution_mode IN ('supervised','background','interactive')",
+            name="valid_execution_mode",
+        ),
         Index("ix_assessments_organization_id_status", "organization_id", "status"),
         Index("ix_assessments_organization_id_created_at", "organization_id", "created_at"),
     )

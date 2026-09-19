@@ -57,18 +57,18 @@ def _load_migration(filename: str) -> ModuleType:
     return module
 
 
-def test_there_is_exactly_one_migration_and_this_test_covers_it() -> None:
-    """Guards the whole file from going stale.
+def _migration_modules() -> list[ModuleType]:
+    return [_load_migration(path.name) for path in sorted(MIGRATION_PATH.glob("[0-9]*.py"))]
 
-    Every assertion below reads ``0001_initial_schema``. A second revision would mean the
-    schema is no longer described by that file alone, and this test is the thing that
-    notices -- otherwise the suite would keep passing while checking an obsolete picture.
-    """
-    revisions = sorted(p.name for p in MIGRATION_PATH.glob("[0-9]*.py"))
-    assert revisions == ["0001_initial_schema.py"], (
-        f"migrations changed to {revisions}; this test must be taught to replay all of "
-        f"them in order rather than just the first"
-    )
+
+def test_migrations_form_one_linear_chain() -> None:
+    """The recorder below replays every revision, so the chain itself is the guard."""
+    previous: str | None = None
+    modules = _migration_modules()
+    assert modules, "expected at least one Alembic migration"
+    for module in modules:
+        assert module.down_revision == previous
+        previous = module.revision
 
 
 #: LangGraph owns these and migrates them itself; ``alembic/env.py`` filters them out of
@@ -96,6 +96,14 @@ class OpRecorder:
     ) -> None:
         self.indexes.append((name, table, tuple(columns), unique))
 
+    def add_column(self, table_name: str, column: sa.Column[Any], **kwargs: Any) -> None:
+        self.other.append(f"add_column:{table_name}:{column.name}")
+
+    def create_check_constraint(
+        self, name: str, table_name: str, condition: str, **kwargs: Any
+    ) -> None:
+        self.other.append(f"create_check:{table_name}:{name}:{condition}")
+
     # -- downgrade ----------------------------------------------------------
 
     def drop_table(self, name: str, **kwargs: Any) -> None:
@@ -103,6 +111,12 @@ class OpRecorder:
 
     def drop_index(self, name: str, table_name: str = "", **kwargs: Any) -> None:
         self.dropped_indexes.append((name, table_name))
+
+    def drop_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        self.other.append(f"drop_column:{table_name}:{column_name}")
+
+    def drop_constraint(self, name: str, table_name: str, **kwargs: Any) -> None:
+        self.other.append(f"drop_constraint:{table_name}:{name}")
 
     # -- misc ---------------------------------------------------------------
 
@@ -127,11 +141,41 @@ class OpRecorder:
 
 @pytest.fixture(scope="module")
 def recorded() -> Iterator[OpRecorder]:
-    module = _load_migration("0001_initial_schema.py")
     recorder = OpRecorder()
-    with patch.object(module, "op", recorder):
-        module.upgrade()
+    for module in _migration_modules():
+        with patch.object(module, "op", recorder):
+            module.upgrade()
     yield recorder
+
+
+class MetadataOp:
+    """Apply additive Alembic operations to in-memory metadata for schema comparison."""
+
+    def __init__(self, metadata: sa.MetaData) -> None:
+        self.metadata = metadata
+
+    def add_column(self, table_name: str, column: sa.Column[Any], **kwargs: Any) -> None:
+        self.metadata.tables[table_name].append_column(column)
+
+    def create_check_constraint(
+        self, name: str, table_name: str, condition: str, **kwargs: Any
+    ) -> None:
+        self.metadata.tables[table_name].append_constraint(sa.CheckConstraint(condition, name=name))
+
+    def create_index(
+        self, name: str, table_name: str, columns: list[str], unique: bool = False, **kwargs: Any
+    ) -> None:
+        table = self.metadata.tables[table_name]
+        sa.Index(name, *(table.c[column] for column in columns), unique=unique)
+
+    def drop_constraint(self, name: str, table_name: str, **kwargs: Any) -> None:
+        table = self.metadata.tables[table_name]
+        constraint = next((item for item in table.constraints if item.name == name), None)
+        assert constraint is not None, f"cannot drop missing constraint {table_name}.{name}"
+        table.constraints.remove(constraint)
+
+    def f(self, name: str) -> str:
+        return name
 
 
 @pytest.fixture(scope="module")
@@ -147,10 +191,11 @@ def migrated() -> Iterator[sa.MetaData]:
     ``.columns`` collection is empty until it is bound to a table. Reading ``.columns``
     off the raw argument reports every unique constraint in the schema as missing.
     """
-    module = _load_migration("0001_initial_schema.py")
+    modules = _migration_modules()
+    initial = modules[0]
     recorder = OpRecorder()
-    with patch.object(module, "op", recorder):
-        module.upgrade()
+    with patch.object(initial, "op", recorder):
+        initial.upgrade()
 
     metadata = sa.MetaData()
     #: Insertion order is the migration's own dependency order, so a foreign key's
@@ -160,15 +205,18 @@ def migrated() -> Iterator[sa.MetaData]:
     for _name, table, columns, unique in recorder.indexes:
         if table in metadata.tables:
             sa.Index(_name, *(metadata.tables[table].c[c] for c in columns), unique=unique)
+    for module in modules[1:]:
+        with patch.object(module, "op", MetadataOp(metadata)):
+            module.upgrade()
     yield metadata
 
 
 @pytest.fixture(scope="module")
 def recorded_downgrade() -> Iterator[OpRecorder]:
-    module = _load_migration("0001_initial_schema.py")
     recorder = OpRecorder()
-    with patch.object(module, "op", recorder):
-        module.downgrade()
+    for module in reversed(_migration_modules()):
+        with patch.object(module, "op", recorder):
+            module.downgrade()
     yield recorder
 
 

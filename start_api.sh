@@ -13,9 +13,19 @@ SCRIPTS=$($PYTHON -c "import sysconfig; print(sysconfig.get_path('scripts'))")
 echo "[cynux] Scripts dir: $SCRIPTS"
 export PATH="$SCRIPTS:$PATH"
 
+# A Docker image installs the package and copies Alembic files to /app.  The
+# source-tree fallback keeps this entrypoint usable with Railway's earlier build.
+if [ -f "alembic.ini" ]; then
+  ALEMBIC_CONFIG="alembic.ini"
+  APP_DIR=""
+else
+  ALEMBIC_CONFIG="backend/alembic.ini"
+  APP_DIR="--app-dir backend"
+fi
+
 # Run migrations
 echo "[cynux] Running database migrations..."
-$PYTHON -m alembic -c backend/alembic.ini upgrade head
+$PYTHON -m alembic -c "$ALEMBIC_CONFIG" upgrade head
 
 # Start server
 echo "[cynux] Starting API server on port ${PORT:-8000}..."
@@ -24,4 +34,4 @@ exec $PYTHON -m uvicorn app.api.app:create_app \
   --host 0.0.0.0 \
   --port "${PORT:-8000}" \
   --workers 2 \
-  --app-dir backend
+  $APP_DIR

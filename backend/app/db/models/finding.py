@@ -32,7 +32,7 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import LAZY, Base, TenantMixin, TimestampMixin, uuid_pk
-from app.db.enums import EnrichmentStatus, FindingStatus, Priority, Severity
+from app.db.enums import EnrichmentStatus, FindingStatus, Priority, Severity, ValidationStatus
 
 if TYPE_CHECKING:
     from app.db.models.assessment import Assessment
@@ -114,6 +114,16 @@ class Finding(Base, TenantMixin, TimestampMixin):
     #: Set when analysis was skipped -- below the severity floor, or budget exhausted.
     ai_skipped_reason: Mapped[str | None] = mapped_column(String(200))
 
+    #: Validation is separate from the scanner's status: a scanner may report an
+    #: active issue before a safe confirmation run has established reproducibility.
+    validation_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=ValidationStatus.UNVALIDATED.value
+    )
+    #: Structured, redacted validation evidence. Secrets and full exploit payloads do
+    #: not belong here; consumers receive only the proof needed for review.
+    validation_proof: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    validation_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
     #: Snapshot of the asset's criticality at analysis time. Copied deliberately: if
     #: someone retags the asset later, the priority stays explainable against the
     #: context that produced it.
@@ -152,6 +162,10 @@ class Finding(Base, TenantMixin, TimestampMixin):
         CheckConstraint(
             "priority IS NULL OR priority IN ('P1','P2','P3','P4','P5')", name="valid_priority"
         ),
+        CheckConstraint(
+            "validation_status IN ('unvalidated','confirmed','rejected','recheck_required')",
+            name="valid_validation_status",
+        ),
         # Nullable: the snapshot is only taken at analysis time, so an un-analyzed
         # finding legitimately has none.
         CheckConstraint(
@@ -165,6 +179,11 @@ class Finding(Base, TenantMixin, TimestampMixin):
         CheckConstraint("cvss_score IS NULL OR cvss_score BETWEEN 0 AND 10", name="valid_cvss"),
         Index("ix_findings_organization_id_severity", "organization_id", "severity"),
         Index("ix_findings_organization_id_priority", "organization_id", "priority"),
+        Index(
+            "ix_findings_organization_id_validation_status",
+            "organization_id",
+            "validation_status",
+        ),
         Index("ix_findings_assessment_id_severity", "assessment_id", "severity"),
     )
 

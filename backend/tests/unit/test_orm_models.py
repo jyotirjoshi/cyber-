@@ -56,7 +56,9 @@ from app.db.enums import (
     AuditOutcome,
     Criticality,
     CriticalitySource,
+    EngagementType,
     EnrichmentStatus,
+    ExecutionMode,
     FindingStatus,
     IntegrationKind,
     IntegrationStatus,
@@ -76,6 +78,7 @@ from app.db.enums import (
     Severity,
     StepStatus,
     StrEnum,
+    ValidationStatus,
 )
 
 
@@ -112,6 +115,8 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     EnumColumn("assessments", "current_stage", AssessmentStage),
     EnumColumn("assessments", "scope", Scope),
     EnumColumn("assessments", "depth", AssessmentDepth),
+    EnumColumn("assessments", "engagement_type", EngagementType),
+    EnumColumn("assessments", "execution_mode", ExecutionMode),
     EnumColumn("approvals", "decision", ApprovalDecision),
     EnumColumn("approvals", "kind", ApprovalKind),
     EnumColumn(
@@ -140,6 +145,7 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     EnumColumn("findings", "status", FindingStatus),
     EnumColumn("findings", "priority", Priority),
     EnumColumn("findings", "asset_criticality", Criticality),
+    EnumColumn("findings", "validation_status", ValidationStatus),
     EnumColumn("finding_enrichments", "status", EnrichmentStatus),
     EnumColumn("finding_enrichments", "nvd_status", EnrichmentStatus),
     EnumColumn("finding_enrichments", "kev_status", EnrichmentStatus),

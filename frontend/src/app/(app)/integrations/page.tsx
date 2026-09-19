@@ -6,7 +6,7 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardFooter, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Field, Input, Label, Textarea } from "@/components/ui/Input";
+import { Field, Input, Label, Select, Textarea } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
@@ -34,6 +34,91 @@ const STATUS_TONE: Record<IntegrationStatus, BadgeTone> = {
 interface CredRow {
   key: string;
   value: string;
+}
+
+type BYOKProvider = "openai" | "anthropic" | "google";
+
+function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
+  const { toast } = useToast();
+  const [provider, setProvider] = React.useState<BYOKProvider>("openai");
+  const [model, setModel] = React.useState("");
+  const [apiKey, setApiKey] = React.useState("");
+  const [formError, setFormError] = React.useState<string | null>(null);
+  const upsert = useMutation((body: IntegrationUpsertIn) => api.integrations.upsert(body), {
+    onSuccess: () => {
+      setApiKey("");
+      onChanged();
+      toast({ title: "AI provider saved", tone: "ok" });
+    },
+  });
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!model.trim() || !apiKey.trim()) {
+      setFormError("Choose a model and enter your provider API key.");
+      return;
+    }
+    setFormError(null);
+    const credentialName = `${provider}_api_key`;
+    void upsert.run({
+      kind: "llm",
+      name: "Bring your own AI provider",
+      is_enabled: true,
+      config: { provider, default_model: model.trim() },
+      credentials: { [credentialName]: apiKey.trim() },
+    });
+  };
+
+  return (
+    <Card className="border-primary/30">
+      <CardHeader>
+        <div>
+          <CardTitle>Bring your own AI provider</CardTitle>
+          <p className="mt-0.5 text-xs text-muted">Required for AI analysis, remediation and reports.</p>
+        </div>
+        <Badge tone="primary">BYOK</Badge>
+      </CardHeader>
+      <CardBody>
+        <form className="space-y-4" onSubmit={submit}>
+          <InlineError message={formError ?? upsert.errorMessage} />
+          <Field label="Provider" htmlFor="byok-provider">
+            <Select
+              id="byok-provider"
+              value={provider}
+              onChange={(event) => setProvider(event.target.value as BYOKProvider)}
+            >
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="google">Google</option>
+            </Select>
+          </Field>
+          <Field label="Model" htmlFor="byok-model" hint="Use the exact model ID enabled for your key.">
+            <Input
+              id="byok-model"
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              placeholder={provider === "openai" ? "gpt-4.1-mini" : "your-model-id"}
+            />
+          </Field>
+          <Field
+            label="API key"
+            htmlFor="byok-key"
+            hint="Encrypted on save and never shown again."
+          >
+            <Input
+              id="byok-key"
+              type="password"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder="Paste your key"
+            />
+          </Field>
+          <Button type="submit" loading={upsert.loading}>Save AI provider</Button>
+        </form>
+      </CardBody>
+    </Card>
+  );
 }
 
 function IntegrationCard({
@@ -381,12 +466,15 @@ export default function IntegrationsPage() {
     );
   }
 
+  const hasByok = data?.some((integration) => integration.kind === "llm") ?? false;
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Integrations"
-        description="Connected services for findings, tickets, notifications and threat intelligence."
+        description="Connected AI, security, ticketing, notification and threat-intelligence services."
       />
+      {canManage && !hasByok && <ByokSetupCard onChanged={refetch} />}
       {body}
     </div>
   );

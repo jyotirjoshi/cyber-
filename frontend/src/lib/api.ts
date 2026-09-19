@@ -69,6 +69,7 @@ import type {
   SwitchOrganizationIn,
   TicketLinkOut,
   TokenPairOut,
+  ValidateFindingIn,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -78,10 +79,10 @@ import type {
 const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, "");
 
 const API_BASE = stripTrailingSlash(
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "https://cynux-api.onrender.com",
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
 );
 const WS_BASE = stripTrailingSlash(
-  process.env.NEXT_PUBLIC_WS_BASE_URL ?? "wss://cynux-api.onrender.com",
+  process.env.NEXT_PUBLIC_WS_BASE_URL ?? "ws://localhost:8000",
 );
 
 const API_PREFIX = "/api/v1";
@@ -418,6 +419,8 @@ export const api = {
       request<FindingDetailOut>("POST", `/findings/${id}/analyze`, { body }),
     remediate: (id: string, body: RemediateIn = {}) =>
       request<RemediationOut>("POST", `/findings/${id}/remediate`, { body }),
+    validate: (id: string, body: ValidateFindingIn) =>
+      request<FindingDetailOut>("POST", `/findings/${id}/validate`, { body }),
     createTicket: (id: string, body: JiraTicketIn = {}) =>
       request<TicketLinkOut>("POST", `/findings/${id}/tickets`, { body }),
   },

@@ -16,7 +16,13 @@ import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/cn";
 import { fieldError } from "@/lib/errors";
 import { MAX_TARGETS } from "@/lib/types";
-import type { AssessmentCreateIn, AssessmentDepth, Scope } from "@/lib/types";
+import type {
+  AssessmentCreateIn,
+  AssessmentDepth,
+  EngagementType,
+  ExecutionMode,
+  Scope,
+} from "@/lib/types";
 
 const OBJECTIVE_MAX = 4000;
 const ATTESTATION_MAX = 4000;
@@ -42,6 +48,9 @@ function NewAssessmentForm() {
   const [title, setTitle] = React.useState("");
   const [scope, setScope] = React.useState<Scope>("external");
   const [depth, setDepth] = React.useState<AssessmentDepth>("standard");
+  const [engagementType, setEngagementType] =
+    React.useState<EngagementType>("web_application");
+  const [executionMode, setExecutionMode] = React.useState<ExecutionMode>("supervised");
   const [objective, setObjective] = React.useState("");
   const [notifyRaw, setNotifyRaw] = React.useState("");
   const [attestationText, setAttestationText] = React.useState("");
@@ -76,6 +85,8 @@ function NewAssessmentForm() {
       title: title.trim() ? title.trim() : null,
       scope,
       depth,
+      engagement_type: engagementType,
+      execution_mode: executionMode,
       objective: objective.trim() ? objective.trim() : null,
       authorization: {
         confirmed,
@@ -165,6 +176,53 @@ function NewAssessmentForm() {
                   <option value="passive">Passive</option>
                   <option value="standard">Standard</option>
                   <option value="deep">Deep</option>
+                </Select>
+              </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field
+                label="Engagement type"
+                htmlFor="engagement-type"
+                hint="This is recorded with the authorization attestation."
+              >
+                <Select
+                  id="engagement-type"
+                  value={engagementType}
+                  onChange={(e) => setEngagementType(e.target.value as EngagementType)}
+                >
+                  <option value="web_application">Web application</option>
+                  <option value="api_security">API security</option>
+                  <option value="mobile_application">Mobile application</option>
+                  <option value="llm_agentic_application">LLM / agentic application</option>
+                  <option value="network_external">External network</option>
+                  <option value="network_internal">Internal network</option>
+                  <option value="active_directory">Active Directory</option>
+                  <option value="cloud_security">Cloud security</option>
+                  <option value="code_review">Code review</option>
+                  <option value="threat_modeling">Threat modeling</option>
+                  <option value="attack_surface_monitoring">Attack-surface monitoring</option>
+                  <option value="devsecops_pipeline">DevSecOps pipeline</option>
+                  <option value="threat_hunting">Threat hunting</option>
+                  <option value="code_remediation">Code remediation</option>
+                  <option value="red_team">Red team</option>
+                  <option value="supply_chain">Supply chain</option>
+                </Select>
+              </Field>
+
+              <Field
+                label="Execution mode"
+                htmlFor="execution-mode"
+                hint="Supervised is the recommended default."
+              >
+                <Select
+                  id="execution-mode"
+                  value={executionMode}
+                  onChange={(e) => setExecutionMode(e.target.value as ExecutionMode)}
+                >
+                  <option value="supervised">Supervised</option>
+                  <option value="interactive">Interactive</option>
+                  <option value="background">Background</option>
                 </Select>
               </Field>
             </div>

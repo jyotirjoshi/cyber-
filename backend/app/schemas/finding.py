@@ -22,7 +22,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.enums import (
     Criticality,
@@ -31,6 +31,7 @@ from app.db.enums import (
     Priority,
     ScannerName,
     Severity,
+    ValidationStatus,
 )
 from app.schemas.asset import AssetOut
 
@@ -148,6 +149,8 @@ class FindingOut(BaseModel):
     risk_factors: dict[str, Any] = Field(default_factory=dict)
     asset_criticality: Criticality | None = None
     in_kev: bool | None = None
+    validation_status: ValidationStatus
+    validation_checked_at: dt.datetime | None = None
 
     first_seen_at: dt.datetime | None = None
     last_seen_at: dt.datetime | None = None
@@ -155,6 +158,7 @@ class FindingOut(BaseModel):
 
 
 class FindingDetailOut(FindingOut):
+    validation_proof: dict[str, Any] = Field(default_factory=dict)
     ai_explanation: str | None = None
     ai_business_impact: str | None = None
     ai_attack_scenario: str | None = None
@@ -215,6 +219,29 @@ class RemediateIn(BaseModel):
     force: bool = False
 
 
+class ValidateFindingIn(BaseModel):
+    """A human-reviewed, safe validation disposition for a finding.
+
+    The API stores review evidence, not exploit payloads or secrets. A confirmation
+    must say what was observed so an operator cannot accidentally turn a scanner hit
+    into an asserted vulnerability with no audit trail.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: ValidationStatus
+    summary: str | None = Field(default=None, max_length=4000)
+    evidence_references: list[str] = Field(default_factory=list, max_length=25)
+
+    @model_validator(mode="after")
+    def require_evidence_for_a_disposition(self) -> "ValidateFindingIn":
+        if self.status is ValidationStatus.UNVALIDATED:
+            raise ValueError("validation status must be a disposition, not unvalidated")
+        if self.status is ValidationStatus.CONFIRMED and not self.summary:
+            raise ValueError("a confirmed finding requires a validation summary")
+        return self
+
+
 class JiraTicketIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -245,4 +272,5 @@ __all__ = [
     "RemediateIn",
     "RemediationOut",
     "TicketLinkOut",
+    "ValidateFindingIn",
 ]

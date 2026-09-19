@@ -126,6 +126,8 @@ async def create_assessment(
         title=payload.title or _title_for(validated),
         scope=payload.scope.value,
         depth=payload.depth.value,
+        engagement_type=payload.engagement_type.value,
+        execution_mode=payload.execution_mode.value,
         status=AssessmentStatus.CREATED.value,
         current_stage=AssessmentStage.QUEUED.value,
         progress_percent=0,

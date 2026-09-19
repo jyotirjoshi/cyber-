@@ -123,6 +123,24 @@ class _KindSpec:
 
 
 _SPECS: dict[IntegrationKind, _KindSpec] = {
+    IntegrationKind.LLM: _KindSpec(
+        section="llm",
+        credentials={
+            "anthropic_api_key": "anthropic_api_key",
+            "openai_api_key": "openai_api_key",
+            "google_api_key": "google_api_key",
+        },
+        config={
+            "provider": "provider",
+            "default_model": "default_model",
+            "role_models": "role_models",
+            "role_providers": "role_providers",
+            "anthropic_base_url": "anthropic_base_url",
+            "openai_base_url": "openai_base_url",
+            "max_output_tokens": "max_output_tokens",
+            "temperature": "temperature",
+        },
+    ),
     IntegrationKind.DEFECTDOJO: _KindSpec(
         section="defectdojo",
         base_url_field="base_url",
@@ -200,6 +218,7 @@ _UNIMPLEMENTED: frozenset[IntegrationKind] = frozenset(
 )
 
 _DEFAULT_NAMES: dict[IntegrationKind, str] = {
+    IntegrationKind.LLM: "Bring your own AI provider",
     IntegrationKind.DEFECTDOJO: "DefectDojo",
     IntegrationKind.JIRA: "Jira",
     IntegrationKind.SLACK: "Slack",
