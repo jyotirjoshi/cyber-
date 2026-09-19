@@ -25,7 +25,17 @@ fi
 
 # Run migrations
 echo "[cynux] Running database migrations..."
-$PYTHON -m alembic -c "$ALEMBIC_CONFIG" upgrade head
+MIGRATION_ATTEMPT=1
+MIGRATION_MAX_ATTEMPTS=12
+until $PYTHON -m alembic -c "$ALEMBIC_CONFIG" upgrade head; do
+  if [ "$MIGRATION_ATTEMPT" -ge "$MIGRATION_MAX_ATTEMPTS" ]; then
+    echo "[cynux] Database migrations failed after ${MIGRATION_ATTEMPT} attempts."
+    exit 1
+  fi
+  echo "[cynux] Database is not ready; retrying migrations in 5 seconds (attempt ${MIGRATION_ATTEMPT}/${MIGRATION_MAX_ATTEMPTS})..."
+  sleep 5
+  MIGRATION_ATTEMPT=$((MIGRATION_ATTEMPT + 1))
+done
 
 # Start server
 echo "[cynux] Starting API server on port ${PORT:-8000}..."
