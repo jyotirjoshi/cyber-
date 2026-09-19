@@ -417,6 +417,20 @@ class WazuhSettings(BaseSettings):
         return bool(self.base_url and self.api_username and self.api_password)
 
 
+class GitHubSettings(BaseSettings):
+    """Read-only GitHub security-alert ingestion settings."""
+
+    model_config = _cfg("CYNUX_GITHUB__")
+
+    base_url: str = "https://api.github.com"
+    api_token: SecretStr | None = None
+    organization: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token)
+
+
 class NotificationSettings(BaseSettings):
     """FR-029."""
 
@@ -538,6 +552,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     jira: JiraSettings = Field(default_factory=JiraSettings)
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
+    github: GitHubSettings = Field(default_factory=GitHubSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)

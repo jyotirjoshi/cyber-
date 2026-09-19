@@ -74,6 +74,7 @@ from app.integrations.circuit import CircuitBreaker
 from app.integrations.defectdojo import DefectDojoClient
 from app.integrations.dify import DifyClient
 from app.integrations.email import EmailSender
+from app.integrations.github import GitHubClient
 from app.integrations.jira import JiraClient
 from app.integrations.misp import MISPClient
 from app.integrations.slack import SlackClient
@@ -209,6 +210,13 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         credentials={"api_key": "nvd_api_key"},
         # NVD serves unauthenticated callers at a lower rate limit, so a key is optional.
     ),
+    IntegrationKind.GITHUB: _KindSpec(
+        section="github",
+        base_url_field="base_url",
+        credentials={"api_token": "api_token"},
+        config={"organization": "organization"},
+        required=("api_token",),
+    ),
     IntegrationKind.WAZUH: _KindSpec(
         section="wazuh",
         base_url_field="base_url",
@@ -222,7 +230,7 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
 #: table so the schema and UI can be built against them, and so an operator who configures
 #: one is told plainly rather than seeing a silent no-op.
 _UNIMPLEMENTED: frozenset[IntegrationKind] = frozenset(
-    {IntegrationKind.GITHUB, IntegrationKind.GITLAB}
+    {IntegrationKind.GITLAB}
 )
 
 _DEFAULT_NAMES: dict[IntegrationKind, str] = {
@@ -771,6 +779,8 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await EmailSender(scoped).ping()
     if kind is IntegrationKind.WAZUH:
         return await WazuhClient(scoped, redis).ping()
+    if kind is IntegrationKind.GITHUB:
+        return await GitHubClient(scoped, redis).ping()
     # NVD needs no credential and has no cheap authenticated endpoint to probe; reporting
     # it healthy on the strength of its configuration is more honest than an unrelated
     # request that would count against the shared rate limit.
