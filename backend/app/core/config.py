@@ -165,6 +165,16 @@ class ScannerSettings(BaseSettings):
 
     model_config = _cfg("CYNUX_SCANNER__")
 
+    #: Retained for the hardened container sandbox used by scanner adapters. The
+    #: application network must never be used here, or scanner containers could reach
+    #: Postgres, Redis, or internal service credentials.
+    network: str = "cynux_scanner_net"
+    cpu_quota_cores: float = 1.0
+    memory_limit_mb: int = 2048
+    pids_limit: int = 512
+    tmpfs_size_mb: int = 1024
+    #: Never allow scanner containers to run as root by default.
+    run_as_user: str = "65534:65534"
     default_timeout_seconds: int = 1800
     max_timeout_seconds: int = 21_600  # 6h ceiling for one scanner job
     #: Concurrent scanner jobs per organization (PRD section 57).
@@ -386,6 +396,27 @@ class JiraSettings(BaseSettings):
         return bool(self.base_url and self.user_email and self.api_token and self.project_key)
 
 
+class WazuhSettings(BaseSettings):
+    """Read-only access to a Wazuh manager API.
+
+    The API issues short-lived JWTs from these long-lived credentials.  Cynux uses
+    only read endpoints; active response remains an explicit future approval-gated
+    capability rather than something an ingestion connector can trigger.
+    """
+
+    model_config = _cfg("CYNUX_WAZUH__")
+
+    base_url: str | None = None
+    api_username: str | None = None
+    api_password: SecretStr | None = None
+    verify_tls: bool = True
+    timeout_seconds: int = 30
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_username and self.api_password)
+
+
 class NotificationSettings(BaseSettings):
     """FR-029."""
 
@@ -506,6 +537,7 @@ class Settings(BaseSettings):
     dify: DifySettings = Field(default_factory=DifySettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     jira: JiraSettings = Field(default_factory=JiraSettings)
+    wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)

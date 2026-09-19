@@ -77,6 +77,7 @@ from app.integrations.email import EmailSender
 from app.integrations.jira import JiraClient
 from app.integrations.misp import MISPClient
 from app.integrations.slack import SlackClient
+from app.integrations.wazuh import WazuhClient
 from app.schemas.integration import (
     CredentialOut,
     IntegrationHealthOut,
@@ -208,6 +209,13 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         credentials={"api_key": "nvd_api_key"},
         # NVD serves unauthenticated callers at a lower rate limit, so a key is optional.
     ),
+    IntegrationKind.WAZUH: _KindSpec(
+        section="wazuh",
+        base_url_field="base_url",
+        credentials={"api_username": "api_username", "api_password": "api_password"},
+        config={"verify_tls": "verify_tls"},
+        required=("api_username", "api_password"),
+    ),
 }
 
 #: Kinds the MVP can store configuration for but cannot yet talk to (FR-028). Kept in the
@@ -228,6 +236,7 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.NVD: "NVD",
     IntegrationKind.GITHUB: "GitHub",
     IntegrationKind.GITLAB: "GitLab",
+    IntegrationKind.WAZUH: "Wazuh",
 }
 
 
@@ -760,6 +769,8 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await MISPClient(scoped, redis).ping()
     if kind is IntegrationKind.EMAIL:
         return await EmailSender(scoped).ping()
+    if kind is IntegrationKind.WAZUH:
+        return await WazuhClient(scoped, redis).ping()
     # NVD needs no credential and has no cheap authenticated endpoint to probe; reporting
     # it healthy on the strength of its configuration is more honest than an unrelated
     # request that would count against the shared rate limit.

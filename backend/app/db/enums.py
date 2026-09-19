@@ -522,6 +522,7 @@ class IntegrationKind(StrEnum):
     NVD = "nvd"
     GITHUB = "github"
     GITLAB = "gitlab"
+    WAZUH = "wazuh"
 
 
 class IntegrationStatus(StrEnum):
