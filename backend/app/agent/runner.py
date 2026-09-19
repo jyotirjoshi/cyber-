@@ -51,7 +51,7 @@ import datetime as dt
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 import structlog
@@ -77,14 +77,18 @@ from app.db.enums import (
     AssessmentDepth,
     AssessmentStage,
     AssessmentStatus,
+    IntegrationKind,
+    Role,
     Scope,
 )
+from app.llm.gateway import LLMGateway
 from app.db.models.agent import AgentRun
 from app.db.models.assessment import Assessment
 from app.db.repository import tenant_select
 from app.db.session import session_scope
 from app.services.assessment import assessment_or_404, transition
-from app.services.context import Principal
+from app.services import integration as integration_service
+from app.services.context import ACTOR_WORKER, Principal
 from app.services.notification import notify_assessment_failed
 
 log = structlog.get_logger(__name__)
@@ -209,7 +213,7 @@ class AgentRunner:
     which are themselves per-worker.
     """
 
-    __slots__ = ("_deps", "_graph", "_worker_id")
+    __slots__ = ("_checkpointer", "_deps", "_graph", "_worker_id")
 
     def __init__(
         self,
@@ -219,6 +223,7 @@ class AgentRunner:
         worker_id: str | None = None,
     ) -> None:
         self._deps = deps
+        self._checkpointer = checkpointer
         self._graph: CompiledStateGraph = build_graph(deps, checkpointer)
         self._worker_id = worker_id
 
@@ -248,10 +253,13 @@ class AgentRunner:
         rather than left stuck.  The caller must have established that no *live* worker is
         already driving this run (a fresh heartbeat means hands off); ``advance`` assumes that.
         """
-        status, thread_id, settled = await self._inspect(run_id)
+        status, thread_id, organization_id, settled = await self._inspect(run_id)
         if settled is not None:
             log.info("agent.run.already_settled", run_id=str(run_id), status=status.value)
             return settled
+        # Nodes capture their dependencies when the graph is built. Rebuild this small
+        # wrapper for each run so a worker never falls back to another tenant's LLM key.
+        self._graph = await self._graph_for_organization(organization_id)
         config = _run_config(thread_id)
         try:
             seed = await self._enter(run_id, config, status, principal)
@@ -272,7 +280,9 @@ class AgentRunner:
 
     # -- entry bookkeeping ---------------------------------------------------
 
-    async def _inspect(self, run_id: uuid.UUID) -> tuple[AgentRunStatus, str, RunOutcome | None]:
+    async def _inspect(
+        self, run_id: uuid.UUID
+    ) -> tuple[AgentRunStatus, str, uuid.UUID, RunOutcome | None]:
         """Read a run's status and thread id, short-circuiting one already settled.
 
         Runs in its own transaction before any graph work.  A run that is not a runnable
@@ -287,7 +297,27 @@ class AgentRunner:
             status = run.status_enum
             thread_id = run.thread_id
             settled = _outcome_from(run) if status in _TERMINAL_RUN_STATUSES else None
-        return status, thread_id, settled
+        return status, thread_id, run.organization_id, settled
+
+    async def _graph_for_organization(self, organization_id: uuid.UUID) -> CompiledStateGraph:
+        """Build a graph whose gateway resolves only this organization's BYOK config."""
+        worker_principal = Principal(
+            user_id=None,
+            organization_id=organization_id,
+            role=Role.VIEWER,
+            actor_type=ACTOR_WORKER,
+        )
+        async with session_scope(self._deps.settings) as session:
+            scoped = await integration_service.resolve_settings(
+                session,
+                worker_principal,
+                IntegrationKind.LLM,
+                settings=self._deps.settings,
+            )
+        return build_graph(
+            replace(self._deps, gateway=LLMGateway(scoped)),
+            self._checkpointer,
+        )
 
     async def _enter(
         self,

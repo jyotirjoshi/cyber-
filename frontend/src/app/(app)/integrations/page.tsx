@@ -121,6 +121,68 @@ function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
   );
 }
 
+const ADDABLE_INTEGRATIONS: Array<{ kind: IntegrationKind; label: string }> = [
+  { kind: "defectdojo", label: "DefectDojo" },
+  { kind: "jira", label: "Jira" },
+  { kind: "slack", label: "Slack" },
+  { kind: "email", label: "SMTP email" },
+  { kind: "dify", label: "Dify knowledge base" },
+  { kind: "misp", label: "MISP" },
+  { kind: "nvd", label: "NVD" },
+  { kind: "github", label: "GitHub" },
+  { kind: "gitlab", label: "GitLab" },
+];
+
+function AddIntegrationCard({ existing, onChanged }: { existing: IntegrationOut[]; onChanged: () => void }) {
+  const { toast } = useToast();
+  const available = ADDABLE_INTEGRATIONS.filter(
+    ({ kind }) => !existing.some((integration) => integration.kind === kind),
+  );
+  const [kind, setKind] = React.useState<IntegrationKind>(available[0]?.kind ?? "defectdojo");
+  React.useEffect(() => {
+    if (!available.some((item) => item.kind === kind)) setKind(available[0]?.kind ?? "defectdojo");
+  }, [available, kind]);
+  const create = useMutation((body: IntegrationUpsertIn) => api.integrations.upsert(body), {
+    onSuccess: () => {
+      onChanged();
+      toast({ title: "Integration added", tone: "ok" });
+    },
+  });
+
+  if (available.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <div>
+          <CardTitle>Add integration</CardTitle>
+          <p className="mt-0.5 text-xs text-muted">Add a service, then configure its endpoint and credentials.</p>
+        </div>
+      </CardHeader>
+      <CardBody className="space-y-3">
+        <InlineError message={create.errorMessage} />
+        <Field label="Service" htmlFor="new-integration-kind">
+          <Select
+            id="new-integration-kind"
+            value={kind}
+            onChange={(event) => setKind(event.target.value as IntegrationKind)}
+          >
+            {available.map((item) => (
+              <option key={item.kind} value={item.kind}>{item.label}</option>
+            ))}
+          </Select>
+        </Field>
+        <Button
+          size="sm"
+          loading={create.loading}
+          onClick={() => void create.run({ kind, config: {}, credentials: {} })}
+        >
+          Add service
+        </Button>
+      </CardBody>
+    </Card>
+  );
+}
+
 function IntegrationCard({
   integration,
   canManage,
@@ -475,6 +537,7 @@ export default function IntegrationsPage() {
         description="Connected AI, security, ticketing, notification and threat-intelligence services."
       />
       {canManage && !hasByok && <ByokSetupCard onChanged={refetch} />}
+      {canManage && data && <AddIntegrationCard existing={data} onChanged={refetch} />}
       {body}
     </div>
   );

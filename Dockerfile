@@ -26,6 +26,7 @@ COPY backend/app ./app
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./alembic.ini
 COPY start_api.sh ./start_api.sh
+COPY start_worker.sh ./start_worker.sh
 RUN pip install .
 
 # Non-root user
