@@ -154,6 +154,11 @@ class MetadataOp:
     def __init__(self, metadata: sa.MetaData) -> None:
         self.metadata = metadata
 
+    def create_table(self, name: str, *args: Any, **kwargs: Any) -> None:
+        """Replay a post-initial table creation into the comparison metadata."""
+        assert name not in self.metadata.tables, f"migration creates existing table {name}"
+        sa.Table(name, self.metadata, *args)
+
     def add_column(self, table_name: str, column: sa.Column[Any], **kwargs: Any) -> None:
         self.metadata.tables[table_name].append_column(column)
 

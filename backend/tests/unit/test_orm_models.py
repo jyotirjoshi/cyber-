@@ -186,6 +186,8 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
     {
         ("audit_events", "actor_type"),  # user / agent / system / worker
         ("reports", "audience"),  # executive / technical
+        ("external_security_alerts", "severity"),
+        ("external_security_alerts", "status"),
     }
 )
 

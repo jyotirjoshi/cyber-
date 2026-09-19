@@ -16,6 +16,7 @@ from app.db.models.assessment import (
 )
 from app.db.models.asset import Asset, AssetTag
 from app.db.models.audit import AuditEvent
+from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment, Remediation, TicketLink
 from app.db.models.identity import Membership, Organization, PasswordResetToken, User
 from app.db.models.integration import Integration, IntegrationCredential
@@ -34,6 +35,7 @@ __all__ = [
     "Asset",
     "AssetTag",
     "AuditEvent",
+    "ExternalSecurityAlert",
     "AuthorizationRecord",
     "Finding",
     "FindingEnrichment",
