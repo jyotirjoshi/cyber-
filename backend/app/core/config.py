@@ -431,6 +431,20 @@ class GitHubSettings(BaseSettings):
         return bool(self.api_token)
 
 
+class GitLabSettings(BaseSettings):
+    """Read-only GitLab project security-finding ingestion settings."""
+
+    model_config = _cfg("CYNUX_GITLAB__")
+
+    base_url: str = "https://gitlab.com/api/v4"
+    api_token: SecretStr | None = None
+    project_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token)
+
+
 class NotificationSettings(BaseSettings):
     """FR-029."""
 
@@ -553,6 +567,7 @@ class Settings(BaseSettings):
     jira: JiraSettings = Field(default_factory=JiraSettings)
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
+    gitlab: GitLabSettings = Field(default_factory=GitLabSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
