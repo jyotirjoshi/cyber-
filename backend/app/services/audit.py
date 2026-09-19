@@ -115,6 +115,7 @@ class AuditAction:
     INTEGRATION_CREDENTIAL_UPDATE = "integration.credential.update"
     INTEGRATION_TEST = "integration.test"
     INTEGRATION_DISABLE = "integration.disable"
+    INTEGRATION_SYNC = "integration.sync"
 
     # -- reports (FR-030) ---------------------------------------------------
     REPORT_GENERATE = "report.generate"

@@ -91,6 +91,13 @@ class IntegrationTestOut(BaseModel):
     checked_at: dt.datetime | None = None
 
 
+class IntegrationSyncOut(BaseModel):
+    """Safe result of an external-alert ingestion action."""
+
+    kind: IntegrationKind
+    alerts_staged: int = Field(ge=0)
+
+
 class IntegrationHealthOut(BaseModel):
     """Dashboard row (FR-031)."""
 
@@ -111,6 +118,7 @@ __all__ = [
     "CredentialOut",
     "IntegrationHealthOut",
     "IntegrationOut",
+    "IntegrationSyncOut",
     "IntegrationTestOut",
     "IntegrationUpsertIn",
 ]

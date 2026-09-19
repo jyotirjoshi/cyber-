@@ -30,9 +30,11 @@ from app.db.enums import IntegrationKind
 from app.schemas.integration import (
     IntegrationHealthOut,
     IntegrationOut,
+    IntegrationSyncOut,
     IntegrationTestOut,
     IntegrationUpsertIn,
 )
+from app.services import external_alert as external_alert_service
 from app.services import integration as integration_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -81,6 +83,25 @@ async def upsert_integration(
     reloaded = await integration_service.find_integration(session, principal, payload.kind)
     assert reloaded is not None  # noqa: S101 - just upserted under this tenant and kind
     return integration_service.integration_out(reloaded)
+
+
+@router.post("/github/sync", response_model=IntegrationSyncOut)
+async def sync_github_alerts(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest the organization's GitHub security alerts into Cynux's private ledger.
+
+    The result has only the staged count. Raw provider evidence stays restricted to the
+    backend correlation path and cannot be exposed through a browser response.
+    """
+    result = await external_alert_service.sync_github_alerts(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.GITHUB, alerts_staged=result.total)
 
 
 @router.get("/{kind}", response_model=IntegrationOut)
