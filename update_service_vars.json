@@ -1,8 +1,9 @@
 {
   "serviceId": "b868ef59-fbed-4734-b455-c6892f5f088c",
   "input": {
-    "buildCommand": "pip install -e backend/",
-    "startCommand": "sh start_api.sh",
+    "dockerfilePath": "Dockerfile",
+    "startCommand": "",
+    "buildCommand": "",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 120
   }
