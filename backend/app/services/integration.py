@@ -79,7 +79,6 @@ from app.integrations.gitlab import GitLabClient
 from app.integrations.jira import JiraClient
 from app.integrations.misp import MISPClient
 from app.integrations.slack import SlackClient
-from app.integrations.snyk import SnykClient
 from app.integrations.wazuh import WazuhClient
 from app.llm.gateway import LLMGateway
 from app.schemas.integration import (
@@ -235,10 +234,6 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         config={"verify_tls": "verify_tls"},
         required=("api_username", "api_password"),
     ),
-    IntegrationKind.SNYK: _KindSpec(
-        section="snyk", base_url_field="base_url", credentials={"api_token": "api_token"},
-        config={"organization_id": "organization_id", "api_version": "api_version"}, required=("api_token",),
-    ),
 }
 
 #: Kinds the MVP can store configuration for but cannot yet talk to (FR-028). Kept in the
@@ -258,7 +253,6 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.GITHUB: "GitHub",
     IntegrationKind.GITLAB: "GitLab",
     IntegrationKind.WAZUH: "Wazuh",
-    IntegrationKind.SNYK: "Snyk",
 }
 
 
@@ -797,9 +791,6 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await GitHubClient(scoped, redis).ping()
     if kind is IntegrationKind.GITLAB:
         return await GitLabClient(scoped, redis).ping()
-    if kind is IntegrationKind.SNYK:
-        await SnykClient(scoped, redis).list_issues()
-        return True
     if kind is IntegrationKind.LLM:
         await LLMGateway(scoped).probe()
         return True
