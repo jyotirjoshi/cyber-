@@ -36,7 +36,7 @@ interface CredRow {
   value: string;
 }
 
-type BYOKProvider = "openai" | "anthropic" | "google";
+type BYOKProvider = "openai" | "anthropic" | "google" | "openrouter";
 
 function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
   const { toast } = useToast();
@@ -90,6 +90,7 @@ function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
               <option value="google">Google</option>
+              <option value="openrouter">OpenRouter</option>
             </Select>
           </Field>
           <Field label="Model" htmlFor="byok-model" hint="Use the exact model ID enabled for your key.">
@@ -97,7 +98,7 @@ function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
               id="byok-model"
               value={model}
               onChange={(event) => setModel(event.target.value)}
-              placeholder={provider === "openai" ? "gpt-4.1-mini" : "your-model-id"}
+              placeholder={provider === "openai" ? "gpt-4.1-mini" : provider === "google" ? "gemini-3.6-flash" : provider === "openrouter" ? "google/gemini-3.6-flash" : "your-model-id"}
             />
           </Field>
           <Field

@@ -140,9 +140,13 @@ class LLMGateway:
             from app.llm.google_client import GoogleClient
 
             client = GoogleClient(self._llm)
+        elif provider == "openrouter":
+            from app.llm.openrouter_client import OpenRouterClient
+
+            client = OpenRouterClient(self._llm)
         else:
             raise ConfigurationError(
-                f"Unsupported LLM provider {provider!r}. Supported: anthropic, openai, google.",
+                f"Unsupported LLM provider {provider!r}. Supported: anthropic, openai, google, openrouter.",
                 setting="CYNUX_LLM__PROVIDER",
             )
 
@@ -189,6 +193,22 @@ class LLMGateway:
             prompt_trimmed=len(bounded) != len(messages),
         )
         return response
+
+    async def probe(self) -> None:
+        """Verify the configured provider with an intentionally tiny operator-triggered request."""
+        provider, model = self.resolve("classification")
+        if provider == "google":
+            client = self._client(provider)
+            # Gemini 3 may spend a tiny generic budget entirely on reasoning. Its
+            # adapter owns the low-thinking health check and requires visible text.
+            await client.probe(model=model)  # type: ignore[attr-defined]
+            return
+        await self.complete(
+            "classification",
+            [LLMMessage(role="user", content="Reply with OK.")],
+            max_output_tokens=8,
+            temperature=0.0,
+        )
 
     async def complete_json(
         self,

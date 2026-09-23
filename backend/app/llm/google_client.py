@@ -1,13 +1,8 @@
-"""Google Gemini adapter (``google-genai``).
+"""Google Gemini adapter (``google-genai``) using the stateless Interactions API.
 
-Gemini's wire shape differs from the other two in three ways this module absorbs so nothing
-above it has to care: the system prompt is ``config.system_instruction``, turns use ``model``
-where the others use ``assistant``, and content is a list of parts rather than a string.
-
-``response_schema`` is only used when the schema is simple enough to survive translation.
-Gemini's schema dialect is a subset of JSON Schema -- no ``$ref``, no ``oneOf``/``anyOf``, no
-``additionalProperties`` -- so a schema containing those is passed as a prompt instruction
-instead of being silently mangled into one the model satisfies but the caller did not ask for.
+The legacy ``generateContent`` endpoint cannot serve current Gemini 3 models reliably.
+Interactions supports them and accepts a stateless history, which keeps customer security
+prompts out of provider-side conversation storage (``store=False``).
 """
 
 from __future__ import annotations
@@ -69,7 +64,6 @@ class GoogleClient:
                 cause=exc,
             ) from exc
 
-        self._types = types
         self._timeout_ms = settings.request_timeout_seconds * 1000
         self._client = genai.Client(
             api_key=key.get_secret_value(),
@@ -85,68 +79,74 @@ class GoogleClient:
         temperature: float,
         json_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
-        types = self._types
         system, conversation = split_system(messages)
-
-        contents = [
-            types.Content(
-                #: Gemini calls the assistant role "model".
-                role="model" if m.role == "assistant" else "user",
-                parts=[types.Part.from_text(text=m.content)],
-            )
-            for m in coalesce_turns(conversation)
+        turns = [
+            {
+                "type": "model_output" if message.role == "assistant" else "user_input",
+                "content": [{"type": "text", "text": message.content}],
+            }
+            for message in coalesce_turns(conversation)
         ]
-        if not contents:
+        if not turns:
             raise ConfigurationError(
                 "A Gemini request needs at least one user or assistant message.",
                 setting="prompt",
             )
 
-        config_kwargs: dict[str, Any] = {
+        generation_config: dict[str, Any] = {
             "temperature": temperature,
             "max_output_tokens": max_output_tokens,
         }
-        if system:
-            config_kwargs["system_instruction"] = system
         if json_schema is not None:
-            config_kwargs["response_mime_type"] = "application/json"
-            if _is_translatable(json_schema):
-                config_kwargs["response_schema"] = json_schema
-            else:
-                instruction = _JSON_INSTRUCTION.format(schema=json.dumps(json_schema, indent=2))
-                config_kwargs["system_instruction"] = (
-                    f"{system}\n{instruction}" if system else instruction
-                )
+            # Interactions is the current API but has no schema contract equivalent to
+            # generateContent's response_schema. The gateway remains the authority that
+            # validates the result, so an explicit JSON instruction is safe and portable.
+            instruction = _JSON_INSTRUCTION.format(schema=json.dumps(json_schema, indent=2))
+            system = f"{system}\n{instruction}" if system else instruction
 
         started = time.perf_counter()
         try:
-            response = await self._client.aio.models.generate_content(
+            response = await self._client.aio.interactions.create(
                 model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(**config_kwargs),
+                input=turns,
+                system_instruction=system or None,
+                generation_config=generation_config,
+                store=False,
             )
         except Exception as exc:
             raise _map_error(exc) from exc
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = getattr(response, "usage_metadata", None)
-        candidates = getattr(response, "candidates", None) or []
-        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
         return LLMResponse(
-            text=getattr(response, "text", None) or "",
+            text=getattr(response, "output_text", None) or "",
             model=model,
             provider=PROVIDER,
             usage=Usage(
                 input_tokens=int(getattr(usage, "prompt_token_count", 0) or 0),
                 output_tokens=int(getattr(usage, "candidates_token_count", 0) or 0),
             ),
-            stop_reason=str(finish_reason) if finish_reason is not None else None,
+            stop_reason=str(getattr(response, "status", "")) or None,
             latency_ms=latency_ms,
         )
 
     async def aclose(self) -> None:
         #: ``genai.Client`` holds no long-lived session that needs closing in this version.
         return None
+
+    async def probe(self, *, model: str) -> None:
+        """Run a minimal explicit health check for Gemini's reasoning-first models."""
+        try:
+            response = await self._client.aio.interactions.create(
+                model=model,
+                input="Reply with OK.",
+                generation_config={"thinking_level": "low", "max_output_tokens": 128},
+                store=False,
+            )
+        except Exception as exc:
+            raise _map_error(exc) from exc
+        if not (getattr(response, "output_text", None) or "").strip():
+            raise ModelUnavailableError("Gemini health check returned no text response.")
 
 
 def _map_error(exc: Exception) -> Exception:

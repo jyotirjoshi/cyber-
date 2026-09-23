@@ -54,13 +54,17 @@ def _supports_strict_schema(schema: dict[str, Any]) -> bool:
 
 class OpenAIClient:
     name = PROVIDER
+    _key_field = "openai_api_key"
+    _base_url_field = "openai_base_url"
+    _fixed_base_url: str | None = None
+    _provider_label = "OpenAI"
 
     def __init__(self, settings: LLMSettings) -> None:
-        key = settings.openai_api_key
+        key = getattr(settings, self._key_field)
         if key is None or not key.get_secret_value():
             raise ConfigurationError(
-                "OpenAI is selected but no API key is set.",
-                setting="CYNUX_LLM__OPENAI_API_KEY",
+                f"{self._provider_label} is selected but no API key is set.",
+                setting=f"CYNUX_LLM__{self._key_field.upper()}",
             )
         try:
             from openai import AsyncOpenAI
@@ -76,8 +80,9 @@ class OpenAIClient:
             "timeout": float(settings.request_timeout_seconds),
             "max_retries": settings.max_retries,
         }
-        if settings.openai_base_url:
-            kwargs["base_url"] = settings.openai_base_url
+        base_url = self._fixed_base_url or getattr(settings, self._base_url_field)
+        if base_url:
+            kwargs["base_url"] = base_url
         self._client = AsyncOpenAI(**kwargs)
 
     async def complete(
@@ -116,7 +121,7 @@ class OpenAIClient:
         try:
             response = await self._client.chat.completions.create(**payload)
         except Exception as exc:
-            raise _map_error(exc) from exc
+            raise self._map_error(exc) from exc
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         choice = response.choices[0] if response.choices else None
@@ -124,7 +129,7 @@ class OpenAIClient:
         return LLMResponse(
             text=(getattr(choice.message, "content", None) or "") if choice else "",
             model=getattr(response, "model", model),
-            provider=PROVIDER,
+            provider=self.name,
             usage=Usage(
                 input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
                 output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
@@ -136,17 +141,16 @@ class OpenAIClient:
     async def aclose(self) -> None:
         await self._client.close()
 
+    def _map_error(self, exc: Exception) -> Exception:
+        """Map OpenAI-compatible provider errors without revealing response bodies."""
+        from app.core.errors import IntegrationAuthError, IntegrationRateLimitError
 
-def _map_error(exc: Exception) -> Exception:
-    """Translate SDK exceptions into the Cynux taxonomy. Provider bodies are not echoed."""
-    from app.core.errors import IntegrationAuthError, IntegrationRateLimitError
-
-    name = type(exc).__name__
-    if name in {"AuthenticationError", "PermissionDeniedError"}:
-        return IntegrationAuthError("OpenAI", cause=exc)
-    if name == "RateLimitError":
-        return IntegrationRateLimitError("OpenAI", cause=exc)
-    return ModelUnavailableError(f"OpenAI request failed: {name}", cause=exc)
+        name = type(exc).__name__
+        if name in {"AuthenticationError", "PermissionDeniedError"}:
+            return IntegrationAuthError(self._provider_label, cause=exc)
+        if name == "RateLimitError":
+            return IntegrationRateLimitError(self._provider_label, cause=exc)
+        return ModelUnavailableError(f"{self._provider_label} request failed: {name}", cause=exc)
 
 
 __all__ = ["PROVIDER", "OpenAIClient"]

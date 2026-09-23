@@ -30,7 +30,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.core.errors import ConfigurationError
 
 Environment = Literal["development", "staging", "production"]
-LLMProvider = Literal["anthropic", "openai", "google"]
+LLMProvider = Literal["anthropic", "openai", "google", "openrouter"]
 
 #: Roles the gateway routes independently (PRD section 55).
 LLMRole = Literal["planning", "reasoning", "classification", "code_remediation", "report"]
@@ -252,6 +252,9 @@ class LLMSettings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = None
     google_api_key: SecretStr | None = None
+    #: OpenRouter is intentionally a separate credential slot. Its bearer token must
+    #: not be sent to the direct OpenAI endpoint (or vice versa).
+    openrouter_api_key: SecretStr | None = None
 
     #: Model used for roles without an explicit override. Still requires ``provider``.
     default_model: str | None = None
@@ -276,6 +279,7 @@ class LLMSettings(BaseSettings):
             "anthropic": self.anthropic_api_key,
             "openai": self.openai_api_key,
             "google": self.google_api_key,
+            "openrouter": self.openrouter_api_key,
         }.get(provider)
 
 
@@ -409,12 +413,21 @@ class WazuhSettings(BaseSettings):
     base_url: str | None = None
     api_username: str | None = None
     api_password: SecretStr | None = None
+    #: The manager API does not serve stored alerts. Those are indexed separately,
+    #: so Indexer access is deliberately modeled with its own least-privilege account.
+    indexer_url: str | None = None
+    indexer_username: str | None = None
+    indexer_password: SecretStr | None = None
     verify_tls: bool = True
     timeout_seconds: int = 30
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_username and self.api_password)
+
+    @property
+    def indexer_configured(self) -> bool:
+        return bool(self.indexer_url and self.indexer_username and self.indexer_password)
 
 
 class GitHubSettings(BaseSettings):
@@ -443,6 +456,20 @@ class GitLabSettings(BaseSettings):
     @property
     def configured(self) -> bool:
         return bool(self.api_token)
+
+
+class SnykSettings(BaseSettings):
+    """Read-only Snyk REST Issues API settings."""
+
+    model_config = _cfg("CYNUX_SNYK__")
+    base_url: str = "https://api.snyk.io"
+    api_token: SecretStr | None = None
+    organization_id: str | None = None
+    api_version: str = "2025-11-05"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token and self.organization_id)
 
 
 class NotificationSettings(BaseSettings):
@@ -568,6 +595,7 @@ class Settings(BaseSettings):
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     gitlab: GitLabSettings = Field(default_factory=GitLabSettings)
+    snyk: SnykSettings = Field(default_factory=SnykSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
