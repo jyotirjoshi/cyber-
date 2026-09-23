@@ -141,6 +141,7 @@ async def create_assessment(
     for target in validated:
         session.add(
             AssessmentTarget(
+                organization_id=principal.organization_id,
                 assessment_id=assessment.id,
                 raw_value=target.raw[:2048],
                 canonical_value=target.canonical[:2048],
@@ -153,6 +154,7 @@ async def create_assessment(
         )
         session.add(
             AuthorizationRecord(
+                organization_id=principal.organization_id,
                 assessment_id=assessment.id,
                 user_id=principal.user_id,
                 target=target.canonical[:2048],
