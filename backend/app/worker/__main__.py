@@ -37,6 +37,7 @@ from app.agent.runner import AgentRunner, checkpointer_for
 from app.core.config import get_settings, validate_runtime_configuration
 from app.core.logging_conf import configure_logging
 from app.core.redis_client import close_redis, get_redis
+from app.services.runtime_checks import assert_worker_dependencies
 from app.worker.worker import AgentWorker
 
 log = structlog.get_logger(__name__)
@@ -74,6 +75,7 @@ async def _amain() -> None:
     worker_id = _worker_id()
     for warning in validate_runtime_configuration(settings, role="worker"):
         log.warning("worker.config_warning", detail=warning)
+    await assert_worker_dependencies(settings)
 
     redis = get_redis(settings)
     try:
