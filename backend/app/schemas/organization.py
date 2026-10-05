@@ -13,16 +13,47 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.db.enums import Role, Severity
+from app.services.entitlements import OrganizationEntitlements, load_entitlements
+
+#: Roles that can be assigned when inviting a member. ``owner`` is excluded:
+#: ownership is granted only by an existing owner promoting a member via PATCH,
+#: never by minting it on a fresh invite. This prevents the invite endpoint from
+#: being used to bootstrap a second owner without going through the normal flow.
+_INVITABLE_ROLES = frozenset({
+    Role.VIEWER,
+    Role.DEVELOPER,
+    Role.SECURITY_ENGINEER,
+    Role.ADMIN,
+})
+
+
+class RiskWeights(BaseModel):
+    """Tenant-owned 0-100 contribution ceilings for canonical risk scoring."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    severity: float = Field(default=45.0, ge=0, le=100)
+    exploitation: float = Field(default=20.0, ge=0, le=100)
+    exploit_probability: float = Field(default=12.0, ge=0, le=100)
+    exposure: float = Field(default=10.0, ge=0, le=100)
+    asset_criticality: float = Field(default=10.0, ge=0, le=100)
+    ransomware: float = Field(default=3.0, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def require_full_scale(self) -> RiskWeights:
+        if abs(sum(self.model_dump().values()) - 100.0) > 0.000001:
+            raise ValueError("risk weights must add up to 100")
+        return self
 
 
 class OrgPolicy(BaseModel):
     """Per-organization overrides, stored in ``organizations.policy`` as JSONB.
 
-    Every field here can only make Cynux **more** restrictive or change where output is
-    routed.  There is deliberately no key that switches off the approval interrupt: FR-011
+    Security-control fields can only make Cynux **more** restrictive or change where output is
+    routed; risk weights change ranking but never authorization. There is deliberately no key that switches off the approval interrupt: FR-011
     makes human approval mandatory before any active scanning, and a policy flag able to
     waive it would turn the one hard guardrail in the system into a configuration setting.
     Widening the target policy is likewise impossible -- ``denied_targets`` is additive on
@@ -54,6 +85,7 @@ class OrgPolicy(BaseModel):
     #: Skip Jira ticket creation for findings below ``notify_min_severity`` even when the
     #: integration is configured (FR-027). Reduces ticket noise without disabling it.
     ticket_min_severity: Severity | None = None
+    risk_weights: RiskWeights = Field(default_factory=RiskWeights)
 
 
 class OrganizationOut(BaseModel):
@@ -65,6 +97,21 @@ class OrganizationOut(BaseModel):
     is_active: bool
     max_concurrent_scanner_jobs: int
     created_at: dt.datetime
+    entitlements: OrganizationEntitlements
+    policy: OrgPolicy = Field(default_factory=OrgPolicy)
+
+    @field_validator("entitlements", mode="before")
+    @classmethod
+    def _resolve_legacy_entitlements(cls, value: dict[str, Any] | None) -> OrganizationEntitlements:
+        return load_entitlements(value)
+
+    @field_validator("policy", mode="before")
+    @classmethod
+    def _resolve_policy(cls, value: dict[str, Any] | None) -> OrgPolicy:
+        try:
+            return OrgPolicy.model_validate(value or {})
+        except ValueError:
+            return OrgPolicy()
 
 
 class OrganizationCreateIn(BaseModel):
@@ -136,6 +183,7 @@ __all__ = [
     "MemberRoleIn",
     "MembershipOut",
     "OrgPolicy",
+    "RiskWeights",
     "OrganizationCreateIn",
     "OrganizationOut",
     "OrganizationUpdateIn",

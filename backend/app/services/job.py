@@ -40,6 +40,7 @@ from typing import Any
 import structlog
 from redis.asyncio import Redis
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -55,6 +56,7 @@ from app.core.errors import (
 )
 from app.db.enums import AuditOutcome, JobStatus, Permission, ScannerName
 from app.db.models.assessment import Assessment
+from app.db.models.identity import Organization
 from app.db.models.scanner import ScannerArtifact, ScannerJob
 from app.db.repository import TenantRepository, tenant_select
 from app.integrations.storage import ObjectStorage
@@ -93,6 +95,7 @@ async def enqueue_job(
     scanner: ScannerName | str,
     targets: Sequence[str],
     timeout_seconds: int | None = None,
+    idempotency_key: str | None = None,
 ) -> ScannerJob:
     """Create a QUEUED job row.
 
@@ -114,18 +117,63 @@ async def enqueue_job(
         )
 
     cfg = _scanner_settings_or_default(timeout_seconds)
-    job = ScannerJob(
-        organization_id=assessment.organization_id,
-        assessment_id=assessment.id,
-        scanner=adapter.name.value,
-        status=JobStatus.QUEUED.value,
-        targets=canonical,
-        argv=[],
-        sandbox={},
-        timeout_seconds=cfg,
-    )
-    session.add(job)
-    await session.flush()
+    if idempotency_key is not None:
+        if not idempotency_key or len(idempotency_key) > 160:
+            raise ValueError("idempotency_key must contain 1 to 160 characters")
+        insert = (
+            pg_insert(ScannerJob)
+            .values(
+                id=uuid.uuid4(),
+                organization_id=assessment.organization_id,
+                assessment_id=assessment.id,
+                scanner=adapter.name.value,
+                idempotency_key=idempotency_key,
+                status=JobStatus.QUEUED.value,
+                targets=canonical,
+                argv=[],
+                sandbox={},
+                timeout_seconds=cfg,
+            )
+            .on_conflict_do_nothing(
+                constraint="uq_scanner_jobs_unique_scanner_job_idempotency_key"
+            )
+            .returning(ScannerJob.id)
+        )
+        inserted_id = (await session.execute(insert)).scalar_one_or_none()
+        if inserted_id is None:
+            existing = await session.scalar(
+                select(ScannerJob).where(
+                    ScannerJob.organization_id == assessment.organization_id,
+                    ScannerJob.idempotency_key == idempotency_key,
+                )
+            )
+            if existing is None:
+                raise RuntimeError("scanner job conflict without an existing row")
+            if (
+                existing.assessment_id != assessment.id
+                or existing.scanner != adapter.name.value
+                or set(existing.targets) != set(canonical)
+            ):
+                raise ConflictError(
+                    "scanner idempotency key was reused for different work",
+                    context={"idempotency_key": idempotency_key},
+                )
+            return existing
+        job = await session.get(ScannerJob, inserted_id)
+        assert job is not None  # noqa: S101 - INSERT RETURNING id is from this transaction
+    else:
+        job = ScannerJob(
+            organization_id=assessment.organization_id,
+            assessment_id=assessment.id,
+            scanner=adapter.name.value,
+            status=JobStatus.QUEUED.value,
+            targets=canonical,
+            argv=[],
+            sandbox={},
+            timeout_seconds=cfg,
+        )
+        session.add(job)
+        await session.flush()
 
     await audit_service.record(
         session,
@@ -151,7 +199,22 @@ async def enqueue_job(
     return job
 
 
-async def claim_slot(redis: Redis, settings: Settings, organization_id: uuid.UUID) -> bool:
+async def organization_scanner_limit(
+    session: AsyncSession, organization_id: uuid.UUID, settings: Settings
+) -> int:
+    """Use the stricter deployment/organization ceiling; inactive tenants get no slots."""
+    organization = await session.get(Organization, organization_id)
+    if organization is None or not organization.is_active:
+        return 0
+    return min(
+        settings.scanner.max_concurrent_jobs_per_org,
+        organization.max_concurrent_scanner_jobs,
+    )
+
+
+async def claim_slot(
+    redis: Redis, settings: Settings, organization_id: uuid.UUID, *, organization_limit: int
+) -> bool:
     """Try to take one concurrency slot. ``True`` on success.
 
     Two counters, incremented in one pipeline: the organization's and the deployment's.  Both
@@ -163,6 +226,8 @@ async def claim_slot(redis: Redis, settings: Settings, organization_id: uuid.UUI
     admitting without a counter means admitting without a limit, on a host whose memory the
     containers share.
     """
+    if organization_limit < 1:
+        return False
     org_key = f"{_SLOT_NAMESPACE}:org:{organization_id}"
     global_key = f"{_SLOT_NAMESPACE}:global"
     cfg = settings.scanner
@@ -182,7 +247,7 @@ async def claim_slot(redis: Redis, settings: Settings, organization_id: uuid.UUI
         )
         return False
 
-    if int(org_count) <= cfg.max_concurrent_jobs_per_org and (
+    if int(org_count) <= organization_limit and (
         int(global_count) <= cfg.max_concurrent_jobs_global
     ):
         return True
@@ -194,7 +259,7 @@ async def claim_slot(redis: Redis, settings: Settings, organization_id: uuid.UUI
         "job.slot_refused",
         organization_id=str(organization_id),
         org_count=int(org_count),
-        org_limit=cfg.max_concurrent_jobs_per_org,
+        org_limit=organization_limit,
         global_count=int(global_count),
         global_limit=cfg.max_concurrent_jobs_global,
     )

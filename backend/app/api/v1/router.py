@@ -17,7 +17,10 @@ from app.api.v1 import (
     assets,
     audit,
     auth,
+    canonical,
     dashboard,
+    exposures,
+    external_alerts,
     findings,
     integrations,
     jobs,
@@ -33,6 +36,9 @@ api_router.include_router(assessments.router)
 api_router.include_router(assets.router)
 api_router.include_router(approvals.router)
 api_router.include_router(findings.router)
+api_router.include_router(external_alerts.router)
+api_router.include_router(exposures.router)
+api_router.include_router(canonical.router)
 api_router.include_router(jobs.router)
 api_router.include_router(reports.router)
 api_router.include_router(organization.router)

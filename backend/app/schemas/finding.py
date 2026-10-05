@@ -234,7 +234,7 @@ class ValidateFindingIn(BaseModel):
     evidence_references: list[str] = Field(default_factory=list, max_length=25)
 
     @model_validator(mode="after")
-    def require_evidence_for_a_disposition(self) -> "ValidateFindingIn":
+    def require_evidence_for_a_disposition(self) -> ValidateFindingIn:
         if self.status is ValidationStatus.UNVALIDATED:
             raise ValueError("validation status must be a disposition, not unvalidated")
         if self.status is ValidationStatus.CONFIRMED and not self.summary:

@@ -8,7 +8,7 @@ import { Badge, RiskBadge, type BadgeTone } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Textarea } from "@/components/ui/Input";
+import { Input, Select, Textarea } from "@/components/ui/Input";
 import { StageChecklist } from "@/components/ui/StageChecklist";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
@@ -16,13 +16,19 @@ import { Spinner } from "@/components/ui/Spinner";
 import { ApprovalCard } from "@/components/approval/ApprovalCard";
 import { useApiResource } from "@/hooks/useApi";
 import { api } from "@/lib/api";
+import { approveAndRunAgentAction, canApproveAgentAction, requireExecutedAgentAction } from "@/lib/agent-action-workflow";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/cn";
 import { getErrorMessage } from "@/lib/errors";
+import { githubAgentActionRequest, githubAlertAction } from "@/lib/github-alert-actions";
 import { formatDuration, humanize } from "@/lib/format";
 import { useAgentStream, type StreamState } from "@/lib/ws";
+import { shouldReplayAgentEvents, shouldResetAgentActivity } from "@/lib/agent-event-recovery";
 import {
   MAX_MESSAGE_LENGTH,
+  type AgentActionName,
+  type AgentActionOut,
+  type ExternalAlertDetailOut,
   type AgentEvent,
   type AgentEventType,
   type AgentMessageOut,
@@ -99,6 +105,17 @@ export default function AgentConversationPage() {
     [sessionId],
     { enabled: canChat && !!sessionId },
   );
+  const actions = useApiResource(
+    () => api.agent.actions(sessionId as string),
+    [sessionId],
+    { enabled: canChat && !!sessionId, refetchInterval: 8000 },
+  );
+  const [actionBusyId, setActionBusyId] = React.useState<string | null>(null);
+  const [githubAlertId, setGithubAlertId] = React.useState("");
+  const [githubAlert, setGithubAlert] = React.useState<ExternalAlertDetailOut | null>(null);
+  const [githubLoading, setGithubLoading] = React.useState(false);
+  const [githubReason, setGithubReason] = React.useState("");
+  const [githubComment, setGithubComment] = React.useState("");
 
   // Durable turns, keyed by id so REST loads and live `agent_message` events merge idempotently.
   const [messagesById, setMessagesById] = React.useState<Record<string, AgentMessageOut>>({});
@@ -127,6 +144,11 @@ export default function AgentConversationPage() {
     if (event.type !== "pong" && typeof event.seq === "number") {
       if (event.seq <= maxSeqRef.current) return;
       maxSeqRef.current = event.seq;
+    }
+
+    if (shouldResetAgentActivity(event.type)) {
+      setAgentBusy(false);
+      setThinking(null);
     }
 
     switch (event.type) {
@@ -161,11 +183,11 @@ export default function AgentConversationPage() {
         break;
       case "agent_error":
         setEventError(event.data.user_message);
-        setAgentBusy(false);
+        setPlanSteps({});
+        setToolActivity([]);
+        setProgress(null);
         break;
       case "agent_complete":
-        setAgentBusy(false);
-        setThinking(null);
         setPendingApproval(null);
         refetchRef.current();
         break;
@@ -208,7 +230,7 @@ export default function AgentConversationPage() {
   // REST replay fallback: while the socket is not open, poll the event log from our cursor so the
   // timeline keeps advancing even if the WS is blocked (INTERFACES §14).
   React.useEffect(() => {
-    if (!sessionId || !canChat || stream.state === "open" || stream.state === "error") return;
+    if (!sessionId || !canChat || !shouldReplayAgentEvents(stream.state)) return;
     const interval = setInterval(() => {
       void api.agent
         .events(sessionId, maxSeqRef.current)
@@ -244,6 +266,9 @@ export default function AgentConversationPage() {
     if (!content || sending || !sessionId) return;
     setSending(true);
     setEventError(null);
+    // A server event may complete before the request resolves; set busy before sending so that
+    // completion cannot be overwritten by a late local update.
+    setAgentBusy(true);
     try {
       const message = await api.agent.sendMessage({ session_id: sessionId, content });
       setMessagesById((prev) => ({ ...prev, [message.id]: message }));
@@ -252,8 +277,12 @@ export default function AgentConversationPage() {
       setPlanSteps({});
       setToolActivity([]);
       setProgress(null);
-      setAgentBusy(true);
+      // A durable reload covers networks where WebSockets are blocked or delayed.
+      await refetchRef.current();
+      actions.refetch();
+      setAgentBusy(false);
     } catch (error) {
+      setAgentBusy(false);
       toast({ title: "Message failed", description: getErrorMessage(error), tone: "danger" });
     } finally {
       setSending(false);
@@ -288,6 +317,79 @@ export default function AgentConversationPage() {
     },
     [pendingApproval, resolving, toast],
   );
+
+  const queueSync = async (action: AgentActionName, label: string) => {
+    if (!sessionId || actionBusyId) return;
+    setActionBusyId(action);
+    try {
+      await api.agent.proposeAction({ session_id: sessionId, action, label, payload: {} });
+      actions.refetch();
+      toast({ title: "Action queued for approval", tone: "ok" });
+    } catch (error) {
+      toast({ title: "Could not queue action", description: getErrorMessage(error), tone: "danger" });
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const loadGithubAlert = async () => {
+    if (!githubAlertId.trim() || githubLoading) return;
+    setGithubLoading(true);
+    setGithubAlert(null);
+    try {
+      const alert = await api.externalAlerts.get(githubAlertId.trim());
+      if (alert.provider !== "github" || !githubAlertAction(alert.category)) {
+        throw new Error("This is not an actionable GitHub alert.");
+      }
+      setGithubAlert(alert);
+      setGithubReason("");
+      setGithubComment("");
+    } catch (error) {
+      toast({ title: "Could not load GitHub alert", description: getErrorMessage(error), tone: "danger" });
+    } finally {
+      setGithubLoading(false);
+    }
+  };
+
+  const queueGithubAlert = async () => {
+    if (!sessionId || !githubAlert || actionBusyId) return;
+    const decision = githubAlert.status === "open" ? "dismiss" : "reopen";
+    const request = githubAgentActionRequest(githubAlert, decision, githubReason, githubComment);
+    if (!request) return;
+    setActionBusyId("update_github_alert");
+    try {
+      await api.agent.proposeAction({ session_id: sessionId, ...request });
+      actions.refetch();
+      toast({ title: "GitHub alert action queued for approval", tone: "ok" });
+      setGithubAlert(null);
+      setGithubAlertId("");
+    } catch (error) {
+      toast({ title: "Could not queue GitHub action", description: getErrorMessage(error), tone: "danger" });
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const handleAction = async (item: AgentActionOut, decision: "approve" | "reject" | "execute") => {
+    if (actionBusyId) return;
+    setActionBusyId(item.id);
+    try {
+      if (decision === "execute") {
+        requireExecutedAgentAction(await api.agent.executeAction(item.id));
+      } else if (decision === "approve") {
+        await approveAndRunAgentAction(item.id, api.agent);
+      } else {
+        await api.agent.resolveAction(item.id, false);
+      }
+      actions.refetch();
+      toast({ title: decision === "reject" ? "Action rejected" : "Action completed", tone: "ok" });
+    } catch (error) {
+      actions.refetch();
+      toast({ title: decision === "approve" ? "Approval saved, but execution failed" : "Action failed", description: getErrorMessage(error), tone: "danger" });
+    } finally {
+      setActionBusyId(null);
+    }
+  };
 
   if (!canChat) {
     return (
@@ -383,6 +485,92 @@ export default function AgentConversationPage() {
             onResolve={resolveApproval}
           />
         )}
+
+        <Card>
+          <CardBody className="space-y-3">
+            <div>
+              <h2 className="text-sm font-semibold text-fg">Agent actions</h2>
+              <p className="text-xs text-muted">Each integration operation needs its own approval. Approval does not run it until you select Run.</p>
+            </div>
+            {can("integration:manage") && (
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void queueSync("sync_github_alerts", "Sync GitHub alerts")}>Queue GitHub sync</Button>
+                <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void queueSync("sync_gitlab_alerts", "Sync GitLab alerts")}>Queue GitLab sync</Button>
+                <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void queueSync("sync_wazuh_alerts", "Sync Wazuh alerts")}>Queue Wazuh sync</Button>
+                <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void queueSync("sync_sonarqube_alerts", "Sync SonarQube vulnerabilities")}>Queue SonarQube sync</Button>
+                <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void queueSync("sync_snyk_issues", "Sync Snyk issues")}>Queue Snyk sync</Button>
+                <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void queueSync("sync_tenable_vulnerabilities", "Sync Tenable vulnerabilities")}>Queue Tenable sync</Button>
+              </div>
+            )}
+            {can("integration:manage") && can("finding:validate") && (
+              <div className="space-y-3 rounded-lg border border-line bg-surface-2/50 p-3">
+                <p className="text-xs font-medium text-fg">Queue a GitHub source decision</p>
+                <p className="text-xs text-muted">Enter the Cynux alert ID from its detail URL. Loading the alert checks its current source status and valid reasons.</p>
+                <div className="flex flex-wrap gap-2">
+                  <Input aria-label="GitHub alert ID" placeholder="Cynux alert UUID" value={githubAlertId}
+                    onChange={(event) => { setGithubAlertId(event.target.value); setGithubAlert(null); }}
+                    className="min-w-60 flex-1" />
+                  <Button size="sm" variant="outline" loading={githubLoading} disabled={!githubAlertId.trim() || !!actionBusyId}
+                    onClick={() => void loadGithubAlert()}>Load alert</Button>
+                </div>
+                {githubAlert && (
+                  <div className="space-y-3">
+                    <p className="text-xs text-muted">{githubAlert.title} · {humanize(githubAlert.category)} · {humanize(githubAlert.status)} · <Link href={`/findings/external/${githubAlert.id}`} className="underline">View alert</Link></p>
+                    {githubAlert.status === "open" && (
+                      <>
+                        <Select aria-label="GitHub decision reason" value={githubReason} onChange={(event) => setGithubReason(event.target.value)}>
+                          <option value="">Choose a provider reason</option>
+                          {githubAlertAction(githubAlert.category)?.reasons.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                        </Select>
+                        <Textarea aria-label="Rationale sent to GitHub" maxLength={2000} value={githubComment}
+                          onChange={(event) => setGithubComment(event.target.value)} placeholder="Rationale sent to GitHub…" />
+                        {githubAlert.category === "secret_scanning" && <p className="text-xs text-muted">Only select Revoked after verifying the secret was revoked.</p>}
+                      </>
+                    )}
+                    {githubAlert.status !== "open" && !["dismissed", "resolved"].includes(githubAlert.status) && (
+                      <p className="text-xs text-muted">This source status cannot be changed from Cynux.</p>
+                    )}
+                    <Button size="sm" disabled={!!actionBusyId || !githubAgentActionRequest(githubAlert, githubAlert.status === "open" ? "dismiss" : "reopen", githubReason, githubComment)}
+                      onClick={() => void queueGithubAlert()}>Queue {githubAlert.status === "open" ? githubAlertAction(githubAlert.category)?.verb : "Reopen"} for approval</Button>
+                  </div>
+                )}
+              </div>
+            )}
+            {actions.error && <InlineError message={actions.error} />}
+            {actions.data?.length === 0 && <p className="text-xs text-faint">No actions queued for this conversation.</p>}
+            {actions.data?.map((item) => {
+              const permitted = canApproveAgentAction(item.action, can);
+              return (
+                <div key={item.id} className="space-y-2 rounded-lg border border-line bg-surface-2/50 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-fg">{item.label}</span>
+                    <Badge tone={item.status === "executed" ? "ok" : item.status === "rejected" || item.status === "failed" ? "danger" : "warn"}>{humanize(item.status)}</Badge>
+                  </div>
+                  {item.rationale && <p className="text-xs text-muted">{item.rationale}</p>}
+                  {item.action === "create_jira_ticket" && <p className="text-xs text-muted">Finding: {String(item.payload.canonical_finding_id ?? item.payload.finding_id ?? "unknown")}</p>}
+                  {item.action === "update_canonical_work" && (
+                    <div className="space-y-1 text-xs text-muted">
+                      <p>Finding: {String(item.payload.finding_id ?? "unknown")} · Version: {String(item.payload.expected_version ?? "unknown")}</p>
+                      {typeof item.payload.assignee_user_id === "string" && <p>Assign to: {item.payload.assignee_user_id}</p>}
+                      {typeof item.payload.remediation_plan === "string" && <p className="whitespace-pre-wrap break-words">AI draft (review before applying): {item.payload.remediation_plan}</p>}
+                    </div>
+                  )}
+                  {item.action === "update_github_alert" && (
+                    <p className="text-xs text-muted">Alert: {String(item.payload.alert_id ?? "unknown")} · Decision: {String(item.payload.decision ?? "unknown")} {item.payload.reason ? `· Reason: ${String(item.payload.reason)}` : ""} {item.payload.comment ? `· Rationale: ${String(item.payload.comment)}` : ""}</p>
+                  )}
+                  {item.result_summary && <p className="text-xs text-muted">{item.result_summary}</p>}
+                  {permitted && item.status === "pending" && (
+                    <div className="flex gap-2">
+                      <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "approve")}>Approve and run</Button>
+                      <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void handleAction(item, "reject")}>Reject</Button>
+                    </div>
+                  )}
+                  {permitted && item.status === "approved" && <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "execute")}>Run approved action</Button>}
+                </div>
+              );
+            })}
+          </CardBody>
+        </Card>
 
         <div ref={bottomRef} />
       </div>

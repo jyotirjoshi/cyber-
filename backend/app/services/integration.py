@@ -9,8 +9,8 @@ organizations legitimately point at two different Jira instances.
 
 Rather than rewrite eight frozen clients to accept a different configuration source, this
 module **projects a database row onto a copy of Settings** (:func:`resolve_settings`).
-Deployment-wide environment configuration remains the default; an ``integrations`` row
-overlays whatever it specifies on top.  A caller that needs an organization-scoped client
+Shared platform services can use deployment defaults; in production, customer-owned
+connectors use only their organization's configuration. A caller that needs a scoped client
 therefore writes::
 
     scoped = await resolve_settings(session, principal, IntegrationKind.JIRA,
@@ -54,6 +54,7 @@ from typing import Any
 import structlog
 from pydantic import SecretStr
 from redis.asyncio import Redis
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -68,6 +69,7 @@ from app.core.errors import (
 )
 from app.db.base import utcnow
 from app.db.enums import AuditOutcome, IntegrationKind, IntegrationStatus, Permission
+from app.db.models.identity import Organization
 from app.db.models.integration import Integration, IntegrationCredential
 from app.db.repository import tenant_select
 from app.integrations.circuit import CircuitBreaker
@@ -79,6 +81,9 @@ from app.integrations.gitlab import GitLabClient
 from app.integrations.jira import JiraClient
 from app.integrations.misp import MISPClient
 from app.integrations.slack import SlackClient
+from app.integrations.snyk import SnykClient
+from app.integrations.sonarqube import SonarQubeClient
+from app.integrations.tenable import TenableClient
 from app.integrations.wazuh import WazuhClient
 from app.schemas.integration import (
     CredentialOut,
@@ -90,6 +95,7 @@ from app.schemas.integration import (
 from app.services import audit as audit_service
 from app.services.audit import AuditAction
 from app.services.context import Principal
+from app.services.entitlements import assert_integration_capacity, load_entitlements
 
 log = structlog.get_logger(__name__)
 
@@ -131,6 +137,7 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         credentials={
             "anthropic_api_key": "anthropic_api_key",
             "openai_api_key": "openai_api_key",
+            "openrouter_api_key": "openrouter_api_key",
             "google_api_key": "google_api_key",
         },
         config={
@@ -140,6 +147,7 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
             "role_providers": "role_providers",
             "anthropic_base_url": "anthropic_base_url",
             "openai_base_url": "openai_base_url",
+            "openrouter_base_url": "openrouter_base_url",
             "max_output_tokens": "max_output_tokens",
             "temperature": "temperature",
         },
@@ -228,9 +236,33 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
     IntegrationKind.WAZUH: _KindSpec(
         section="wazuh",
         base_url_field="base_url",
-        credentials={"api_username": "api_username", "api_password": "api_password"},
-        config={"verify_tls": "verify_tls"},
+        credentials={
+            "api_username": "api_username",
+            "api_password": "api_password",
+            "indexer_username": "indexer_username",
+            "indexer_password": "indexer_password",
+        },
+        config={"verify_tls": "verify_tls", "indexer_base_url": "indexer_base_url"},
         required=("api_username", "api_password"),
+    ),
+    IntegrationKind.SONARQUBE: _KindSpec(
+        section="sonarqube",
+        base_url_field="base_url",
+        credentials={"api_token": "api_token"},
+        config={"project_keys": "project_keys"},
+        required=("api_token",),
+    ),
+    IntegrationKind.SNYK: _KindSpec(
+        section="snyk",
+        base_url_field="base_url",
+        credentials={"api_token": "api_token"},
+        config={"organization_id": "organization_id"},
+        required=("api_token",),
+    ),
+    IntegrationKind.TENABLE: _KindSpec(
+        section="tenable", base_url_field="base_url",
+        credentials={"access_key": "access_key", "secret_key": "secret_key"},
+        config={"scan_ids": "scan_ids"}, required=("access_key", "secret_key"),
     ),
 }
 
@@ -238,6 +270,20 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
 #: table so the schema and UI can be built against them, and so an operator who configures
 #: one is told plainly rather than seeing a silent no-op.
 _UNIMPLEMENTED: frozenset[IntegrationKind] = frozenset()
+
+# These connectors act on customer-owned accounts. A deployment credential must never
+# become an implicit credential for an unrelated organization in a hosted SaaS.
+_TENANT_PRIVATE_KINDS: frozenset[IntegrationKind] = frozenset({
+    IntegrationKind.JIRA,
+    IntegrationKind.DIFY,
+    IntegrationKind.MISP,
+    IntegrationKind.GITHUB,
+    IntegrationKind.GITLAB,
+    IntegrationKind.WAZUH,
+    IntegrationKind.SONARQUBE,
+    IntegrationKind.SNYK,
+    IntegrationKind.TENABLE,
+})
 
 _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.LLM: "Bring your own AI provider",
@@ -251,6 +297,9 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.GITHUB: "GitHub",
     IntegrationKind.GITLAB: "GitLab",
     IntegrationKind.WAZUH: "Wazuh",
+    IntegrationKind.SONARQUBE: "SonarQube",
+    IntegrationKind.SNYK: "Snyk",
+    IntegrationKind.TENABLE: "Tenable VM",
 }
 
 
@@ -403,9 +452,8 @@ async def find_integration(
 ) -> Integration | None:
     """The organization's integration of this kind, or ``None``.
 
-    Returns the first when several rows share a kind. The unique constraint is on
-    ``(organization_id, kind, name)``, so two named Jira instances are legal; MVP flows
-    address integrations by kind alone and take the oldest deterministically.
+    Kind-only flows prefer the oldest usable connection when several rows share a kind.
+    If all are disabled, return the oldest so the configuration API can re-enable it.
     """
     stmt = (
         tenant_select(
@@ -414,10 +462,12 @@ async def find_integration(
             selectinload(Integration.credentials),
         )
         .where(Integration.kind == kind.value)
-        .order_by(Integration.created_at)
-        .limit(1)
+        .order_by(Integration.created_at, Integration.id)
     )
-    return (await session.execute(stmt)).scalar_one_or_none()
+    rows = (await session.execute(stmt)).scalars().all()
+    if not rows:
+        return None
+    return next((row for row in rows if row.is_usable), rows[0])
 
 
 async def get_integration(
@@ -507,6 +557,20 @@ async def integration_health(
 # ---------------------------------------------------------------------------
 
 
+def _without_deployment_provider_config(base: Settings, kind: IntegrationKind) -> Settings:
+    """Keep operational defaults but clear tenant-owned endpoints, scope, and secrets."""
+    spec = _spec_for(kind)
+    scoped = base.model_copy(deep=True)
+    section = getattr(scoped, spec.section)
+    fields = set(spec.credentials.values()) | set(spec.config.values())
+    if spec.base_url_field:
+        fields.add(spec.base_url_field)
+    for name in fields:
+        default = type(section).model_fields[name].get_default(call_default_factory=True)
+        setattr(section, name, default)
+    return scoped
+
+
 def _overlay(
     base: Settings,
     integration: Integration,
@@ -566,29 +630,40 @@ async def resolve_settings(
     *,
     settings: Settings,
     require: bool = False,
+    mark_used: bool = True,
 ) -> Settings:
-    """Deployment settings with this organization's integration row overlaid.
+    """Resolve a provider configuration for this organization.
 
-    This is the function every organization-scoped provider call should go through. With
-    no row configured it returns ``settings`` unchanged, so a single-tenant deployment
-    that configures everything through the environment keeps working with no rows at all.
+    In production, customer-owned connectors cannot inherit deployment credentials,
+    endpoints, or account scope. Shared platform services (LLM, DefectDojo, NVD) and
+    development deployments retain the environment fallback.
 
     ``require=True`` raises :class:`IntegrationNotConfiguredError` when the resulting
     configuration still lacks a required credential -- use it at the point of a real
     outbound call, so the error names the provider the user was waiting on.
     """
+    tenant_private = settings.is_production and kind in _TENANT_PRIVATE_KINDS
+    base = (
+        _without_deployment_provider_config(settings, kind)
+        if tenant_private else settings
+    )
     integration = await find_integration(session, principal, kind)
     if integration is None:
         if require:
+            if tenant_private:
+                raise IntegrationNotConfiguredError(
+                    kind.value,
+                    hint=f"Configure this organization's {kind.value} integration first.",
+                )
             _assert_env_configured(settings, kind)
-        return settings
+        return base
     if not integration.is_usable:
         raise IntegrationNotConfiguredError(
             kind.value,
             hint=f"The {integration.name} integration is disabled.",
         )
 
-    credentials = credentials_for(integration, settings=settings)
+    credentials = credentials_for(integration, settings=settings, mark_used=mark_used)
     if require:
         spec = _spec_for(kind)
         missing = [name for name in spec.required if name not in credentials]
@@ -597,7 +672,7 @@ async def resolve_settings(
                 kind.value,
                 hint=f"Missing credential(s): {', '.join(missing)}.",
             )
-    return _overlay(settings, integration, credentials)
+    return _overlay(base, integration, credentials)
 
 
 def _assert_env_configured(settings: Settings, kind: IntegrationKind) -> None:
@@ -658,10 +733,74 @@ async def upsert_integration(
             context={"unknown": unknown_config},
         )
 
+    if kind == IntegrationKind.SONARQUBE and "project_keys" in payload.config:
+        project_keys = payload.config["project_keys"]
+        valid = (
+            isinstance(project_keys, list)
+            and 1 <= len(project_keys) <= 100
+            and all(
+                isinstance(key, str)
+                and key == key.strip()
+                and 1 <= len(key) <= 400
+                and all(char.isalnum() or char in "-_.:" for char in key)
+                for key in project_keys
+            )
+            and len(set(project_keys)) == len(project_keys)
+        )
+        if not valid:
+            raise InvalidConfigurationError(
+                "invalid SonarQube project keys",
+                user_message="SonarQube project_keys must be a list of 1-100 unique project keys.",
+            )
+
+    if kind == IntegrationKind.SNYK:
+        org_id = payload.config.get("organization_id")
+        if org_id is not None:
+            try:
+                if not isinstance(org_id, str) or str(uuid.UUID(org_id)) != org_id.lower():
+                    raise ValueError
+            except ValueError as exc:
+                raise InvalidConfigurationError(
+                    "invalid Snyk organization ID",
+                    user_message="Snyk organization_id must be a UUID.",
+                ) from exc
+
+    if kind == IntegrationKind.TENABLE and "scan_ids" in payload.config:
+        scans = payload.config["scan_ids"]
+        try:
+            valid = (isinstance(scans, list) and 1 <= len(scans) <= 20
+                     and all(isinstance(item, str) and str(uuid.UUID(item)) == item.lower() for item in scans)
+                     and len(set(scans)) == len(scans))
+        except (ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise InvalidConfigurationError(
+                "invalid Tenable scan IDs",
+                user_message="Tenable scan_ids must be 1-20 unique scan UUIDs.",
+            )
+
+    # Serialize connector creation per organization.  This prevents two concurrent settings
+    # requests from both seeing the last available slot and storing more integrations than
+    # the self-service entitlement permits.
+    organization = (
+        await session.execute(
+            select(Organization)
+            .where(Organization.id == principal.organization_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+
     now = utcnow()
     integration = await find_integration(session, principal, kind)
     created = integration is None
     if integration is None:
+        assert_integration_capacity(
+            current_integrations=await _count_organization_integrations(
+                session, principal.organization_id
+            ),
+            new_integrations=1,
+            entitlements=load_entitlements(organization.entitlements),
+        )
         integration = Integration(
             organization_id=principal.organization_id,
             kind=kind.value,
@@ -739,6 +878,25 @@ async def upsert_integration(
     return integration
 
 
+async def _count_organization_integrations(
+    session: AsyncSession, organization_id: uuid.UUID
+) -> int:
+    """Count saved connector configurations, including disabled ones.
+
+    Disabling a connector is reversible and intentionally retains its encrypted credentials;
+    it therefore still consumes a plan slot until the organization explicitly removes it.
+    """
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(Integration)
+                .where(Integration.organization_id == organization_id)
+            )
+        ).scalar_one()
+    )
+
+
 async def disable_integration(
     session: AsyncSession,
     principal: Principal,
@@ -789,6 +947,24 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await GitHubClient(scoped, redis).ping()
     if kind is IntegrationKind.GITLAB:
         return await GitLabClient(scoped, redis).ping()
+    if kind is IntegrationKind.SONARQUBE:
+        client = SonarQubeClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
+    if kind is IntegrationKind.SNYK:
+        snyk_client = SnykClient(scoped, redis)
+        try:
+            return await snyk_client.ping()
+        finally:
+            await snyk_client.aclose()
+    if kind is IntegrationKind.TENABLE:
+        tenable_client = TenableClient(scoped, redis)
+        try:
+            return await tenable_client.ping()
+        finally:
+            await tenable_client.aclose()
     # NVD needs no credential and has no cheap authenticated endpoint to probe; reporting
     # it healthy on the strength of its configuration is more honest than an unrelated
     # request that would count against the shared rate limit.
@@ -797,6 +973,65 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
     raise IntegrationNotConfiguredError(
         kind.value, hint=f"{kind.value} cannot be tested in this release."
     )
+
+
+async def tenable_scan_status(
+    session: AsyncSession, principal: Principal, scan_id: str, *,
+    settings: Settings, redis: Redis | None = None,
+) -> str:
+    """Read live status of a tenant-configured Tenable scan."""
+    principal.require(Permission.INTEGRATION_READ)
+    await require_tenant_tenable_integration(session, principal, scan_id)
+    scoped = await resolve_settings(
+        session, principal, IntegrationKind.TENABLE, settings=settings, require=True
+    )
+    client = TenableClient(scoped, redis)
+    try:
+        return await client.latest_scan_status(scan_id)
+    finally:
+        await client.aclose()
+
+
+async def require_tenant_tenable_integration(
+    session: AsyncSession, principal: Principal, scan_id: str | None = None,
+) -> Integration:
+    """Never let an organization launch with another tenant's deployment fallback."""
+    integration = await find_integration(session, principal, IntegrationKind.TENABLE)
+    if integration is None or not integration.is_usable:
+        raise IntegrationNotConfiguredError("Tenable VM", hint="Configure an enabled integration first.")
+    scan_ids = integration.config.get("scan_ids")
+    credential_names = {credential.name for credential in integration.credentials}
+    if (not isinstance(scan_ids, list) or not scan_ids
+            or (scan_id is not None and scan_id not in scan_ids)
+            or not {"access_key", "secret_key"}.issubset(credential_names)):
+        raise IntegrationNotConfiguredError(
+            "Tenable VM", hint="Save this scan UUID and both API keys in your organization first."
+        )
+    return integration
+
+
+async def launch_tenable_scan(
+    session: AsyncSession, principal: Principal, scan_id: str, *,
+    settings: Settings, redis: Redis | None = None,
+) -> str | None:
+    """Launch an already configured scan, then record the action in this tenant's audit trail."""
+    principal.require(Permission.INTEGRATION_MANAGE)
+    integration = await require_tenant_tenable_integration(session, principal, scan_id)
+    scoped = await resolve_settings(
+        session, principal, IntegrationKind.TENABLE, settings=settings, require=True
+    )
+    client = TenableClient(scoped, redis)
+    try:
+        launched_uuid = await client.launch_scan(scan_id)
+        await audit_service.record(
+            session, action=AuditAction.INTEGRATION_SCAN_LAUNCH,
+            principal=principal, resource_type="integration",
+            resource_id=integration.id if integration else None,
+            detail={"provider": "tenable", "scan_id": scan_id, "run_uuid": launched_uuid},
+        )
+        return launched_uuid
+    finally:
+        await client.aclose()
 
 
 async def test_integration(

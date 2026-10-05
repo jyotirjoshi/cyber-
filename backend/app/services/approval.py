@@ -301,7 +301,7 @@ async def granted_approval(
     *,
     kind: ApprovalKind = ApprovalKind.SCAN_SCOPE,
 ) -> Approval | None:
-    """The most recent *granted* approval, re-read from the database.
+    """The latest approval only when it currently grants authority.
 
     This is the function ``app/agent/nodes/scan.py`` calls.  It exists so that authority to
     scan is read from the ``approvals`` table at the moment of scanning rather than trusted
@@ -313,19 +313,14 @@ async def granted_approval(
         .where(
             Approval.assessment_id == assessment_id,
             Approval.kind == kind.value,
-            Approval.decision.in_(
-                [
-                    ApprovalDecision.APPROVED.value,
-                    ApprovalDecision.APPROVED_ALL.value,
-                    ApprovalDecision.CUSTOMIZED.value,
-                ]
-            ),
-            Approval.resolved_by_id.isnot(None),
         )
-        .order_by(Approval.resolved_at.desc(), Approval.id.desc())
+        .order_by(Approval.created_at.desc(), Approval.id.desc())
         .limit(1)
     )
-    return (await session.execute(stmt)).scalars().first()
+    approval = (await session.execute(stmt)).scalars().first()
+    if approval is None or not approval.is_granted or approval.resolved_by_id is None:
+        return None
+    return approval
 
 
 async def expire_stale(session: AsyncSession, settings: Settings) -> int:

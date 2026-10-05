@@ -367,8 +367,11 @@ class TicketLink(Base, TenantMixin, TimestampMixin):
     __tablename__ = "ticket_links"
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    finding_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    finding_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("findings.id", ondelete="CASCADE"), nullable=True
+    )
+    canonical_finding_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("canonical_findings.id", ondelete="CASCADE"), nullable=True
     )
     provider: Mapped[str] = mapped_column(String(30), nullable=False, default="jira")
     external_key: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -384,10 +387,17 @@ class TicketLink(Base, TenantMixin, TimestampMixin):
     #: True when the agent filed it rather than a person clicking the button.
     created_by_agent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    finding: Mapped[Finding] = relationship(back_populates="tickets", lazy=LAZY)
+    finding: Mapped[Finding | None] = relationship(back_populates="tickets", lazy=LAZY)
 
     __table_args__ = (
         UniqueConstraint("finding_id", "provider", name="unique_ticket_per_finding"),
+        UniqueConstraint(
+            "canonical_finding_id", "provider", name="unique_ticket_per_canonical_finding"
+        ),
+        CheckConstraint(
+            "(finding_id IS NOT NULL) <> (canonical_finding_id IS NOT NULL)",
+            name="one_ticket_finding_target",
+        ),
         # Narrower than ``IntegrationKind``: only the three issue trackers can hold a
         # ticket. The value is half of the unique constraint above, so a variant
         # spelling ("Jira") is a second row for the same finding -- exactly the

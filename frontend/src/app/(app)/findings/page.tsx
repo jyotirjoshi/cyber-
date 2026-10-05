@@ -21,7 +21,11 @@ import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatRelative, humanize } from "@/lib/format";
+import { findingViewFromSearch, type FindingView } from "@/lib/finding-view";
 import type { FindingStatus, Priority, ScannerName, Severity } from "@/lib/types";
+import { ExternalAlertsPanel } from "./external-alerts";
+import { AllExposuresPanel } from "./all-exposures";
+import { CanonicalFindingsPanel } from "./canonical-findings";
 
 const PAGE_SIZE = 25;
 
@@ -53,6 +57,18 @@ export default function FindingsPage() {
   const [includeDuplicates, setIncludeDuplicates] = React.useState(false);
   const [includeFalsePositives, setIncludeFalsePositives] = React.useState(false);
   const [offset, setOffset] = React.useState(0);
+  const [view, setView] = React.useState<FindingView | null>(null);
+  React.useEffect(() => {
+    const syncView = () => setView(findingViewFromSearch(window.location.search));
+    syncView();
+    window.addEventListener("popstate", syncView);
+    return () => window.removeEventListener("popstate", syncView);
+  }, []);
+
+  const selectView = (next: FindingView) => {
+    setView(next);
+    router.replace(next === "assessment" ? "/findings" : `/findings?view=${next}`, { scroll: false });
+  };
 
   const debouncedQ = useDebouncedValue(q);
   const canRead = can("finding:read");
@@ -82,7 +98,7 @@ export default function FindingsPage() {
       includeFalsePositives,
       offset,
     ],
-    { enabled: canRead },
+    { enabled: canRead && view === "assessment" },
   );
 
   if (!canRead) {
@@ -93,6 +109,74 @@ export default function FindingsPage() {
       </div>
     );
   }
+  if (view === null) return <LoadingState label="Loading findings…" />;
+
+  const viewToggle = (
+    <div className="flex gap-2" role="group" aria-label="Finding source">
+      <button
+        type="button"
+        aria-pressed={view === "canonical"}
+        onClick={() => selectView("canonical")}
+        className={`rounded-lg border px-3 py-2 text-sm ${view === "canonical" ? "border-primary text-fg" : "border-line text-muted"}`}
+      >
+        Canonical findings
+      </button>
+      <button
+        type="button"
+        aria-pressed={view === "all"}
+        onClick={() => selectView("all")}
+        className={`rounded-lg border px-3 py-2 text-sm ${view === "all" ? "border-primary text-fg" : "border-line text-muted"}`}
+      >
+        All exposures
+      </button>
+      <button
+        type="button"
+        aria-pressed={view === "assessment"}
+        onClick={() => selectView("assessment")}
+        className={`rounded-lg border px-3 py-2 text-sm ${view === "assessment" ? "border-primary text-fg" : "border-line text-muted"}`}
+      >
+        Assessment findings
+      </button>
+      <button
+        type="button"
+        aria-pressed={view === "external"}
+        onClick={() => selectView("external")}
+        className={`rounded-lg border px-3 py-2 text-sm ${view === "external" ? "border-primary text-fg" : "border-line text-muted"}`}
+      >
+        External alerts
+      </button>
+    </div>
+  );
+
+  if (view === "external") {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Findings" description="Vulnerabilities and issues discovered across your assessments and connected security tools." />
+        {viewToggle}
+        <ExternalAlertsPanel />
+      </div>
+    );
+  }
+
+  if (view === "canonical") {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Findings" description="Deduplicated findings linked to assets, with every source observation retained." />
+        {viewToggle}
+        <CanonicalFindingsPanel />
+      </div>
+    );
+  }
+
+  if (view === "all") {
+    return (
+      <div className="space-y-6">
+        <PageHeader title="Findings" description="Assessment findings and connected-tool alerts, together and source-preserving." />
+        {viewToggle}
+        <AllExposuresPanel />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -100,6 +184,7 @@ export default function FindingsPage() {
         title="Findings"
         description="Vulnerabilities and issues discovered across your assessments."
       />
+      {viewToggle}
 
       <Card>
         <CardBody className="space-y-4">

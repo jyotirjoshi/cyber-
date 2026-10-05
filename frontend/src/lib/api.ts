@@ -13,6 +13,8 @@
 
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "./tokens";
 import type {
+  AgentActionOut,
+  AgentActionProposeIn,
   AgentEvent,
   AgentMessageIn,
   AgentMessageOut,
@@ -27,14 +29,27 @@ import type {
   AssessmentFilter,
   AssessmentOut,
   AssetCriticalityIn,
+  AssetContextIn,
   AssetFilter,
   AssetOut,
   AssetTagIn,
   AuditEventOut,
   AuditFilter,
   CancelIn,
+  CanonicalFindingDetailOut,
+  CanonicalFindingOut,
+  CanonicalStatusDecisionIn,
+  CanonicalWorkIn,
   ChangePasswordIn,
   DashboardOut,
+  ExternalAlertFilter,
+  ExternalAlertDetailOut,
+  ExternalAlertTriageIn,
+  ExternalAlertSourceActionIn,
+  RelatedFindingOut,
+  ExternalAlertOut,
+  ExposureFilter,
+  ExposureOut,
   FindingDetailOut,
   FindingFilter,
   FindingOut,
@@ -42,6 +57,9 @@ import type {
   IntegrationHealthOut,
   IntegrationKind,
   IntegrationOut,
+  IntegrationSyncOut,
+  TenableScanLaunchOut,
+  TenableScanStatusOut,
   IntegrationTestOut,
   IntegrationUpsertIn,
   JiraTicketIn,
@@ -425,6 +443,38 @@ export const api = {
       request<TicketLinkOut>("POST", `/findings/${id}/tickets`, { body }),
   },
 
+  externalAlerts: {
+    list: (params?: ListParams<ExternalAlertFilter>) =>
+      request<Page<ExternalAlertOut>>("GET", "/external-alerts", { query: params }),
+    get: (id: string) => request<ExternalAlertDetailOut>("GET", `/external-alerts/${id}`),
+    triage: (id: string, body: ExternalAlertTriageIn) =>
+      request<ExternalAlertDetailOut>("PATCH", `/external-alerts/${id}/triage`, { body }),
+    githubAction: (id: string, body: ExternalAlertSourceActionIn) =>
+      request<ExternalAlertDetailOut>("PATCH", `/external-alerts/${id}/github`, { body }),
+    relatedFindings: (id: string) =>
+      request<RelatedFindingOut[]>("GET", `/external-alerts/${id}/related-findings`),
+    relatedAlerts: (id: string) =>
+      request<ExternalAlertOut[]>("GET", `/external-alerts/${id}/related-alerts`),
+  },
+
+  exposures: {
+    list: (params?: ListParams<ExposureFilter>) =>
+      request<Page<ExposureOut>>("GET", "/exposures", { query: params }),
+  },
+
+  canonicalFindings: {
+    list: (params?: { limit?: number; offset?: number; mine?: boolean; overdue?: boolean }) =>
+      request<Page<CanonicalFindingOut>>("GET", "/canonical-findings", { query: params }),
+    get: (id: string) =>
+      request<CanonicalFindingDetailOut>("GET", `/canonical-findings/${id}`),
+    decide: (id: string, body: CanonicalStatusDecisionIn) =>
+      request<CanonicalFindingOut>("PATCH", `/canonical-findings/${id}/status`, { body }),
+    updateWork: (id: string, body: CanonicalWorkIn) =>
+      request<CanonicalFindingOut>("PATCH", `/canonical-findings/${id}/work`, { body }),
+    createTicket: (id: string, body: JiraTicketIn = {}) =>
+      request<TicketLinkOut>("POST", `/canonical-findings/${id}/tickets`, { body }),
+  },
+
   assets: {
     list: (params?: ListParams<AssetFilter>) =>
       request<Page<AssetOut>>("GET", "/assets", { query: params }),
@@ -433,6 +483,8 @@ export const api = {
       request<AssetOut>("POST", `/assets/${id}/tags`, { body }),
     setCriticality: (id: string, body: AssetCriticalityIn) =>
       request<AssetOut>("POST", `/assets/${id}/criticality`, { body }),
+    setContext: (id: string, body: AssetContextIn) =>
+      request<AssetOut>("PATCH", `/assets/${id}/context`, { body }),
     markOutOfScope: (id: string) =>
       request<AssetOut>("POST", `/assets/${id}/out-of-scope`),
   },
@@ -475,6 +527,12 @@ export const api = {
       request<IntegrationOut>("DELETE", `/integrations/${kind}`),
     test: (kind: IntegrationKind) =>
       request<IntegrationTestOut>("POST", `/integrations/${kind}/test`),
+    sync: (kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable") =>
+      request<IntegrationSyncOut>("POST", `/integrations/${kind}/sync`),
+    tenableStatus: (scanId: string) =>
+      request<TenableScanStatusOut>("GET", `/integrations/tenable/scans/${encodeURIComponent(scanId)}/status`),
+    launchTenable: (scanId: string) =>
+      request<TenableScanLaunchOut>("POST", `/integrations/tenable/scans/${encodeURIComponent(scanId)}/launch`),
   },
 
   audit: {
@@ -485,6 +543,14 @@ export const api = {
   },
 
   agent: {
+    actions: (sessionId: string) =>
+      request<AgentActionOut[]>("GET", "/agent/actions", { query: { session_id: sessionId } }),
+    proposeAction: (body: AgentActionProposeIn) =>
+      request<AgentActionOut>("POST", "/agent/actions", { body }),
+    resolveAction: (id: string, approve: boolean, note?: string) =>
+      request<AgentActionOut>("POST", `/agent/actions/${id}/resolve`, { body: { approve, note } }),
+    executeAction: (id: string) =>
+      request<AgentActionOut>("POST", `/agent/actions/${id}/execute`),
     sessions: (params?: ListParams<{ include_archived?: boolean }>) =>
       request<Page<AgentSessionOut>>("GET", "/agent/sessions", { query: params }),
     session: (id: string) =>

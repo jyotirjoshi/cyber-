@@ -16,10 +16,11 @@ import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { humanize } from "@/lib/format";
-import type { AssetOut, AssetStatus, Criticality } from "@/lib/types";
+import type { AssetEnvironment, AssetOut, AssetStatus, Criticality } from "@/lib/types";
 
 const CRITICALITIES: Criticality[] = ["critical", "high", "normal", "low", "unknown"];
 const ASSET_STATUSES: AssetStatus[] = ["active", "inactive", "unreachable", "out_of_scope"];
+const ENVIRONMENTS: AssetEnvironment[] = ["unknown", "production", "staging", "development", "test"];
 
 /** AssetOut carries ip/port rather than a single endpoint field — derive a locator for display. */
 function assetEndpoint(asset: AssetOut): string | null {
@@ -34,6 +35,7 @@ export default function AssetsPage() {
 
   const [q, setQ] = React.useState("");
   const [criticality, setCriticality] = React.useState<Criticality | "">("");
+  const [environment, setEnvironment] = React.useState<AssetEnvironment | "">("");
   const [status, setStatus] = React.useState<AssetStatus | "">("");
   const [exposedOnly, setExposedOnly] = React.useState(false);
   const [selectedOnly, setSelectedOnly] = React.useState(false);
@@ -48,11 +50,12 @@ export default function AssetsPage() {
         offset,
         q: debouncedQ || undefined,
         criticality: criticality || undefined,
+        environment: environment || undefined,
         status: status || undefined,
         internet_exposed: exposedOnly || undefined,
         selected: selectedOnly || undefined,
       }),
-    [debouncedQ, criticality, status, exposedOnly, selectedOnly, offset],
+    [debouncedQ, criticality, environment, status, exposedOnly, selectedOnly, offset],
     { enabled: canRead },
   );
 
@@ -116,6 +119,16 @@ export default function AssetsPage() {
                   {humanize(s)}
                 </option>
               ))}
+            </Select>
+          </Field>
+
+          <Field label="Environment" htmlFor="asset-environment">
+            <Select id="asset-environment" value={environment} onChange={(e) => {
+              setEnvironment(e.target.value as AssetEnvironment | "");
+              setOffset(0);
+            }}>
+              <option value="">All environments</option>
+              {ENVIRONMENTS.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
             </Select>
           </Field>
 

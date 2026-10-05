@@ -25,6 +25,7 @@ rather than reporting an empty result set.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from json import JSONDecodeError
 from json import loads as json_loads
@@ -528,6 +529,45 @@ class DefectDojoClient:
         return _import_result(body, engagement_id=engagement_id, scan_type=scan_type)
 
     # -- findings ------------------------------------------------------------
+
+    async def iter_finding_pages(
+        self,
+        *,
+        test_id: int,
+        limit: int = 200,
+        max_records: int = 100_000,
+    ) -> AsyncIterator[list[DDFinding]]:
+        """Yield bounded pages; never treat a truncated import as complete."""
+        if test_id <= 0 or not 1 <= limit <= 200 or max_records < limit:
+            raise ValueError("invalid finding pagination bounds")
+        client = self._require()
+        offset = 0
+        while True:
+            payload = await client.get_json(
+                "/api/v2/findings/", params={"test": test_id, "limit": limit, "offset": offset}
+            )
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                raise DefectDojoError("DefectDojo returned an invalid findings page")
+            results = payload["results"]
+            if len(results) > limit:
+                raise DefectDojoError("DefectDojo exceeded the requested findings page size")
+            if not results and payload.get("next"):
+                raise DefectDojoError("DefectDojo returned an empty non-terminal findings page")
+            if offset + len(results) > max_records:
+                raise DefectDojoError("DefectDojo findings exceeded the import safety limit")
+            page: list[DDFinding] = []
+            for entry in results:
+                try:
+                    page.append(_parse_finding(entry))
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("defectdojo.finding_unparseable", reason="invalid_record")
+            if page:
+                yield page
+            if not payload.get("next"):
+                return
+            offset += len(results)
+            if offset >= max_records:
+                raise DefectDojoError("DefectDojo findings exceeded the import safety limit")
 
     async def list_findings(
         self,

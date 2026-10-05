@@ -1,14 +1,15 @@
 """Outbound notifications for the six events users care about (FR-029, FR-032).
 
-The ordering here is deliberate and is the whole design: **a row is written before delivery
-is attempted, and delivery failure never propagates to the caller.**
+The ordering here is deliberate: **the caller commits a pending row before a worker attempts
+external delivery. A provider failure changes that row to failed; it never undoes the event
+that created the notification.**
 
 Every notification in Cynux is a side effect of something more important -- an assessment
 starting, an approval blocking a run, a critical finding landing. If a Slack outage could
 raise out of :func:`dispatch`, a transient 503 from Slack would fail the assessment that
-was merely trying to mention itself. So the row is the durable artifact and the send is
-best-effort: a ``pending`` row that never became ``sent`` is a visible, queryable backlog,
-whereas an exception swallowed at the call site is nothing at all.
+was merely trying to mention itself. So the row is the durable artifact and the worker
+sends only committed rows: a ``pending`` row is a visible backlog, whereas an exception
+swallowed at the call site is nothing at all.
 
 Three consequences worth stating:
 
@@ -20,10 +21,9 @@ why a suppressed notification audits as ``SUCCESS`` with ``detail={"skipped": Tr
 ``AuditOutcome`` has no ``SKIPPED`` member, and calling a correctly-applied policy a
 ``FAILURE`` would poison every alerting query built on the audit log.
 
-**Deduplication is a pre-read, not a caught constraint violation.** ``notifications`` has a
-unique index on ``(organization_id, dedupe_key)``, but relying on the ``IntegrityError``
-would poison the caller's transaction -- and the caller is mid-assessment with real work to
-commit. The existing row is looked up first instead.
+**Deduplication is a pre-read backed by a unique constraint.** The read handles normal
+replays; a savepoint contains a concurrent unique-key race so it does not abort the
+assessment transaction.
 
 **Websocket rows are delivered by existing.** :class:`~app.db.enums.NotificationChannel`
 has a ``websocket`` member, but a notification is organization-scoped while the event bus is
@@ -38,14 +38,18 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from html import escape
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
 from redis.asyncio import Redis
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import CynuxError
+from app.core.errors import CynuxError, IntegrationNotConfiguredError
 from app.db.base import utcnow
 from app.db.enums import (
     AuditOutcome,
@@ -53,6 +57,7 @@ from app.db.enums import (
     NotificationChannel,
     NotificationEvent,
     NotificationStatus,
+    Role,
     Severity,
 )
 from app.db.models.identity import Organization
@@ -70,8 +75,8 @@ from app.integrations.slack import (
 from app.schemas.organization import OrgPolicy
 from app.services import audit as audit_service
 from app.services.audit import AuditAction
-from app.services.context import Principal
-from app.services.integration import resolve_settings
+from app.services.context import ACTOR_WORKER, Principal
+from app.services.integration import find_integration, resolve_settings
 from app.services.organization import load_policy
 
 log = structlog.get_logger(__name__)
@@ -229,13 +234,44 @@ def _slack_blocks(content: NotificationContent, severity: Severity | None) -> li
 def _email_html(content: NotificationContent) -> str:
     if content.html:
         return content.html
-    # ``body`` is plain text that may quote scanner output, so it is escaped rather than
-    # interpolated: the email client would otherwise render smuggled markup.
-    escaped = (
-        content.body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    ).replace("\n", "<br>")
-    link = f'<p><a href="{content.link}">Open in Cynux</a></p>' if content.link else ""
-    return f"<h2>{content.subject}</h2><p>{escaped}</p>{link}"
+    # All three fields can contain scanner or provider text. Only the paragraph's
+    # line breaks are intentional markup; never interpolate raw text or an unsafe URL.
+    body = escape(content.body).replace("\n", "<br>")
+    link = ""
+    if content.link:
+        try:
+            parsed = urlsplit(content.link)
+            if parsed.scheme.lower() in {"http", "https"} and parsed.hostname and not (
+                parsed.username or parsed.password
+            ):
+                link = f'<p><a href="{escape(content.link, quote=True)}">Open in Cynux</a></p>'
+        except ValueError:
+            pass
+    return f"<h2>{escape(content.subject)}</h2><p>{body}</p>{link}"
+
+
+async def _delivery_settings(
+    session: AsyncSession, principal: Principal, kind: IntegrationKind, settings: Settings,
+) -> Settings:
+    """In production, never fall back to a deployment credential for a customer tenant."""
+    if settings.environment != "production":
+        return await resolve_settings(session, principal, kind, settings=settings)
+    integration = await find_integration(session, principal, kind)
+    if integration is None or not integration.is_usable:
+        raise IntegrationNotConfiguredError(
+            kind.value, hint="Configure this organization's notification connection."
+        )
+    base = settings.model_copy(deep=True)
+    base.notify.slack_bot_token = None
+    base.notify.slack_webhook_url = None
+    base.notify.slack_default_channel = None
+    base.notify.smtp_host = None
+    base.notify.smtp_from = None
+    base.notify.smtp_username = None
+    base.notify.smtp_password = None
+    base.notify.smtp_port = 587
+    base.notify.smtp_use_tls = True
+    return await resolve_settings(session, principal, kind, settings=base)
 
 
 async def _deliver(
@@ -250,8 +286,8 @@ async def _deliver(
 ) -> None:
     """Attempt one delivery and record the outcome on the row.
 
-    Never raises. See the module docstring: the caller has real work to commit and a
-    provider outage is not its problem.
+    Never raises for provider failures. The caller is the outbox worker operating on
+    committed rows; it commits the changed delivery status after this function returns.
     """
     channel = notification.channel_enum
     notification.attempts += 1
@@ -260,18 +296,14 @@ async def _deliver(
             # Storing it *is* delivering it. See the module docstring.
             pass
         elif channel is NotificationChannel.SLACK:
-            scoped = await resolve_settings(
-                session, principal, IntegrationKind.SLACK, settings=settings
-            )
+            scoped = await _delivery_settings(session, principal, IntegrationKind.SLACK, settings)
             await SlackClient(scoped, redis).notify(
                 content.subject,
                 channel=notification.recipient,
                 blocks=_slack_blocks(content, severity),
             )
         elif channel is NotificationChannel.EMAIL:
-            scoped = await resolve_settings(
-                session, principal, IntegrationKind.EMAIL, settings=settings
-            )
+            scoped = await _delivery_settings(session, principal, IntegrationKind.EMAIL, settings)
             html = _email_html(content)
             await EmailSender(scoped).send(
                 notification.recipient,
@@ -326,10 +358,10 @@ async def dispatch(
     extra_emails: Sequence[str] = (),
     recipient_user_id: uuid.UUID | None = None,
 ) -> list[Notification]:
-    """Record and attempt one notification across every applicable channel.
+    """Record notifications atomically with the caller's work.
 
-    Returns the rows it created, including suppressed and failed ones -- the caller may
-    want to report "3 sent, 1 suppressed" and cannot reconstruct that from a boolean.
+    Returns the rows it created, including suppressed, in-app sent, and external pending
+    ones. A worker sends the external rows only after the caller commits.
     Rows that already existed for this ``(event, resource, channel, recipient)`` are
     skipped and not returned: a resumed assessment re-running a node must not re-alert.
 
@@ -342,7 +374,14 @@ async def dispatch(
 
     # The client is constructed only to read its configured default channel, which is a
     # settings lookup and does no I/O.
-    slack_default = SlackClient(settings).default_channel
+    if settings.environment == "production" and NotificationChannel.SLACK in targets:
+        slack_integration = await find_integration(session, principal, IntegrationKind.SLACK)
+        slack_default = (
+            str((slack_integration.config or {}).get("default_channel") or "") or None
+            if slack_integration and slack_integration.is_usable else None
+        )
+    else:
+        slack_default = SlackClient(settings).default_channel
 
     created: list[Notification] = []
     for channel in targets:
@@ -355,7 +394,7 @@ async def dispatch(
         ):
             key = _dedupe_key(event, resource_id, channel, recipient)
             if await _already_recorded(session, principal.organization_id, key):
-                log.debug("notification.deduplicated", event=event.value, channel=channel.value)
+                log.debug("notification.deduplicated", notification_event=event.value, channel=channel.value)
                 continue
 
             notification = Notification(
@@ -367,38 +406,51 @@ async def dispatch(
                 recipient_user_id=recipient_user_id or principal.user_id,
                 subject=content.subject[:_MAX_SUBJECT],
                 body=content.body,
-                payload={"link": content.link} if content.link else {},
+                payload={
+                    **({"link": content.link} if content.link else {}),
+                    **({"severity": severity.value} if severity else {}),
+                    **({"html": content.html} if content.html else {}),
+                    **({"blocks": content.blocks} if content.blocks else {}),
+                },
                 resource_type=resource_type,
                 resource_id=resource_id[:80] if resource_id else None,
                 dedupe_key=key,
             )
-            session.add(notification)
-            # Flushed per row so ``notification.id`` is available for the delivery log line
-            # and so a constraint violation names the row that caused it.
-            await session.flush()
+            try:
+                # The pre-read handles replays, but a concurrent request can insert
+                # the same key after that read. A savepoint confines its unique-key
+                # failure to this row instead of aborting the assessment transaction.
+                async with session.begin_nested():
+                    session.add(notification)
+                    await session.flush()
+            except IntegrityError as exc:
+                constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+                if constraint not in (None, "unique_notification") or not await _already_recorded(
+                    session, principal.organization_id, key
+                ):
+                    raise
+                log.debug("notification.deduplicated_race", notification_event=event.value,
+                          channel=channel.value)
+                continue
 
             if suppressed_reason is not None:
                 notification.status = NotificationStatus.SUPPRESSED.value
                 notification.suppressed_reason = suppressed_reason[:200]
-            else:
-                await _deliver(
-                    session,
-                    principal,
-                    notification,
-                    content,
-                    severity=severity,
-                    settings=settings,
-                    redis=redis,
-                )
+            elif channel is NotificationChannel.WEBSOCKET:
+                # The in-app row itself is the delivery. External transports remain
+                # pending until a worker sees this row after the caller commits.
+                notification.status = NotificationStatus.SENT.value
+                notification.sent_at = utcnow()
             created.append(notification)
 
     if created:
         sent = sum(1 for n in created if n.status == NotificationStatus.SENT.value)
         failed = sum(1 for n in created if n.status == NotificationStatus.FAILED.value)
+        queued = sum(1 for n in created if n.status == NotificationStatus.PENDING.value)
         skipped = suppressed_reason is not None
         await audit_service.record(
             session,
-            action=AuditAction.NOTIFICATION_SEND,
+            action=AuditAction.NOTIFICATION_QUEUE,
             principal=principal,
             resource_type=resource_type,
             resource_id=resource_id,
@@ -409,17 +461,68 @@ async def dispatch(
                 "event": event.value,
                 "sent": sent,
                 "failed": failed,
+                "queued": queued,
                 "channels": sorted({n.channel for n in created}),
                 **({"skipped": True} if skipped else {}),
             },
         )
     log.info(
         "notification.dispatched",
-        event=event.value,
+        notification_event=event.value,
         rows=len(created),
         suppressed=suppressed_reason is not None,
     )
     return created
+
+
+async def deliver_pending(
+    session: AsyncSession, *, settings: Settings, redis: Redis | None = None,
+    limit: int = 5,
+) -> int:
+    """Deliver committed external rows while holding row locks across provider calls.
+
+    Multiple workers use SKIP LOCKED, so one worker does not send another's row.
+    The caller commits the resulting sent/failed state after this function returns.
+    """
+    stmt = (
+        select(Notification)
+        .where(
+            Notification.status == NotificationStatus.PENDING.value,
+            Notification.channel.in_((NotificationChannel.SLACK.value, NotificationChannel.EMAIL.value)),
+        )
+        .order_by(Notification.created_at, Notification.id)
+        .limit(max(1, min(limit, 20)))
+        .with_for_update(skip_locked=True)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        severity_value = payload.get("severity")
+        try:
+            severity = Severity(severity_value) if severity_value else None
+        except ValueError:
+            severity = None
+        content = NotificationContent(
+            subject=row.subject or "", body=row.body,
+            link=payload.get("link") if isinstance(payload.get("link"), str) else None,
+            html=payload.get("html") if isinstance(payload.get("html"), str) else None,
+            blocks=[
+                block for block in payload.get("blocks", []) if isinstance(block, dict)
+            ] if isinstance(payload.get("blocks"), list) else [],
+        )
+        actor = Principal(
+            user_id=None, organization_id=row.organization_id,
+            role=Role.VIEWER, actor_type=ACTOR_WORKER,
+        )
+        await _deliver(session, actor, row, content, severity=severity, settings=settings, redis=redis)
+        await audit_service.record(
+            session, action=AuditAction.NOTIFICATION_SEND, principal=actor,
+            resource_type="notification", resource_id=row.id,
+            outcome=(AuditOutcome.SUCCESS if row.status == NotificationStatus.SENT.value
+                     else AuditOutcome.FAILURE),
+            detail={"channel": row.channel, "attempts": row.attempts},
+        )
+    return len(rows)
 
 
 async def _already_recorded(

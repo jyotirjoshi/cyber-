@@ -67,6 +67,57 @@ class AgentMessageOut(BaseModel):
     created_at: dt.datetime
 
 
+AgentActionName = Literal[
+    "sync_github_alerts",
+    "sync_gitlab_alerts",
+    "sync_wazuh_alerts",
+    "sync_sonarqube_alerts",
+    "sync_snyk_issues",
+    "sync_tenable_vulnerabilities",
+    "update_github_alert",
+    "create_jira_ticket",
+    "update_canonical_work",
+]
+
+
+class AgentActionProposeIn(BaseModel):
+    """A narrow action request. Credentials are never accepted in this payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID
+    action: AgentActionName
+    label: str = Field(min_length=1, max_length=300)
+    rationale: str | None = Field(default=None, max_length=2000)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentActionResolveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approve: bool
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class AgentActionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    session_id: uuid.UUID
+    run_id: uuid.UUID | None = None
+    action: AgentActionName
+    label: str
+    rationale: str | None = None
+    payload: dict[str, Any]
+    payload_digest: str
+    status: Literal["pending", "approved", "rejected", "executed", "failed"]
+    resolution_note: str | None = None
+    resolved_at: dt.datetime | None = None
+    executed_at: dt.datetime | None = None
+    result_summary: str | None = None
+    created_at: dt.datetime
+
+
 class AgentStepOut(BaseModel):
     """One recorded graph step. ``*_digest`` fields are summaries, never raw output."""
 
@@ -285,6 +336,9 @@ __all__ = [
     "EVENT_PAYLOADS",
     "AgentEvent",
     "AgentEventType",
+    "AgentActionOut",
+    "AgentActionProposeIn",
+    "AgentActionResolveIn",
     "AgentMessageIn",
     "AgentMessageOut",
     "AgentRunOut",

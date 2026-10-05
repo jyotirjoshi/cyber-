@@ -177,7 +177,12 @@ def _iter_lines(path: Path) -> Iterator[str]:
 
 def parse_hostnames(path: Path, *, asset_type: str = ASSET_TYPE_SUBDOMAIN) -> list[DiscoveredAsset]:
     """One hostname per line -- ``subdomains/subdomains.txt`` and friends."""
-    assets: list[DiscoveredAsset] = []
+    return list(_iter_hostnames(path, asset_type=asset_type))
+
+
+def _iter_hostnames(
+    path: Path, *, asset_type: str = ASSET_TYPE_SUBDOMAIN
+) -> Iterator[DiscoveredAsset]:
     for line in _iter_lines(path):
         #: Some files carry a trailing comma or a resolved IP after whitespace.
         host = line.split()[0].strip().rstrip(".,").lower()
@@ -185,19 +190,19 @@ def parse_hostnames(path: Path, *, asset_type: str = ASSET_TYPE_SUBDOMAIN) -> li
             continue
         name = clean(host, MAX_NAME)
         if name:
-            assets.append(
-                DiscoveredAsset(
-                    name=name,
-                    asset_type=asset_type,
-                    evidence={"name": f"{SOURCE}:{path.name}"},
-                )
+            yield DiscoveredAsset(
+                name=name,
+                asset_type=asset_type,
+                evidence={"name": f"{SOURCE}:{path.name}"},
             )
-    return assets
 
 
 def parse_ip_pairs(path: Path) -> list[DiscoveredAsset]:
     """``hosts/ips.txt`` -- a mix of bare IPs and ``host ip`` pairs across versions."""
-    assets: list[DiscoveredAsset] = []
+    return list(_iter_ip_pairs(path))
+
+
+def _iter_ip_pairs(path: Path) -> Iterator[DiscoveredAsset]:
     for line in _iter_lines(path):
         parts = [part.strip().rstrip(",") for part in re.split(r"[\s,\[\]]+", line) if part]
         host = next((p for p in parts if is_hostname(p.lower())), None)
@@ -205,32 +210,30 @@ def parse_ip_pairs(path: Path) -> list[DiscoveredAsset]:
         if host:
             name = clean(host.lower(), MAX_NAME)
             if name:
-                assets.append(
-                    DiscoveredAsset(
-                        name=name,
-                        asset_type=ASSET_TYPE_SUBDOMAIN,
-                        ip_address=ip,
-                        evidence={
-                            "name": f"{SOURCE}:{path.name}",
-                            **({"ip_address": f"{SOURCE}:{path.name}"} if ip else {}),
-                        },
-                    )
+                yield DiscoveredAsset(
+                    name=name,
+                    asset_type=ASSET_TYPE_SUBDOMAIN,
+                    ip_address=ip,
+                    evidence={
+                        "name": f"{SOURCE}:{path.name}",
+                        **({"ip_address": f"{SOURCE}:{path.name}"} if ip else {}),
+                    },
                 )
         elif ip:
-            assets.append(
-                DiscoveredAsset(
-                    name=ip,
-                    asset_type=ASSET_TYPE_HOST,
-                    ip_address=ip,
-                    evidence={"name": f"{SOURCE}:{path.name}"},
-                )
+            yield DiscoveredAsset(
+                name=ip,
+                asset_type=ASSET_TYPE_HOST,
+                ip_address=ip,
+                evidence={"name": f"{SOURCE}:{path.name}"},
             )
-    return assets
 
 
 def parse_web_urls(path: Path) -> list[DiscoveredAsset]:
     """``webs/webs.txt`` -- one live URL per line, sometimes with a status code appended."""
-    assets: list[DiscoveredAsset] = []
+    return list(_iter_web_urls(path))
+
+
+def _iter_web_urls(path: Path) -> Iterator[DiscoveredAsset]:
     for line in _iter_lines(path):
         url = line.split()[0].strip()
         if not url.startswith(("http://", "https://")):
@@ -241,17 +244,14 @@ def parse_web_urls(path: Path) -> list[DiscoveredAsset]:
         host, port = _split_url(url)
         if not host:
             continue
-        assets.append(
-            DiscoveredAsset(
-                name=name,
-                asset_type=ASSET_TYPE_URL,
-                port=port,
-                protocol="tcp",
-                service="https" if url.startswith("https://") else "http",
-                evidence={"name": f"{SOURCE}:{path.name}", "service": f"{SOURCE}:{path.name}"},
-            )
+        yield DiscoveredAsset(
+            name=name,
+            asset_type=ASSET_TYPE_URL,
+            port=port,
+            protocol="tcp",
+            service="https" if url.startswith("https://") else "http",
+            evidence={"name": f"{SOURCE}:{path.name}", "service": f"{SOURCE}:{path.name}"},
         )
-    return assets
 
 
 def parse_httpx_jsonl(path: Path) -> list[DiscoveredAsset]:
@@ -260,7 +260,10 @@ def parse_httpx_jsonl(path: Path) -> list[DiscoveredAsset]:
     The richest source: title, status, technology stack and TLS subject in one place. Also the
     most attacker-influenced, which is why every extracted string goes through :func:`clean`.
     """
-    assets: list[DiscoveredAsset] = []
+    return list(_iter_httpx_jsonl(path))
+
+
+def _iter_httpx_jsonl(path: Path) -> Iterator[DiscoveredAsset]:
     for line in _iter_lines(path):
         if not line.startswith("{"):
             continue
@@ -286,27 +289,24 @@ def parse_httpx_jsonl(path: Path) -> list[DiscoveredAsset]:
             if tech
         )
         status_code = record.get("status_code") or record.get("status-code")
-        assets.append(
-            DiscoveredAsset(
-                name=url,
-                asset_type=ASSET_TYPE_URL,
-                ip_address=clean(
-                    record.get("host") if _is_ip(str(record.get("host"))) else None, 64
-                ),
-                port=_as_port(record.get("port")) or port,
-                protocol="tcp",
-                service=clean(record.get("scheme") or record.get("webserver"), MAX_SERVICE),
-                technology=technology,
-                http_title=clean(record.get("title"), MAX_TITLE),
-                http_status_code=_as_int(status_code),
-                tls_subject=clean(_tls_subject(record), MAX_TLS_SUBJECT),
-                evidence={
-                    key: f"{SOURCE}:httpx"
-                    for key in ("name", "technology", "http_title", "http_status_code")
-                },
-            )
+        yield DiscoveredAsset(
+            name=url,
+            asset_type=ASSET_TYPE_URL,
+            ip_address=clean(
+                record.get("host") if _is_ip(str(record.get("host"))) else None, 64
+            ),
+            port=_as_port(record.get("port")) or port,
+            protocol="tcp",
+            service=clean(record.get("scheme") or record.get("webserver"), MAX_SERVICE),
+            technology=technology,
+            http_title=clean(record.get("title"), MAX_TITLE),
+            http_status_code=_as_int(status_code),
+            tls_subject=clean(_tls_subject(record), MAX_TLS_SUBJECT),
+            evidence={
+                key: f"{SOURCE}:httpx"
+                for key in ("name", "technology", "http_title", "http_status_code")
+            },
         )
-    return assets
 
 
 def _tls_subject(record: Mapping[str, object]) -> str | None:
@@ -421,16 +421,16 @@ def parse_recon_output(out_dir: Path, *, root_domain: str | None = None) -> list
     return list(merged.values())
 
 
-def _run_parser(parser: str, path: Path) -> list[DiscoveredAsset]:
+def _run_parser(parser: str, path: Path) -> Iterator[DiscoveredAsset]:
     if parser == "hostnames":
-        return parse_hostnames(path)
+        return _iter_hostnames(path)
     if parser == "ip_pairs":
-        return parse_ip_pairs(path)
+        return _iter_ip_pairs(path)
     if parser == "web_urls":
-        return parse_web_urls(path)
+        return _iter_web_urls(path)
     if parser == "httpx":
-        return parse_httpx_jsonl(path)
-    return []
+        return _iter_httpx_jsonl(path)
+    return iter(())
 
 
 __all__ = [

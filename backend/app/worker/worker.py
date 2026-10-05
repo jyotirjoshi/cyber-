@@ -74,10 +74,19 @@ from app.db.models.agent import AgentRun
 from app.db.models.assessment import Assessment
 from app.db.repository import tenant_select
 from app.db.session import session_scope
+from app.services.agent_action import execute_approved_batch
 from app.services.assessment import transition
+from app.services.canonical_risk_refresh import refresh_stale_risk_batch
 from app.services.context import Principal
 from app.services.job import cancel_jobs_for_assessment, reclaim_orphans
-from app.worker.protocol import RunRequest
+from app.services.notification import deliver_pending
+from app.services.recurring_scan import run_due_scans
+from app.worker.dispatch import deliver_pending_dispatches
+from app.worker.protocol import (
+    WORKER_LIVENESS_MAX_AGE_SECONDS,
+    RunRequest,
+    worker_liveness_key,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -92,10 +101,10 @@ _TERMINAL_RUN_STATUSES: frozenset[AgentRunStatus] = frozenset(
 #: immediately, so this only gates the idle case).
 _READ_BLOCK_MS = 5_000
 
-#: Upper bound on messages pulled per read / reclaim. The worker drives runs one at a time, so
-#: this batches the *reads*, not the execution -- extra entries wait in the PEL.
-_READ_BATCH = 10
-_RECLAIM_BATCH = 20
+#: One process drives one run at a time. Claiming more would pin the extra entries in
+#: this consumer's PEL for the duration of a long scan instead of offering them to peers.
+_READ_BATCH = 1
+_RECLAIM_BATCH = 1
 
 #: Cadence of the per-run monitor: it stamps the run heartbeat (liveness for reclaim) and polls
 #: for an operator cancellation. Far below ``claim_idle_ms`` so a healthy run's heartbeat never
@@ -107,6 +116,46 @@ _MAINTENANCE_INTERVAL_SECONDS = 30.0
 
 #: Backoff after a Redis read error, so a transient outage does not become a hot loop.
 _ERROR_BACKOFF_SECONDS = 2.0
+_RETRY_BASE_SECONDS = 120
+_RETRY_MAX_SECONDS = 1800
+_RETRY_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
+_MAX_RUN_ATTEMPTS = 5
+_RUN_SLOT_LEASE_MS = 90_000
+_RUN_SLOT_CLAIM_LUA = """
+local key, run_key, member = KEYS[1], KEYS[2], ARGV[4]
+local now, lease, limit = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+local owner = redis.call('GET', run_key)
+if owner and owner ~= member then
+    return 0
+end
+if not redis.call('ZSCORE', key, member) and redis.call('ZCARD', key) >= limit then
+    return 0
+end
+redis.call('ZADD', key, now + lease, member)
+redis.call('PEXPIRE', key, lease * 2)
+redis.call('SET', run_key, member, 'PX', lease)
+return 1
+"""
+_RUN_SLOT_RENEW_LUA = """
+local key, run_key, member = KEYS[1], KEYS[2], ARGV[3]
+local now, lease = tonumber(ARGV[1]), tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if redis.call('GET', run_key) ~= member or not redis.call('ZSCORE', key, member) then
+    return 0
+end
+redis.call('ZADD', key, now + lease, member)
+redis.call('PEXPIRE', key, lease * 2)
+redis.call('PEXPIRE', run_key, lease)
+return 1
+"""
+_RUN_SLOT_RELEASE_LUA = """
+redis.call('ZREM', KEYS[1], ARGV[1])
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+    redis.call('DEL', KEYS[2])
+end
+return 1
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +184,7 @@ class _CancelState:
     """
 
     operator: bool = False
+    lease_lost: bool = False
     stop: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -193,6 +243,7 @@ class AgentWorker:
         than crashing the process.
         """
         await self._ensure_group()
+        await self._pulse_liveness()
         log.info(
             "worker.started",
             worker_id=self._worker_id,
@@ -211,6 +262,10 @@ class AgentWorker:
         finally:
             maintenance.cancel()
             await asyncio.gather(maintenance, return_exceptions=True)
+            try:
+                await self._remove_liveness()
+            except RedisError as exc:
+                log.warning("worker.liveness_remove_failed", error=type(exc).__name__)
             log.info("worker.stopped", worker_id=self._worker_id)
 
     def request_stop(self) -> None:
@@ -332,23 +387,29 @@ class AgentWorker:
         try:
             request = RunRequest.from_fields(fields)
         except ValueError as exc:
-            # A poison message: acknowledge and drop it, or it is redelivered forever and wedges
-            # the group. The error never quotes the payload (SEC-002).
+            # Preserve only metadata, never the possibly secret-bearing payload.
             log.warning("worker.poison_message", message_id=message_id, error=type(exc).__name__)
-            await self._ack(message_id)
+            if await self._dead_letter(message_id, "invalid_request"):
+                await self._ack(message_id)
             return
 
         run_id = request.run_id
         ctx = await self._load_context(run_id, message_id)
         if ctx is None:
             log.warning("worker.run_missing", run_id=str(run_id), message_id=message_id)
-            await self._ack(message_id)
+            if await self._dead_letter(message_id, "run_missing"):
+                await self._ack(message_id)
             return
 
-        if reclaimed and self._heartbeat_fresh(ctx.heartbeat_at):
-            # A live worker still owns this run (see the module docstring on healthy long runs).
-            # Leave the entry pending -- the owner will settle and ack it.
-            log.debug("worker.reclaim_deferred", run_id=str(run_id), message_id=message_id)
+        if ctx.run_status is AgentRunStatus.RUNNING and self._heartbeat_fresh(ctx.heartbeat_at):
+            # A reclaimed original message may now belong to a healthy owner; leave it
+            # pending so that owner can acknowledge it. A separate fresh delivery is a
+            # duplicate and must not start a second graph invocation.
+            if reclaimed:
+                log.debug("worker.reclaim_deferred", run_id=str(run_id), message_id=message_id)
+            else:
+                log.info("worker.duplicate_deferred", run_id=str(run_id), message_id=message_id)
+                await self._ack(message_id)
             return
 
         if ctx.assessment_status is AssessmentStatus.CANCELLING:
@@ -361,7 +422,76 @@ class AgentWorker:
             await self._ack(message_id)
             return
 
-        await self._run(message_id, run_id, ctx, self._principal_of(request))
+        try:
+            if not await self._retry_due(message_id):
+                log.debug("worker.retry_deferred", run_id=str(run_id), message_id=message_id)
+                return
+            if not await self._claim_run_slot(ctx.organization_id, run_id):
+                log.info("worker.tenant_capacity_deferred", organization_id=str(ctx.organization_id))
+                return
+        except RedisError as exc:
+            log.warning("worker.run_admission_failed", run_id=str(run_id), error=type(exc).__name__)
+            return
+        try:
+            try:
+                attempts = await self._begin_attempt(message_id)
+            except RedisError as exc:
+                log.warning("worker.retry_state_failed", run_id=str(run_id), error=type(exc).__name__)
+                return
+            if attempts > _MAX_RUN_ATTEMPTS:
+                if await self._dead_letter(message_id, "retry_exhausted"):
+                    try:
+                        await self._settle_retry_exhausted(run_id, ctx)
+                    except Exception as exc:
+                        log.warning(
+                            "worker.retry_settle_failed",
+                            run_id=str(run_id), error=type(exc).__name__,
+                        )
+                        return
+                    await self._ack(message_id)
+                return
+
+            await self._run(message_id, run_id, ctx, self._principal_of(request), attempts)
+        finally:
+            await self._release_run_slot(ctx.organization_id, run_id)
+
+    def _run_slot_key(self, organization_id: uuid.UUID) -> str:
+        return f"{self._stream}:run-slots:{organization_id}"
+
+    def _run_slot_member(self, run_id: uuid.UUID) -> str:
+        return f"{self._worker_id}:{run_id}"
+
+    def _run_lock_key(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> str:
+        return f"{self._stream}:run-lock:{organization_id}:{run_id}"
+
+    async def _claim_run_slot(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> bool:
+        now_ms = int(_now().timestamp() * 1000)
+        accepted = await cast(Awaitable[int], self._redis.eval(
+            _RUN_SLOT_CLAIM_LUA, 2, self._run_slot_key(organization_id),
+            self._run_lock_key(organization_id, run_id),
+            now_ms, _RUN_SLOT_LEASE_MS,
+            self._settings.agent.max_concurrent_runs_per_org,
+            self._run_slot_member(run_id),
+        ))
+        return int(accepted) == 1
+
+    async def _release_run_slot(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> None:
+        try:
+            await cast(Awaitable[int], self._redis.eval(
+                _RUN_SLOT_RELEASE_LUA, 2, self._run_slot_key(organization_id),
+                self._run_lock_key(organization_id, run_id), self._run_slot_member(run_id),
+            ))
+        except RedisError as exc:
+            log.warning("worker.run_slot_release_failed", error=type(exc).__name__)
+
+    async def _renew_run_slot(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> bool:
+        renewed = await cast(Awaitable[int], self._redis.eval(
+            _RUN_SLOT_RENEW_LUA, 2, self._run_slot_key(organization_id),
+            self._run_lock_key(organization_id, run_id),
+            int(_now().timestamp() * 1000), _RUN_SLOT_LEASE_MS,
+            self._run_slot_member(run_id),
+        ))
+        return int(renewed) == 1
 
     async def _run(
         self,
@@ -369,6 +499,7 @@ class AgentWorker:
         run_id: uuid.UUID,
         ctx: _RunContext,
         principal: Principal | None,
+        attempts: int = 1,
     ) -> None:
         """Drive one run under a heartbeat + cancel monitor, then ack iff it settled.
 
@@ -395,6 +526,13 @@ class AgentWorker:
                 await asyncio.shield(self._cancel_teardown(run_id, ctx, principal))
                 await self._ack(message_id)
                 return
+            if canceller.lease_lost and not self._stopping:
+                log.warning("worker.run_lease_lost", run_id=str(run_id))
+                try:
+                    await self._schedule_retry(message_id, attempts)
+                except RedisError as exc:
+                    log.warning("worker.retry_schedule_failed", error=type(exc).__name__)
+                return
             # Shutdown: leave the run RUNNING and its message pending for reclaim (FR-033).
             log.info("worker.run_shutdown_interrupt", run_id=str(run_id))
             raise
@@ -405,21 +543,37 @@ class AgentWorker:
             await self._ack(message_id)
             return
         except CynuxError as exc:
-            # advance raises CynuxError only for a run that cannot be processed at all (missing
-            # or not an assessment run). Retrying will not help, so ack and drop.
+            # A permanently unprocessable run must be inspectable after it leaves the queue.
             log.warning(
                 "worker.run_unprocessable",
                 run_id=str(run_id),
                 error_code=exc.code,
                 error_category=exc.category.value,
             )
-            await self._ack(message_id)
+            if await self._dead_letter(message_id, "unprocessable_run"):
+                try:
+                    await self._settle_retry_exhausted(run_id, ctx)
+                except Exception as settle_exc:
+                    log.warning(
+                        "worker.unprocessable_settle_failed",
+                        run_id=str(run_id), error=type(settle_exc).__name__,
+                    )
+                    return
+                await self._ack(message_id)
             return
         except Exception as exc:
             # advance settles graph failures internally, so this is an unexpected fault in its
             # own bookkeeping (e.g. the database blinked while settling). Do NOT ack -- leave the
             # message pending so reclaim retries once the fault clears.
             log.error("worker.run_error", run_id=str(run_id), exc_type=type(exc).__name__)
+            try:
+                await self._schedule_retry(message_id, attempts)
+            except RedisError as retry_exc:
+                log.warning(
+                    "worker.retry_schedule_failed",
+                    run_id=str(run_id),
+                    error=type(retry_exc).__name__,
+                )
             return
         finally:
             canceller.stop.set()
@@ -452,6 +606,15 @@ class AgentWorker:
                 return  # stop was set -- the run has settled
             except TimeoutError:
                 pass
+            try:
+                renewed = await self._renew_run_slot(ctx.organization_id, run_id)
+            except RedisError as exc:
+                log.warning("worker.run_lease_renew_failed", error=type(exc).__name__)
+                renewed = False
+            if not renewed:
+                canceller.lease_lost = True
+                advance_task.cancel()
+                return
             try:
                 cancelling = await self._heartbeat_and_check_cancel(run_id, ctx)
             except Exception as exc:
@@ -546,6 +709,27 @@ class AgentWorker:
             assessment_status=ctx.assessment_status.value if ctx.assessment_status else None,
         )
 
+    async def _settle_retry_exhausted(self, run_id: uuid.UUID, ctx: _RunContext) -> None:
+        """End a run only after all recoverable worker attempts have been spent."""
+        reason = "The worker could not complete this assessment after repeated internal failures."
+        async with session_scope(self._settings) as session:
+            run = await session.get(AgentRun, run_id)
+            if run is None or run.organization_id != ctx.organization_id:
+                return
+            if run.status_enum not in _TERMINAL_RUN_STATUSES:
+                now = _now()
+                run.status = AgentRunStatus.FAILED.value
+                run.completed_at = now
+                run.heartbeat_at = now
+                run.failure_reason = reason
+            if ctx.assessment_id is not None:
+                assessment = await self._load_assessment(
+                    session, ctx.organization_id, ctx.assessment_id
+                )
+                if assessment is not None and not assessment.status_enum.is_terminal:
+                    await transition(session, assessment, AssessmentStatus.FAILED, reason=reason)
+        log.error("worker.run_retry_exhausted", run_id=str(run_id))
+
     # -- data access ---------------------------------------------------------
 
     async def _load_context(self, run_id: uuid.UUID, message_id: str) -> _RunContext | None:
@@ -560,7 +744,11 @@ class AgentWorker:
             run = await session.get(AgentRun, run_id)
             if run is None:
                 return None
-            if run.status_enum not in _TERMINAL_RUN_STATUSES and run.queue_message_id != message_id:
+            if (
+                run.status_enum not in _TERMINAL_RUN_STATUSES
+                and run.queue_message_id != message_id
+                and (run.status_enum is not AgentRunStatus.RUNNING or run.queue_message_id is None)
+            ):
                 run.queue_message_id = message_id
             assessment_status = None
             if run.assessment_id is not None:
@@ -610,7 +798,7 @@ class AgentWorker:
     # -- maintenance ---------------------------------------------------------
 
     async def _maintenance_loop(self) -> None:
-        """Periodically fail scanner jobs whose worker stopped heartbeating (FR-040).
+        """Reap scanner jobs and deliver committed notification outbox rows.
 
         A sibling of the consume loop, not part of it, so a worker busy driving one long run
         still reaps orphaned ``ScannerJob`` rows.  This reclaims *scanner jobs*, which is a
@@ -620,12 +808,76 @@ class AgentWorker:
         while not self._stopping:
             try:
                 await asyncio.sleep(_MAINTENANCE_INTERVAL_SECONDS)
+                await self._pulse_liveness()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.liveness_pulse_failed", error=type(exc).__name__)
+            try:
                 async with session_scope(self._settings) as session:
                     await reclaim_orphans(session)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.warning("worker.maintenance_failed", error=type(exc).__name__)
+            try:
+                async with session_scope(self._settings) as session:
+                    scheduled = await run_due_scans(session, self._settings)
+                if scheduled:
+                    log.info("worker.recurring_scans_started", count=scheduled)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.recurring_scan_failed", error=type(exc).__name__)
+            try:
+                async with session_scope(self._settings) as session:
+                    dispatched = await deliver_pending_dispatches(
+                        session, self._redis, self._settings
+                    )
+                if dispatched:
+                    log.info("worker.run_dispatches_published", count=dispatched)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.run_dispatch_failed", error=type(exc).__name__)
+            try:
+                async with session_scope(self._settings) as session:
+                    await deliver_pending(session, settings=self._settings, redis=self._redis)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.notification_delivery_failed", error=type(exc).__name__)
+            try:
+                async with session_scope(self._settings) as session:
+                    executed = await execute_approved_batch(
+                        session, settings=self._settings, redis=self._redis
+                    )
+                if executed:
+                    log.info("worker.agent_actions_settled", count=executed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.agent_action_execution_failed", error=type(exc).__name__)
+            try:
+                async with session_scope(self._settings) as session:
+                    refreshed = await refresh_stale_risk_batch(session)
+                if refreshed:
+                    log.info("worker.canonical_risk_refreshed", count=refreshed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.canonical_risk_refresh_failed", error=type(exc).__name__)
+
+    async def _pulse_liveness(self, *, now: dt.datetime | None = None) -> None:
+        score = (now or _now()).timestamp()
+        key = worker_liveness_key(self._stream)
+        await self._redis.zadd(key, {self._worker_id: score})
+        await self._redis.zremrangebyscore(
+            key, "-inf", score - WORKER_LIVENESS_MAX_AGE_SECONDS
+        )
+
+    async def _remove_liveness(self) -> None:
+        await self._redis.zrem(worker_liveness_key(self._stream), self._worker_id)
 
     # -- helpers -------------------------------------------------------------
 
@@ -659,11 +911,53 @@ class AgentWorker:
             return None
 
     async def _ack(self, message_id: str) -> None:
-        """Acknowledge a message, removing it from the group PEL (group-scoped; see the module docstring)."""
+        """Acknowledge settled work before deleting its stream entry."""
         try:
             await cast(Awaitable[int], self._redis.xack(self._stream, self._group, message_id))
+            await cast(Awaitable[int], self._redis.xdel(self._stream, message_id))
         except RedisError as exc:
             log.warning("worker.ack_failed", message_id=message_id, error=type(exc).__name__)
+
+    async def _dead_letter(self, message_id: str, reason: str) -> bool:
+        """Persist a safe failure record before removing an undeliverable stream entry."""
+        try:
+            await cast(
+                Awaitable[Any],
+                self._redis.xadd(
+                    f"{self._stream}:dead",
+                    {"source_message_id": message_id, "reason": reason},
+                ),
+            )
+        except RedisError as exc:
+            log.warning(
+                "worker.dead_letter_failed", message_id=message_id, error=type(exc).__name__
+            )
+            return False
+        return True
+
+    def _retry_key(self, message_id: str) -> str:
+        return f"{self._stream}:retry:{message_id}"
+
+    async def _begin_attempt(self, message_id: str) -> int:
+        """Count actual graph invocations, including ones killed by process crashes."""
+        key = self._retry_key(message_id)
+        count = await cast(Awaitable[int], self._redis.hincrby(key, "attempts", 1))
+        await cast(Awaitable[bool], self._redis.expire(key, _RETRY_STATE_TTL_SECONDS))
+        return int(count)
+
+    async def _schedule_retry(self, message_id: str, attempts: int) -> None:
+        delay = min(_RETRY_BASE_SECONDS * (2 ** (attempts - 1)), _RETRY_MAX_SECONDS)
+        due_ms = int((_now().timestamp() + delay) * 1000)
+        await cast(
+            Awaitable[int], self._redis.hset(self._retry_key(message_id), "due_ms", str(due_ms))
+        )
+
+    async def _retry_due(self, message_id: str) -> bool:
+        due_ms = await cast(
+            Awaitable[bytes | str | None],
+            self._redis.hget(self._retry_key(message_id), "due_ms"),
+        )
+        return due_ms is None or int(due_ms) <= int(_now().timestamp() * 1000)
 
 
 def _now() -> dt.datetime:

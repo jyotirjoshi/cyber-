@@ -81,13 +81,13 @@ from app.db.enums import (
     Role,
     Scope,
 )
-from app.llm.gateway import LLMGateway
 from app.db.models.agent import AgentRun
 from app.db.models.assessment import Assessment
 from app.db.repository import tenant_select
 from app.db.session import session_scope
-from app.services.assessment import assessment_or_404, transition
+from app.llm.gateway import LLMGateway
 from app.services import integration as integration_service
+from app.services.assessment import assessment_or_404, transition
 from app.services.context import ACTOR_WORKER, Principal
 from app.services.notification import notify_assessment_failed
 

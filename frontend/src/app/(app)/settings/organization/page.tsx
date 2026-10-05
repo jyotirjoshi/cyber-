@@ -16,12 +16,14 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { fieldError } from "@/lib/errors";
 import { formatDateTime, formatNumber, humanize } from "@/lib/format";
+import { RISK_WEIGHT_KEYS, totalRiskWeights } from "@/lib/risk-weights";
 import type {
   MemberInviteIn,
   MemberOut,
   OrganizationOut,
   OrganizationUpdateIn,
   Role,
+  RiskWeights,
 } from "@/lib/types";
 
 const ROLES: readonly Role[] = [
@@ -59,6 +61,28 @@ function OrgSummary({ org }: { org: OrganizationOut }) {
           {formatNumber(org.max_concurrent_scanner_jobs)}
         </dd>
       </div>
+      <div>
+        <dt className="text-xs font-medium text-muted">Asset capacity</dt>
+        <dd className="mt-1 text-sm text-fg">{formatNumber(org.entitlements.max_assets)}</dd>
+      </div>
+      <div>
+        <dt className="text-xs font-medium text-muted">Member capacity</dt>
+        <dd className="mt-1 text-sm text-fg">{formatNumber(org.entitlements.max_members)}</dd>
+      </div>
+      <div>
+        <dt className="text-xs font-medium text-muted">Integration capacity</dt>
+        <dd className="mt-1 text-sm text-fg">
+          {formatNumber(org.entitlements.max_integrations)}
+        </dd>
+      </div>
+      <div>
+        <dt className="text-xs font-medium text-muted">Active validation</dt>
+        <dd className="mt-1">
+          <Badge tone={org.entitlements.allow_active_validation ? "warn" : "neutral"}>
+            {org.entitlements.allow_active_validation ? "Enabled" : "Disabled"}
+          </Badge>
+        </dd>
+      </div>
     </dl>
   );
 }
@@ -73,8 +97,12 @@ function OrgEditForm({
   const { toast } = useToast();
   const [name, setName] = React.useState(org.name);
   const [maxJobs, setMaxJobs] = React.useState(String(org.max_concurrent_scanner_jobs));
-  const [policyText, setPolicyText] = React.useState("");
+  const [policyText, setPolicyText] = React.useState(JSON.stringify(org.policy, null, 2));
   const [policyError, setPolicyError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setPolicyText(JSON.stringify(org.policy, null, 2));
+  }, [org.policy]);
 
   const mutation = useMutation(
     (body: OrganizationUpdateIn) => api.organization.update(body),
@@ -175,6 +203,62 @@ function OrgEditForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+function RiskWeightsEditor({
+  org,
+  onUpdated,
+}: {
+  org: OrganizationOut;
+  onUpdated: (next: OrganizationOut) => void;
+}) {
+  const { toast } = useToast();
+  const [weights, setWeights] = React.useState<RiskWeights>(org.policy.risk_weights);
+  const [validationError, setValidationError] = React.useState<string | null>(null);
+  React.useEffect(() => setWeights(org.policy.risk_weights), [org.policy.risk_weights]);
+  const mutation = useMutation(
+    () => api.organization.update({
+      policy: { ...org.policy, risk_weights: weights },
+    }),
+    {
+      onSuccess: (next) => {
+        onUpdated(next);
+        setValidationError(null);
+        toast({ title: "Risk weights updated", tone: "ok" });
+      },
+    },
+  );
+  const total = totalRiskWeights(weights);
+  return (
+    <Card>
+      <CardHeader><CardTitle>Risk scoring weights</CardTitle></CardHeader>
+      <CardBody>
+        <form className="space-y-4" onSubmit={(event) => {
+          event.preventDefault();
+          if (RISK_WEIGHT_KEYS.some((key) => !Number.isFinite(weights[key]) || weights[key] < 0 || weights[key] > 100)
+            || Math.abs(total - 100) > 0.000001) {
+            setValidationError("Each weight must be between 0 and 100, and the total must equal 100.");
+            return;
+          }
+          setValidationError(null);
+          void mutation.run();
+        }}>
+          <p className="text-sm text-muted">Tune how the canonical queue balances severity, confirmed exploitation, EPSS, exposure, asset criticality, and ransomware evidence. Unknown intelligence is shown as unknown.</p>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {RISK_WEIGHT_KEYS.map((key) => (
+              <Field key={key} label={humanize(key)} htmlFor={`risk-weight-${key}`}>
+                <Input id={`risk-weight-${key}`} type="number" min={0} max={100} step="0.01"
+                  value={weights[key]} onChange={(event) => setWeights((current) => ({ ...current, [key]: Number(event.target.value) }))} />
+              </Field>
+            ))}
+          </div>
+          <p className="text-sm text-muted">Total: {Number.isFinite(total) ? total.toFixed(2) : "invalid"} / 100</p>
+          <InlineError message={validationError ?? mutation.errorMessage} />
+          <Button type="submit" loading={mutation.loading}>Save risk weights</Button>
+        </form>
+      </CardBody>
+    </Card>
   );
 }
 
@@ -425,6 +509,8 @@ export default function OrganizationPage() {
           ) : null}
         </CardBody>
       </Card>
+
+      {canManageOrg && org.data && <RiskWeightsEditor org={org.data} onUpdated={org.setData} />}
 
       <Card>
         <CardHeader>

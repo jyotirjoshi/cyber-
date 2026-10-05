@@ -41,7 +41,8 @@ from app.api.v1.projections import load_approval_out
 from app.db.models.assessment import Approval
 from app.schemas.assessment import ApprovalOut, ApproveIn
 from app.services import approval as approval_service
-from app.worker import RunAction, RunRequest, publish_run_request
+from app.worker import RunAction
+from app.worker.dispatch import deliver_run_dispatch, stage_run_dispatch
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
@@ -90,10 +91,21 @@ async def resolve_approval(
     """
     resolved = await approval_service.resolve_approval(session, principal, approval_id, payload)
     run_id = resolved.agent_run_id
+    dispatch_id = None
+    if run_id is not None:
+        dispatch = stage_run_dispatch(
+            session, organization_id=principal.organization_id,
+            run_id=run_id, action=RunAction.RESUME,
+        )
+        dispatch_id = dispatch.id
     await session.commit()
 
-    if run_id is not None:
-        await publish_run_request(redis, settings, RunRequest.new(run_id, RunAction.RESUME))
+    if dispatch_id is not None:
+        await deliver_run_dispatch(
+            session, organization_id=principal.organization_id, dispatch_id=dispatch_id,
+            redis=redis, settings=settings,
+        )
+        await session.commit()
 
     approval = await approval_service.get_approval(session, principal, approval_id)
     return await load_approval_out(session, approval, resolved_by=_resolver_email(approval))

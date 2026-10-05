@@ -243,7 +243,11 @@ export type IntegrationKind =
   | "misp"
   | "nvd"
   | "github"
-  | "gitlab";
+  | "gitlab"
+  | "wazuh"
+  | "sonarqube"
+  | "snyk"
+  | "tenable";
 
 export type IntegrationStatus = "configured" | "unverified" | "error" | "disabled";
 
@@ -386,7 +390,33 @@ export interface OrganizationOut {
   slug: string;
   is_active: boolean;
   max_concurrent_scanner_jobs: number;
+  entitlements: OrganizationEntitlements;
+  policy: OrgPolicyOut;
   created_at: IsoDateTime;
+}
+
+export interface RiskWeights {
+  severity: number;
+  exploitation: number;
+  exploit_probability: number;
+  exposure: number;
+  asset_criticality: number;
+  ransomware: number;
+}
+
+export interface OrgPolicyOut {
+  risk_weights: RiskWeights;
+  [key: string]: unknown;
+}
+
+/** Self-service capability snapshot returned by the organization API. */
+export interface OrganizationEntitlements {
+  max_assets: number;
+  max_members: number;
+  max_integrations: number;
+  max_active_assessments: number;
+  allow_active_validation: boolean;
+  allow_agentic_pentest: boolean;
 }
 
 export interface OrganizationUpdateIn {
@@ -610,6 +640,10 @@ export interface AssetOut {
   criticality: Criticality;
   criticality_source: CriticalitySource;
   criticality_rationale: string | null;
+  owner_user_id: Uuid | null;
+  owner_team: string | null;
+  environment: AssetEnvironment;
+  groups: string[];
   risk_score: number;
   selected_for_scanning: boolean;
   selection_rationale: string | null;
@@ -621,6 +655,15 @@ export interface AssetOut {
   created_at: IsoDateTime;
 }
 
+export type AssetEnvironment = "unknown" | "production" | "staging" | "development" | "test";
+
+export interface AssetContextIn {
+  owner_user_id?: Uuid | null;
+  owner_team?: string | null;
+  environment?: AssetEnvironment;
+  groups?: string[];
+}
+
 export interface AssetCriticalityIn {
   criticality: Criticality;
   rationale?: string | null;
@@ -628,6 +671,7 @@ export interface AssetCriticalityIn {
 
 export interface AssetFilter {
   criticality?: Criticality;
+  environment?: AssetEnvironment;
   selected?: boolean;
   internet_exposed?: boolean;
   status?: AssetStatus;
@@ -697,6 +741,143 @@ export interface TicketLinkOut {
   external_status: string | null;
   created_by_agent: boolean;
   created_at: IsoDateTime;
+}
+
+/** Finding list row. */
+export interface ExternalAlertOut {
+  id: Uuid;
+  provider: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable";
+  category: string;
+  title: string;
+  severity: Severity;
+  status: "open" | "resolved" | "dismissed" | "fixed";
+  resource: string | null;
+  cve_ids: string[];
+  first_seen_at: IsoDateTime | null;
+  last_seen_at: IsoDateTime | null;
+  missing_sync_count: number;
+  triage_status: TriageStatus;
+}
+
+export interface ExposureOut {
+  id: string;
+  source: "defectdojo" | "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable";
+  title: string;
+  severity: Severity;
+  status: string;
+  resource: string | null;
+  seen_at: string | null;
+}
+
+export type CanonicalFindingStatus = "new" | "open" | "reopened" | "mitigated" | "accepted_risk" | "false_positive" | "closed";
+
+export interface CanonicalFindingOut {
+  id: Uuid;
+  asset_id: Uuid;
+  title: string;
+  severity: Severity;
+  status: CanonicalFindingStatus;
+  cve_ids: string[];
+  risk_score: number;
+  risk_factors: {
+    components?: Record<string, number>;
+    weights?: Record<string, number>;
+    inputs?: Record<string, unknown>;
+    unavailable?: string[];
+  };
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+  closed_at: IsoDateTime | null;
+  status_version: number;
+  assignee_user_id: Uuid | null;
+  due_at: IsoDateTime | null;
+  remediation_plan: string | null;
+}
+
+export interface CanonicalObservationOut {
+  id: Uuid;
+  provider: string;
+  external_id: string;
+  cve_id: string;
+  title: string;
+  severity: Severity;
+  source_status: string;
+  source_url: string | null;
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+}
+
+export interface CanonicalHistoryOut {
+  id: Uuid;
+  previous_status: CanonicalFindingStatus | null;
+  new_status: CanonicalFindingStatus;
+  reason: string;
+  actor_user_id: Uuid | null;
+  occurred_at: IsoDateTime;
+}
+
+export interface CanonicalFindingDetailOut extends CanonicalFindingOut {
+  observations: CanonicalObservationOut[];
+  history: CanonicalHistoryOut[];
+  tickets: TicketLinkOut[];
+}
+
+export interface CanonicalStatusDecisionIn {
+  status: "open" | "accepted_risk" | "false_positive";
+  reason: string;
+  expected_version: number;
+}
+
+export interface CanonicalWorkIn {
+  expected_version: number;
+  assignee_user_id?: Uuid | null;
+  due_at?: IsoDateTime | null;
+  remediation_plan?: string | null;
+}
+
+export interface ExposureFilter {
+  source?: ExposureOut["source"];
+  severity?: Severity;
+}
+
+export type TriageStatus = "new" | "investigating" | "risk_accepted" | "false_positive" | "closed";
+
+export interface ExternalAlertDetailOut extends ExternalAlertOut {
+  external_id: string;
+  source_url: string | null;
+  triage_note: string | null;
+  triage_version: number;
+  triaged_at: IsoDateTime | null;
+}
+
+export interface ExternalAlertSourceActionIn {
+  decision: "dismiss" | "reopen";
+  reason?: string | null;
+  comment?: string | null;
+}
+
+export interface ExternalAlertTriageIn {
+  status: TriageStatus;
+  note: string | null;
+  expected_version: number;
+}
+
+export interface RelatedFindingOut {
+  id: Uuid;
+  title: string;
+  severity: Severity;
+  status: FindingStatus;
+  cve_ids: string[];
+  priority: Priority | null;
+  risk_score: number | null;
+}
+
+export interface ExternalAlertFilter {
+  provider?: ExternalAlertOut["provider"];
+  severity?: Severity;
+  status?: ExternalAlertOut["status"];
+  triage_status?: TriageStatus;
+  q?: string;
 }
 
 /** Finding list row. */
@@ -932,6 +1113,21 @@ export interface IntegrationTestOut {
   checked_at: IsoDateTime | null;
 }
 
+export interface IntegrationSyncOut {
+  kind: IntegrationKind;
+  alerts_staged: number;
+}
+
+export interface TenableScanStatusOut {
+  scan_id: string;
+  status: string;
+}
+
+export interface TenableScanLaunchOut {
+  scan_id: string;
+  run_uuid: string | null;
+}
+
 export interface IntegrationHealthOut {
   kind: IntegrationKind;
   name: string;
@@ -998,6 +1194,8 @@ export interface DashboardOut {
   assessments_active: number;
   assessments_awaiting_approval: number;
   findings_open: number;
+  external_alerts_actionable: number;
+  external_alerts_awaiting_triage: number;
   /** Keyed by Severity value; every severity present even at zero. */
   severity_breakdown: Record<string, number>;
   priority_breakdown: Record<string, number>;
@@ -1040,6 +1238,42 @@ export interface AgentMessageOut {
   model: string | null;
   guardrail_applied: string | null;
   created_at: IsoDateTime;
+}
+
+export type AgentActionName =
+  | "sync_github_alerts"
+  | "sync_gitlab_alerts"
+  | "sync_wazuh_alerts"
+  | "sync_sonarqube_alerts"
+  | "sync_snyk_issues"
+  | "sync_tenable_vulnerabilities"
+  | "update_github_alert"
+  | "create_jira_ticket"
+  | "update_canonical_work";
+
+export interface AgentActionOut {
+  id: Uuid;
+  session_id: Uuid;
+  run_id: Uuid | null;
+  action: AgentActionName;
+  label: string;
+  rationale: string | null;
+  payload: Record<string, unknown>;
+  payload_digest: string;
+  status: "pending" | "approved" | "rejected" | "executed" | "failed";
+  resolution_note: string | null;
+  resolved_at: IsoDateTime | null;
+  executed_at: IsoDateTime | null;
+  result_summary: string | null;
+  created_at: IsoDateTime;
+}
+
+export interface AgentActionProposeIn {
+  session_id: Uuid;
+  action: AgentActionName;
+  label: string;
+  rationale?: string | null;
+  payload?: Record<string, unknown>;
 }
 
 export interface AgentStepOut {

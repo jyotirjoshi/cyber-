@@ -431,9 +431,10 @@ class NoLLMProviderError(ConfigurationError):
     def __init__(self) -> None:
         super().__init__(
             "No LLM provider is configured. Cynux has no default provider by design. "
-            "Set CYNUX_LLM__PROVIDER to one of: anthropic, openai, google -- and supply "
+            "Set CYNUX_LLM__PROVIDER to one of: anthropic, openai, google, openrouter -- and supply "
             "the matching API key (CYNUX_LLM__ANTHROPIC_API_KEY, "
-            "CYNUX_LLM__OPENAI_API_KEY or CYNUX_LLM__GOOGLE_API_KEY).",
+            "CYNUX_LLM__OPENAI_API_KEY, CYNUX_LLM__OPENROUTER_API_KEY or "
+            "CYNUX_LLM__GOOGLE_API_KEY).",
             setting="CYNUX_LLM__PROVIDER",
         )
 

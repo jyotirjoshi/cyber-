@@ -7,15 +7,25 @@ not reachable from here silently never gets a migration.
 
 from __future__ import annotations
 
-from app.db.models.agent import AgentMessage, AgentRun, AgentSession, AgentStep
+from app.db.models.agent import (
+    AgentAction,
+    AgentMessage,
+    AgentRun,
+    AgentSession,
+    AgentStep,
+    RunDispatch,
+)
 from app.db.models.assessment import (
     Approval,
     Assessment,
     AssessmentTarget,
     AuthorizationRecord,
+    RecurringScan,
+    ScanProfile,
 )
 from app.db.models.asset import Asset, AssetTag
 from app.db.models.audit import AuditEvent
+from app.db.models.canonical import CanonicalFinding, FindingHistory, FindingObservation
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment, Remediation, TicketLink
 from app.db.models.identity import Membership, Organization, PasswordResetToken, User
@@ -26,18 +36,25 @@ from app.db.models.scanner import ScannerArtifact, ScannerJob
 
 __all__ = [
     "AgentMessage",
+    "AgentAction",
     "AgentRun",
     "AgentSession",
     "AgentStep",
+    "RunDispatch",
     "Approval",
     "Assessment",
     "AssessmentTarget",
     "Asset",
     "AssetTag",
+    "CanonicalFinding",
     "AuditEvent",
     "ExternalSecurityAlert",
     "AuthorizationRecord",
+    "RecurringScan",
+    "ScanProfile",
     "Finding",
+    "FindingHistory",
+    "FindingObservation",
     "FindingEnrichment",
     "Integration",
     "IntegrationCredential",

@@ -357,16 +357,16 @@ def _merge(
                     )
 
         # Compound risks
-        for item in ai_result.compound_risks:
-            fids = [id_map[fid] for fid in item.finding_ids if fid in id_map]
+        for compound_item in ai_result.compound_risks:
+            fids = [id_map[fid] for fid in compound_item.finding_ids if fid in id_map]
             if fids:
                 compound_risks.append(
                     CompoundRisk(
                         finding_ids=fids,
-                        title=item.title[:200],
-                        description=item.description[:1000],
-                        effective_severity=item.effective_severity,
-                        attack_chain=item.attack_chain[:500],
+                        title=compound_item.title[:200],
+                        description=compound_item.description[:1000],
+                        effective_severity=compound_item.effective_severity,
+                        attack_chain=compound_item.attack_chain[:500],
                     )
                 )
 

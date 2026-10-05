@@ -25,7 +25,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from sqlalchemy import func, or_, select
@@ -56,6 +56,7 @@ from app.schemas.assessment import AssessmentCreateIn, AssessmentFilter, CancelI
 from app.schemas.common import PaginationParams
 from app.services import audit as audit_service
 from app.services.context import Principal
+from app.services.entitlements import assert_active_assessment_capacity, load_entitlements
 from app.services.organization import load_policy
 from app.services.progress import percent_for, stage_for_status
 
@@ -78,12 +79,16 @@ _DETAIL_OPTIONS = (
 #: row without bound, and the first entries are the informative ones.
 _MAX_DEGRADATIONS = 200
 
+_ACTIVE_ASSESSMENT_STATUSES = tuple(status.value for status in AssessmentStatus if not status.is_terminal)
+
 
 async def create_assessment(
     session: AsyncSession,
     principal: Principal,
     payload: AssessmentCreateIn,
     settings: Settings,
+    *,
+    authorization_method: Literal["explicit_ui", "scheduled"] = "explicit_ui",
 ) -> Assessment:
     """Validate targets, record authorization, and create the assessment.
 
@@ -118,6 +123,24 @@ async def create_assessment(
     policy = await _policy_for(session, principal, settings)
     validated = _validate_targets(payload.targets, policy)
 
+    # The reference allocator and entitlement check must share a per-organization lock.
+    # Otherwise concurrent self-service requests can both allocate the same reference and
+    # both pass the last available active-assessment slot.
+    organization = (
+        await session.execute(
+            select(Organization)
+            .where(Organization.id == principal.organization_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+    assert_active_assessment_capacity(
+        current_active_assessments=await _count_active_assessments(
+            session, principal.organization_id
+        ),
+        new_active_assessments=1,
+        entitlements=load_entitlements(organization.entitlements),
+    )
+
     now = _now()
     assessment = Assessment(
         organization_id=principal.organization_id,
@@ -141,6 +164,7 @@ async def create_assessment(
     for target in validated:
         session.add(
             AssessmentTarget(
+                organization_id=principal.organization_id,
                 assessment_id=assessment.id,
                 raw_value=target.raw[:2048],
                 canonical_value=target.canonical[:2048],
@@ -153,12 +177,13 @@ async def create_assessment(
         )
         session.add(
             AuthorizationRecord(
+                organization_id=principal.organization_id,
                 assessment_id=assessment.id,
                 user_id=principal.user_id,
                 target=target.canonical[:2048],
                 confirmed=True,
                 attestation_text=payload.authorization.attestation_text,
-                method="explicit_ui",
+                method=authorization_method,
                 source_ip=principal.source_ip,
                 user_agent=principal.user_agent[:512] if principal.user_agent else None,
                 confirmed_at=now,
@@ -459,6 +484,22 @@ def assessment_or_404(assessment: Assessment | None, assessment_id: uuid.UUID) -
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+async def _count_active_assessments(session: AsyncSession, organization_id: uuid.UUID) -> int:
+    """Count non-terminal assessments that hold an organization's active plan capacity."""
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(Assessment)
+                .where(
+                    Assessment.organization_id == organization_id,
+                    Assessment.status.in_(_ACTIVE_ASSESSMENT_STATUSES),
+                )
+            )
+        ).scalar_one()
+    )
 
 
 async def _policy_for(

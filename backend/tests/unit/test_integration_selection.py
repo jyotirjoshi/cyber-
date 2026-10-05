@@ -1,0 +1,71 @@
+"""Kind-only integration flows select an enabled connection when one exists."""
+
+from __future__ import annotations
+
+import uuid
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.dialects import postgresql
+
+from app.core.config import Settings
+from app.core.crypto import Secret
+from app.db.enums import IntegrationKind, Role
+from app.services.context import Principal
+
+
+@pytest.mark.asyncio
+async def test_kind_lookup_prefers_enabled_connection_over_older_disabled_one() -> None:
+    from app.services.integration import find_integration
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    disabled = SimpleNamespace(kind="github", is_usable=False)
+    enabled = SimpleNamespace(kind="github", is_usable=True)
+
+    class _Result:
+        def scalar_one_or_none(self):
+            return disabled
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [disabled, enabled]
+
+    class _Session:
+        async def execute(self, statement):
+            self.statement = statement
+            return _Result()
+
+    session = _Session()
+    assert await find_integration(session, principal, IntegrationKind.GITHUB) is enabled
+    params = session.statement.compile(dialect=postgresql.dialect()).params.values()
+    assert principal.organization_id in params
+
+
+@pytest.mark.asyncio
+async def test_configuration_preflight_does_not_mark_credential_used(monkeypatch) -> None:
+    from app.services import integration as service
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    credential = SimpleNamespace(
+        id=uuid.uuid4(), name="api_token", ciphertext=b"cipher", key_version=1,
+        last_used_at=None,
+    )
+    integration = SimpleNamespace(
+        kind_enum=IntegrationKind.GITHUB, is_usable=True, name="GitHub",
+        credentials=[credential], base_url=None, config={"organization": "acme"},
+    )
+
+    class _Session:
+        async def execute(self, _statement):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [integration]))
+
+    monkeypatch.setattr(service, "_decrypt", lambda *_args, **_kwargs: Secret("test-token"))
+    scoped = await service.resolve_settings(
+        _Session(), principal, IntegrationKind.GITHUB,
+        settings=Settings(github={"api_token": None}), require=True, mark_used=False,
+    )
+    assert scoped.github.api_token.get_secret_value() == "test-token"
+    assert scoped.github.organization == "acme"
+    assert credential.last_used_at is None

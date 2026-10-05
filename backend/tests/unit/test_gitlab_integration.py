@@ -3,6 +3,7 @@
 import pytest
 
 from app.core.config import Settings
+from app.core.errors import IntegrationError
 from app.db.enums import IntegrationKind
 from app.integrations.gitlab import GitLabClient
 from app.services.integration import _UNIMPLEMENTED
@@ -30,8 +31,32 @@ async def test_gitlab_reads_security_findings_for_configured_projects(monkeypatc
     assert feeds[0].project == "acme/api platform"
     assert feeds[0].alerts == [{"id": 11, "name": "SAST"}]
     assert transport.requests == [
-        ("/projects/acme%2Fapi%20platform/vulnerability_findings", {"PRIVATE-TOKEN": "glpat_test"}, {"scope": "all", "per_page": 100})
+        ("/projects/acme%2Fapi%20platform/vulnerability_findings", {"PRIVATE-TOKEN": "glpat_test"}, {"scope": "all", "per_page": 100, "page": 1})
     ]
+
+
+@pytest.mark.asyncio
+async def test_gitlab_reads_all_pages_for_each_project(monkeypatch) -> None:
+    class _Paged:
+        async def get_json(self, path, *, headers=None, params=None):
+            return [{"uuid": str(i), "name": "SAST"} for i in range(100)] if params["page"] == 1 else [{"uuid": "100", "name": "SAST"}]
+
+    monkeypatch.setattr("app.integrations.gitlab.build_client", lambda **_kwargs: _Paged())
+    client = GitLabClient(Settings(gitlab={"api_token": "token", "project_ids": ["acme/api"]}))
+    feeds = await client.list_security_alerts()
+    assert len(feeds[0].alerts) == 101
+
+
+@pytest.mark.asyncio
+async def test_gitlab_rejects_malformed_page_instead_of_reporting_no_findings(monkeypatch) -> None:
+    class _Malformed:
+        async def get_json(self, path, *, headers=None, params=None):
+            return {"unexpected": "shape"}
+
+    monkeypatch.setattr("app.integrations.gitlab.build_client", lambda **_kwargs: _Malformed())
+    client = GitLabClient(Settings(gitlab={"api_token": "token", "project_ids": ["acme/api"]}))
+    with pytest.raises(IntegrationError):
+        await client.list_security_alerts()
 
 
 def test_gitlab_is_enabled_as_a_configurable_connector() -> None:

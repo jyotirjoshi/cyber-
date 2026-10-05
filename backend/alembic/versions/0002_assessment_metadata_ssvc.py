@@ -8,9 +8,10 @@ Create Date: 2026-09-18
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
+
+from alembic import op
 
 revision = "0002_assessment_metadata_ssvc"
 down_revision = "0001_initial_schema"

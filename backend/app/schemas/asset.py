@@ -13,9 +13,9 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.db.enums import AssetStatus, Criticality, CriticalitySource
+from app.db.enums import AssetEnvironment, AssetStatus, Criticality, CriticalitySource
 
 
 class AssetTagOut(BaseModel):
@@ -59,6 +59,10 @@ class AssetOut(BaseModel):
     criticality: Criticality
     criticality_source: CriticalitySource
     criticality_rationale: str | None = None
+    owner_user_id: uuid.UUID | None = None
+    owner_team: str | None = None
+    environment: AssetEnvironment = AssetEnvironment.UNKNOWN
+    groups: list[str] = Field(default_factory=list)
     #: 0.0-1.0. Drives the risk-based scope selection of FR-010.
     risk_score: float = Field(ge=0.0, le=1.0)
     selected_for_scanning: bool
@@ -91,10 +95,54 @@ class AssetCriticalityIn(BaseModel):
     rationale: str | None = Field(default=None, max_length=2000)
 
 
+class AssetContextIn(BaseModel):
+    """Partial, audited update of curated asset business context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner_user_id: uuid.UUID | None = None
+    owner_team: str | None = Field(default=None, max_length=120)
+    environment: AssetEnvironment | None = None
+    groups: list[str] | None = Field(default=None, max_length=30)
+
+    @field_validator("owner_team")
+    @classmethod
+    def normalize_team(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("owner_team cannot be blank")
+        return value
+
+    @field_validator("groups")
+    @classmethod
+    def normalize_groups(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 60 for value in normalized):
+            raise ValueError("groups must have names of 1 to 60 characters")
+        if len({value.casefold() for value in normalized}) != len(normalized):
+            raise ValueError("groups must be unique")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_partial_update(self) -> AssetContextIn:
+        if not self.model_fields_set:
+            raise ValueError("at least one context field is required")
+        if "environment" in self.model_fields_set and self.environment is None:
+            raise ValueError("environment cannot be null")
+        if "groups" in self.model_fields_set and self.groups is None:
+            raise ValueError("groups cannot be null")
+        return self
+
+
 class AssetFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     criticality: Criticality | None = None
+    environment: AssetEnvironment | None = None
     selected: bool | None = None
     internet_exposed: bool | None = None
     status: AssetStatus | None = None
@@ -126,6 +174,7 @@ class DiscoveredAssetOut(BaseModel):
 
 
 __all__ = [
+    "AssetContextIn",
     "AssetCriticalityIn",
     "AssetFilter",
     "AssetOut",

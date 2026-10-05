@@ -33,6 +33,8 @@ from app.schemas.integration import (
     IntegrationSyncOut,
     IntegrationTestOut,
     IntegrationUpsertIn,
+    TenableScanLaunchOut,
+    TenableScanStatusOut,
 )
 from app.services import external_alert as external_alert_service
 from app.services import integration as integration_service
@@ -102,6 +104,102 @@ async def sync_github_alerts(
     )
     await session.commit()
     return IntegrationSyncOut(kind=IntegrationKind.GITHUB, alerts_staged=result.total)
+
+
+@router.post("/gitlab/sync", response_model=IntegrationSyncOut)
+async def sync_gitlab_alerts(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest this organization's GitLab security findings into Cynux's private ledger."""
+    result = await external_alert_service.sync_gitlab_alerts(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.GITLAB, alerts_staged=result.total)
+
+
+@router.post("/wazuh/sync", response_model=IntegrationSyncOut)
+async def sync_wazuh_alerts(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest this organization's Wazuh Indexer alerts into Cynux's private ledger."""
+    result = await external_alert_service.sync_wazuh_alerts(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.WAZUH, alerts_staged=result.total)
+
+
+@router.post("/sonarqube/sync", response_model=IntegrationSyncOut)
+async def sync_sonarqube_alerts(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest read-only SonarQube vulnerabilities from the tenant's selected projects."""
+    result = await external_alert_service.sync_sonarqube_alerts(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.SONARQUBE, alerts_staged=result.total)
+
+
+@router.post("/snyk/sync", response_model=IntegrationSyncOut)
+async def sync_snyk_issues(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest the tenant's Snyk issues into its private exposure ledger."""
+    result = await external_alert_service.sync_snyk_issues(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.SNYK, alerts_staged=result.total)
+
+
+@router.post("/tenable/sync", response_model=IntegrationSyncOut)
+async def sync_tenable_vulnerabilities(
+    principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest selected Tenable VM scan results into the private exposure ledger."""
+    result = await external_alert_service.sync_tenable_vulnerabilities(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.TENABLE, alerts_staged=result.total)
+
+
+@router.get("/tenable/scans/{scan_id}/status", response_model=TenableScanStatusOut)
+async def tenable_scan_status(
+    scan_id: str, principal: PrincipalDep, session: DbSession,
+    settings: SettingsDep, redis: RedisDep,
+) -> TenableScanStatusOut:
+    status = await integration_service.tenable_scan_status(
+        session, principal, scan_id, settings=settings, redis=redis
+    )
+    return TenableScanStatusOut(scan_id=scan_id, status=status)
+
+
+@router.post("/tenable/scans/{scan_id}/launch", response_model=TenableScanLaunchOut)
+async def launch_tenable_scan(
+    scan_id: str, principal: PrincipalDep, session: DbSession,
+    settings: SettingsDep, redis: RedisDep,
+) -> TenableScanLaunchOut:
+    """Launch a previously saved Tenable scan using its configured targets only."""
+    run_uuid = await integration_service.launch_tenable_scan(
+        session, principal, scan_id, settings=settings, redis=redis
+    )
+    await session.commit()
+    return TenableScanLaunchOut(scan_id=scan_id, run_uuid=run_uuid)
 
 
 @router.get("/{kind}", response_model=IntegrationOut)

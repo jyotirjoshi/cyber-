@@ -5,15 +5,14 @@ into the two outbound actions a security team actually works from: a Jira issue 
 worth tracking, and a Slack/in-app alert for every critical one.  It runs during the ``remediating``
 status at stage ``creating_actions``.
 
-**Two independent sub-tasks, deliberately ordered alerts-first.**  A critical-finding alert is the
-time-sensitive signal -- somebody should hear about a critical before a ticket is filed -- so
-notifications go out first, then tickets.  The two do not share a failure fate:
+**Two independent sub-tasks, deliberately queued alerts-first.**  A critical-finding alert is the
+time-sensitive signal, so notification rows are staged before tickets. A worker delivers external
+alerts only after the assessment transaction commits. The two do not share a failure fate:
 
 *Notifications never fail the run.*  :func:`app.services.notification.dispatch` writes the
-notification row first and treats delivery as best-effort: a Slack outage marks the row ``failed``
-(a queryable backlog) and returns rather than raising.  So the alert loop has no fatal path -- an
-unreachable Slack workspace is an operator concern, not a reason to fail an assessment that was
-merely trying to mention itself.
+notification row in the assessment transaction. A Slack outage later marks the committed row
+``failed`` rather than undoing the assessment. An unreachable Slack workspace is an operator
+concern, not a reason to fail an assessment that was merely trying to mention itself.
 
 *Tickets degrade; they do not fail (FR-040).*  Filing is opt-in: an organization that has not set a
 ``ticket_min_severity`` policy has not asked Cynux to file issues, so the sub-task is skipped
@@ -24,7 +23,8 @@ storage are fatal, and neither is touched here.  A Jira outage fails every remai
 identically, so the loop stops on the first failure rather than issuing N doomed calls behind an
 already-tripped circuit breaker.
 
-Both services self-audit (``TICKET_CREATE``, ``NOTIFICATION_SEND``), so this node leaves
+Both services self-audit (``TICKET_CREATE``, ``NOTIFICATION_QUEUE``; the worker records
+``NOTIFICATION_SEND``), so this node leaves
 ``audit_action`` unset.  A finding title and asset name are passed to the notification service on
 purpose -- that is what the alert is about, and the service escapes them for Slack (SEC-005) -- but
 this node's own logs and the step digest carry counts and error codes only, never a title, a

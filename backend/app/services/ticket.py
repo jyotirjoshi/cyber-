@@ -26,14 +26,21 @@ from collections.abc import Sequence
 
 import structlog
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import IntegrationError, InvalidConfigurationError, ResourceNotFoundError
+from app.core.errors import (
+    ConflictError,
+    IntegrationError,
+    InvalidConfigurationError,
+    ResourceNotFoundError,
+)
 from app.db.enums import AuditOutcome, IntegrationKind, Permission, Severity
+from app.db.models.asset import Asset
+from app.db.models.canonical import CanonicalFinding, FindingObservation
 from app.db.models.finding import Finding, Remediation, TicketLink
-from app.db.repository import tenant_select
+from app.db.repository import TenantRepository, tenant_select
 from app.integrations.jira import SEVERITY_PRIORITY, JiraClient, JiraIssue
 from app.services import audit as audit_service
 from app.services import notification as notification_service
@@ -64,9 +71,17 @@ async def list_tickets(
 ) -> Sequence[TicketLink]:
     principal.require(Permission.FINDING_READ)
     await get_finding(session, principal, finding_id)
+    canonical_ids = select(FindingObservation.canonical_finding_id).where(
+        FindingObservation.organization_id == principal.organization_id,
+        FindingObservation.source_record_id == finding_id,
+        FindingObservation.provider == "defectdojo",
+    )
     stmt = (
         tenant_select(TicketLink, principal.organization_id)
-        .where(TicketLink.finding_id == finding_id)
+        .where(or_(
+            TicketLink.finding_id == finding_id,
+            TicketLink.canonical_finding_id.in_(canonical_ids),
+        ))
         .order_by(TicketLink.created_at.desc())
     )
     return (await session.execute(stmt)).scalars().all()
@@ -83,7 +98,65 @@ async def find_ticket(
         TicketLink.finding_id == finding_id,
         TicketLink.provider == provider,
     )
+    direct = (await session.execute(stmt)).scalar_one_or_none()
+    if direct is not None:
+        return direct
+    # A native record may have been ingested after its canonical exposure already
+    # received a Jira issue. Reuse that issue rather than filing a second one.
+    stmt = (
+        tenant_select(TicketLink, principal.organization_id)
+        .join(
+            FindingObservation,
+            TicketLink.canonical_finding_id == FindingObservation.canonical_finding_id,
+        )
+        .where(
+            FindingObservation.organization_id == principal.organization_id,
+            FindingObservation.source_record_id == finding_id,
+            FindingObservation.provider == "defectdojo",
+            TicketLink.provider == provider,
+        )
+        .order_by(TicketLink.created_at.desc(), TicketLink.id)
+        .limit(1)
+    )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def find_canonical_ticket(
+    session: AsyncSession,
+    principal: Principal,
+    canonical_finding_id: uuid.UUID,
+    *,
+    provider: str = "jira",
+) -> TicketLink | None:
+    stmt = tenant_select(TicketLink, principal.organization_id).where(
+        TicketLink.canonical_finding_id == canonical_finding_id,
+        TicketLink.provider == provider,
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def list_canonical_tickets(
+    session: AsyncSession, principal: Principal, canonical_finding_id: uuid.UUID
+) -> list[TicketLink]:
+    """Show both directly linked and legacy native tickets for one exposure."""
+    principal.require(Permission.FINDING_READ)
+    native_ids = select(FindingObservation.source_record_id).where(
+        FindingObservation.organization_id == principal.organization_id,
+        FindingObservation.canonical_finding_id == canonical_finding_id,
+        FindingObservation.provider == "defectdojo",
+        FindingObservation.source_record_id.is_not(None),
+    )
+    stmt = (
+        tenant_select(TicketLink, principal.organization_id)
+        .where(
+            or_(
+                TicketLink.canonical_finding_id == canonical_finding_id,
+                TicketLink.finding_id.in_(native_ids),
+            )
+        )
+        .order_by(TicketLink.created_at.desc(), TicketLink.id)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +269,41 @@ def build_description(
     return body
 
 
+def build_canonical_description(
+    finding: CanonicalFinding,
+    *,
+    asset_name: str,
+    observations: Sequence[FindingObservation],
+    settings: Settings,
+    include_remediation: bool = True,
+) -> str:
+    """Explain a unified exposure to the ticket owner without inventing scan evidence."""
+    lines = [
+        f"*Severity:* {finding.severity}",
+        f"*Risk score:* {finding.risk_score:.1f} / 100 (prioritization estimate)",
+        f"*Affected asset:* {asset_name}",
+    ]
+    if finding.cve_ids:
+        lines.append(f"*CVE:* {', '.join(finding.cve_ids[:20])}")
+    lines.extend(("", "h3. Source observations"))
+    for item in observations[:20]:
+        lines.append(f"- {item.provider}: {item.external_id} ({item.source_status})")
+    if include_remediation and finding.remediation_plan:
+        lines.extend(
+            ("", "h3. Suggested remediation (AI-generated, review before applying)",
+             finding.remediation_plan.strip())
+        )
+    lines.extend(
+        (
+            "", "----",
+            f"Cynux canonical finding: {settings.public_base_url.rstrip('/')}/findings/canonical/{finding.id}",
+            "Filed automatically by Cynux. Do not edit the cynux-finding label; it prevents duplicate tickets.",
+        )
+    )
+    body = "\n".join(lines)
+    return body if len(body) <= _MAX_DESCRIPTION_CHARS else body[:_MAX_DESCRIPTION_CHARS] + "\n\n_(truncated -- see Cynux)_"
+
+
 def _labels(finding: Finding) -> list[str]:
     labels = [f"severity-{finding.severity}"]
     if finding.enrichment is not None and finding.enrichment.in_kev is True:
@@ -234,6 +342,136 @@ def _record(
         created_by_id=principal.user_id,
         created_by_agent=by_agent,
     )
+
+
+async def create_canonical_ticket(
+    session: AsyncSession,
+    principal: Principal,
+    canonical_finding_id: uuid.UUID,
+    *,
+    settings: Settings,
+    redis: Redis | None = None,
+    project_key: str | None = None,
+    issue_type: str | None = None,
+    assignee: str | None = None,
+    include_remediation: bool = True,
+    by_agent: bool = False,
+) -> TicketLink:
+    """File one Jira ticket for a unified exposure, including canonical-only sources."""
+    principal.require(Permission.TICKET_CREATE)
+    finding = await TenantRepository(
+        session, CanonicalFinding, principal.organization_id
+    ).get_or_404(canonical_finding_id)
+    existing = await find_canonical_ticket(session, principal, canonical_finding_id)
+    if existing is not None:
+        return existing
+    # Any native observation may already have filed Jira, not only the newest one.
+    existing = next(
+        (link for link in await list_canonical_tickets(session, principal, canonical_finding_id)
+         if link.provider == "jira"),
+        None,
+    )
+    if existing is not None:
+        return existing
+    if finding.status in {"closed", "false_positive", "accepted_risk"}:
+        raise ConflictError(
+            "inactive canonical finding", user_message="This finding is not active for remediation."
+        )
+
+    # Reuse the richer native ticket path where a DefectDojo observation exists.
+    native_id = (
+        await session.execute(
+            select(Finding.id)
+            .join(
+                FindingObservation,
+                FindingObservation.source_record_id == Finding.id,
+            )
+            .where(
+                Finding.organization_id == principal.organization_id,
+                FindingObservation.organization_id == principal.organization_id,
+                FindingObservation.canonical_finding_id == canonical_finding_id,
+                FindingObservation.provider == "defectdojo",
+            )
+            .order_by(FindingObservation.last_seen_at.desc(), Finding.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if native_id is not None:
+        return await create_ticket(
+            session, principal, native_id, settings=settings, redis=redis,
+            project_key=project_key, issue_type=issue_type, assignee=assignee,
+            include_remediation=include_remediation, by_agent=by_agent,
+        )
+
+    asset_name = (
+        await session.execute(
+            select(Asset.name).where(
+                Asset.id == finding.asset_id,
+                Asset.organization_id == principal.organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if asset_name is None:
+        raise ResourceNotFoundError("Canonical finding asset is unavailable in this organization")
+    observations = (
+        await session.execute(
+            tenant_select(FindingObservation, principal.organization_id)
+            .where(FindingObservation.canonical_finding_id == canonical_finding_id)
+            .order_by(FindingObservation.provider, FindingObservation.external_id)
+            .limit(20)
+        )
+    ).scalars().all()
+    scoped = await resolve_settings(session, principal, IntegrationKind.JIRA, settings=settings)
+    client = JiraClient(scoped, redis)
+    try:
+        issue = await client.create_issue(
+            summary=f"[{finding.severity.upper()}] {finding.title}",
+            description=build_canonical_description(
+                finding, asset_name=asset_name, observations=observations, settings=scoped,
+                include_remediation=include_remediation,
+            ),
+            finding_id=str(canonical_finding_id),
+            priority=SEVERITY_PRIORITY.get(Severity(finding.severity)),
+            labels=[f"severity-{finding.severity}"],
+            issue_type=issue_type,
+            project_key=project_key,
+            assignee_account_id=assignee,
+        )
+    except IntegrationError as exc:
+        await audit_service.record(
+            session, action=audit_service.AuditAction.TICKET_CREATE,
+            principal=principal, resource_type="canonical_finding",
+            resource_id=canonical_finding_id, outcome=AuditOutcome.FAILURE,
+            reason=exc.user_message, detail={"provider": "jira", "by_agent": by_agent},
+        )
+        raise
+    finally:
+        await client.aclose()
+    resolved_project_key = project_key or scoped.jira.project_key
+    resolved_issue_type = issue_type or scoped.jira.issue_type
+    link = TicketLink(
+        organization_id=principal.organization_id,
+        canonical_finding_id=canonical_finding_id,
+        finding_id=None,
+        provider="jira",
+        external_key=issue.key[:80],
+        external_id=issue.id[:80] if issue.id else None,
+        url=issue.url[:1000] if issue.url else None,
+        project_key=resolved_project_key[:40] if resolved_project_key else None,
+        issue_type=resolved_issue_type[:60] if resolved_issue_type else None,
+        external_status=issue.status[:80] if issue.status else None,
+        created_by_id=principal.user_id,
+        created_by_agent=by_agent,
+    )
+    session.add(link)
+    await session.flush()
+    await audit_service.record(
+        session, action=audit_service.AuditAction.TICKET_CREATE,
+        principal=principal, resource_type="canonical_finding",
+        resource_id=canonical_finding_id,
+        detail={"provider": "jira", "issue_key": issue.key, "by_agent": by_agent},
+    )
+    return link
 
 
 async def create_ticket(
@@ -309,6 +547,7 @@ async def create_ticket(
             priority=priority,
             labels=_labels(finding),
             issue_type=issue_type,
+            project_key=project_key,
             assignee_account_id=assignee,
         )
     except IntegrationError as exc:
@@ -473,7 +712,22 @@ async def ticket_candidates(
     # A plain ``select`` rather than ``tenant_select``: the helper takes a model, and the
     # tenant filter is spelled out here because this is a column subquery, not a row read.
     linked = select(TicketLink.finding_id).where(
-        TicketLink.organization_id == principal.organization_id
+        TicketLink.organization_id == principal.organization_id,
+        TicketLink.finding_id.is_not(None),
+    )
+    canonical_linked = (
+        select(FindingObservation.source_record_id)
+        .join(
+            TicketLink,
+            TicketLink.canonical_finding_id == FindingObservation.canonical_finding_id,
+        )
+        .where(
+            FindingObservation.organization_id == principal.organization_id,
+            FindingObservation.provider == "defectdojo",
+            FindingObservation.source_record_id.is_not(None),
+            TicketLink.organization_id == principal.organization_id,
+            TicketLink.provider == "jira",
+        )
     )
     stmt = (
         tenant_select(Finding, principal.organization_id)
@@ -483,6 +737,7 @@ async def ticket_candidates(
             Finding.is_false_positive.is_(False),
             Finding.is_duplicate.is_(False),
             Finding.id.notin_(linked),
+            Finding.id.notin_(canonical_linked),
         )
         .order_by(Finding.risk_score.desc().nullslast(), Finding.created_at.asc())
         .limit(limit)
@@ -511,9 +766,13 @@ async def policy_ticket_floor(
 __all__ = [
     "SUPPORTED_PROVIDERS",
     "build_description",
+    "build_canonical_description",
     "comment_on_ticket",
     "create_ticket",
+    "create_canonical_ticket",
     "find_ticket",
+    "find_canonical_ticket",
+    "list_canonical_tickets",
     "list_tickets",
     "policy_ticket_floor",
     "refresh_ticket_status",

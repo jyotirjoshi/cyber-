@@ -17,6 +17,7 @@ poll them constantly.
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 from typing import Literal
 
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api import API_VERSION
 from app.api.deps import DbSession, RedisDep, SettingsDep, redis_ping
 from app.schemas.common import DependencyHealth, HealthOut, OkOut
+from app.worker.protocol import WORKER_LIVENESS_MAX_AGE_SECONDS, worker_liveness_key
 
 log = structlog.get_logger(__name__)
 
@@ -59,6 +61,22 @@ async def _probe_redis(redis: Redis) -> DependencyHealth:
     return DependencyHealth(name="redis", healthy=True, latency_ms=_elapsed_ms(start))
 
 
+async def _probe_worker(
+    redis: Redis, stream: str, *, now: dt.datetime | None = None
+) -> DependencyHealth:
+    start = time.perf_counter()
+    cutoff = (now or dt.datetime.now(dt.UTC)).timestamp() - WORKER_LIVENESS_MAX_AGE_SECONDS
+    try:
+        count = int(await redis.zcount(worker_liveness_key(stream), cutoff, float("inf")))
+    except Exception as exc:
+        log.warning("health.worker_probe_failed", error=type(exc).__name__)
+        return DependencyHealth(name="worker", healthy=False, detail="unreachable")
+    return DependencyHealth(
+        name="worker", healthy=count > 0, detail=f"{count} active",
+        latency_ms=_elapsed_ms(start),
+    )
+
+
 def _overall(
     deps: list[DependencyHealth],
 ) -> tuple[Literal["ok", "degraded", "unhealthy"], list[str]]:
@@ -67,11 +85,17 @@ def _overall(
         return "unhealthy", ["database unreachable"]
     if not by_name["redis"].healthy:
         return "degraded", ["redis unreachable: auth revocation and rate limiting impaired"]
+    if "worker" in by_name and not by_name["worker"].healthy:
+        return "degraded", ["no active assessment worker"]
     return "ok", []
 
 
-async def _snapshot(session: AsyncSession, redis: Redis, environment: str) -> HealthOut:
+async def _snapshot(
+    session: AsyncSession, redis: Redis, environment: str, stream: str
+) -> HealthOut:
     deps = [await _probe_db(session), await _probe_redis(redis)]
+    if deps[1].healthy:
+        deps.append(await _probe_worker(redis, stream))
     status, warnings = _overall(deps)
     return HealthOut(
         status=status,
@@ -89,14 +113,14 @@ async def healthz() -> OkOut:
 
 @router.get("/health", response_model=HealthOut, summary="Health snapshot")
 async def health(session: DbSession, redis: RedisDep, settings: SettingsDep) -> HealthOut:
-    return await _snapshot(session, redis, settings.environment)
+    return await _snapshot(session, redis, settings.environment, settings.redis.stream)
 
 
 @router.get("/readyz", response_model=HealthOut, summary="Readiness probe")
 async def readyz(
     session: DbSession, redis: RedisDep, settings: SettingsDep, response: Response
 ) -> HealthOut:
-    snapshot = await _snapshot(session, redis, settings.environment)
+    snapshot = await _snapshot(session, redis, settings.environment, settings.redis.stream)
     if snapshot.status == "unhealthy":
         response.status_code = 503
     return snapshot

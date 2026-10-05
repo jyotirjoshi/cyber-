@@ -77,6 +77,66 @@ class AssessmentCreateIn(BaseModel):
     notify: list[str] = Field(default_factory=list, max_length=50)
 
 
+class ScanProfileCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=160)
+    scope: Scope = Scope.EXTERNAL
+    depth: AssessmentDepth = AssessmentDepth.STANDARD
+    engagement_type: EngagementType = EngagementType.WEB_APPLICATION
+    execution_mode: ExecutionMode = ExecutionMode.SUPERVISED
+    objective: str | None = Field(default=None, max_length=4000)
+    notify: list[str] = Field(default_factory=list, max_length=50)
+
+
+class RecurringScanCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=160)
+    profile_id: uuid.UUID
+    targets: list[str] = Field(min_length=1, max_length=MAX_TARGETS)
+    cron_expression: str = Field(min_length=9, max_length=120)
+    timezone: str = Field(default="UTC", min_length=1, max_length=100)
+    authorization: AuthorizationIn
+    authorization_expires_at: dt.datetime
+
+
+class ScanProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    config: dict[str, Any]
+    is_active: bool
+    created_at: dt.datetime
+
+
+class RecurringScanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    profile_id: uuid.UUID
+    targets: list[str]
+    cron_expression: str
+    timezone: str
+    authorization_expires_at: dt.datetime
+    enabled: bool
+    next_run_at: dt.datetime
+    last_run_at: dt.datetime | None
+    last_assessment_id: uuid.UUID | None
+    last_error_code: str | None
+    created_at: dt.datetime
+
+
+class WorkerMetricsOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runs: dict[str, int]
+    pending_dispatches: int
+    scanner_jobs: dict[str, int]
+
+
 class TargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -273,6 +333,11 @@ __all__ = [
     "DegradationOut",
     "PlanStepOut",
     "ProposedAssetOut",
+    "RecurringScanCreateIn",
+    "RecurringScanOut",
+    "ScanProfileCreateIn",
+    "ScanProfileOut",
     "StageOut",
     "TargetOut",
+    "WorkerMetricsOut",
 ]

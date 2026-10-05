@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Sequence
 
 import structlog
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -48,6 +48,7 @@ from app.db.enums import (
 from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset
 from app.db.models.audit import AuditEvent
+from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment
 from app.db.repository import tenant_select
 from app.schemas.assessment import AssessmentOut
@@ -93,6 +94,7 @@ _ACTIVITY_ACTIONS: tuple[str, ...] = (
     "scanner.complete",
     "scanner.fail",
     "finding.import",
+    "external_alert.triage",
     "ticket.create",
     "report.generate",
     "integration.configure",
@@ -112,6 +114,7 @@ _ACTION_PHRASES: dict[str, str] = {
     "scanner.complete": "completed a scan",
     "scanner.fail": "had a scan fail",
     "finding.import": "imported findings",
+    "external_alert.triage": "triaged an external alert",
     "ticket.create": "filed a ticket",
     "report.generate": "generated a report",
     "integration.configure": "changed an integration",
@@ -201,6 +204,28 @@ async def _kev_count(session: AsyncSession, organization_id: uuid.UUID) -> int:
         )
     )
     return int(await session.scalar(stmt) or 0)
+
+
+async def _external_alert_counts(
+    session: AsyncSession, organization_id: uuid.UUID
+) -> tuple[int, int]:
+    """Actionable and new provider alerts, counted without mixing them into findings."""
+    source_open = ExternalSecurityAlert.status == "open"
+    stmt = select(
+        func.count().filter(
+            and_(
+                source_open,
+                ExternalSecurityAlert.triage_status.notin_(
+                    ("closed", "false_positive", "risk_accepted")
+                ),
+            )
+        ),
+        func.count().filter(
+            and_(source_open, ExternalSecurityAlert.triage_status == "new")
+        ),
+    ).where(ExternalSecurityAlert.organization_id == organization_id)
+    actionable, awaiting = (await session.execute(stmt)).one()
+    return int(actionable or 0), int(awaiting or 0)
 
 
 async def _mttr_days(session: AsyncSession, organization_id: uuid.UUID) -> float | None:
@@ -331,6 +356,9 @@ async def build_dashboard(
     )
 
     findings_open = await _count(session, _open_findings(org))
+    external_alerts_actionable, external_alerts_awaiting_triage = await _external_alert_counts(
+        session, org
+    )
     severity_breakdown = await _severity_breakdown(session, org)
     priority_breakdown = await _priority_breakdown(session, org)
 
@@ -347,6 +375,8 @@ async def build_dashboard(
         assessments_active=assessments_active,
         assessments_awaiting_approval=awaiting_approval,
         findings_open=findings_open,
+        external_alerts_actionable=external_alerts_actionable,
+        external_alerts_awaiting_triage=external_alerts_awaiting_triage,
         severity_breakdown=severity_breakdown,
         priority_breakdown=priority_breakdown,
         assets_total=assets_total,

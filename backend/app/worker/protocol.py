@@ -47,6 +47,12 @@ from app.core.config import Settings
 # behave exactly as every other enum in the codebase.
 from app.db.enums import StrEnum
 
+WORKER_LIVENESS_MAX_AGE_SECONDS = 90
+
+
+def worker_liveness_key(stream: str) -> str:
+    return f"{stream}:workers:live"
+
 
 class RunAction(StrEnum):
     """What a queue message asks the worker to do -- advisory; DB status is the authority.
@@ -157,12 +163,10 @@ def _decode_principal(raw: str | None) -> dict[str, Any] | None:
 
 
 async def publish_run_request(redis: Redis, settings: Settings, request: RunRequest) -> str:
-    """``XADD`` a run request onto the agent stream, capped at ``max_stream_length``.
+    """``XADD`` a run request without trimming pending work.
 
-    Returns the stream entry id, which the API logs to correlate the enqueue with the run.  The
-    length cap is approximate (``MAXLEN ~``) because an exact trim would serialize every writer
-    on the stream's tail; the stream is a work queue whose entries are short-lived once
-    acknowledged, so a few thousand beyond the cap between trims is harmless.
+    Returns the stream entry id for tracing. Workers delete settled entries after XACK;
+    MAXLEN at publish time can discard an unacknowledged run during a long backlog.
     """
     message_id = await redis.xadd(
         settings.redis.stream,
@@ -172,8 +176,6 @@ async def publish_run_request(redis: Redis, settings: Settings, request: RunRequ
         # needs a cast to bridge the invariance -- it encodes a relationship the type system
         # cannot express, not a claim the checker cannot otherwise verify.
         cast(dict[FieldT, EncodableT], request.to_fields()),
-        maxlen=settings.redis.max_stream_length,
-        approximate=True,
     )
     return message_id
 
@@ -181,5 +183,7 @@ async def publish_run_request(redis: Redis, settings: Settings, request: RunRequ
 __all__ = [
     "RunAction",
     "RunRequest",
+    "WORKER_LIVENESS_MAX_AGE_SECONDS",
     "publish_run_request",
+    "worker_liveness_key",
 ]

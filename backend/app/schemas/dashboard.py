@@ -47,6 +47,9 @@ class DashboardOut(BaseModel):
     assessments_awaiting_approval: int = 0
 
     findings_open: int = 0
+    #: Provider alerts are separate from DefectDojo-owned assessment findings.
+    external_alerts_actionable: int = 0
+    external_alerts_awaiting_triage: int = 0
     #: Keyed by ``Severity`` value; every severity present even at zero, so the chart
     #: does not change shape between refreshes.
     severity_breakdown: dict[str, int] = Field(default_factory=dict)

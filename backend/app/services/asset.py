@@ -35,6 +35,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import Settings
 from app.core.errors import ConflictError, UserError
 from app.db.enums import (
+    AssetEnvironment,
     AssetStatus,
     Criticality,
     CriticalitySource,
@@ -42,12 +43,14 @@ from app.db.enums import (
 )
 from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset, AssetTag
+from app.db.models.identity import Membership, Organization
 from app.db.repository import TenantRepository, tenant_select
 from app.scanners.recon_assets import DiscoveredAsset
-from app.schemas.asset import AssetCriticalityIn, AssetFilter, AssetTagIn
+from app.schemas.asset import AssetContextIn, AssetCriticalityIn, AssetFilter, AssetTagIn
 from app.schemas.common import PaginationParams
 from app.services import audit as audit_service
 from app.services.context import Principal
+from app.services.entitlements import assert_asset_capacity, load_entitlements
 
 log = structlog.get_logger(__name__)
 
@@ -101,6 +104,7 @@ _NOTABLE_PORTS: dict[int, float] = {
 #: Cap on ``seen_in_assessments``. An asset in a weekly assessment accumulates 52 ids a
 #: year; the recent ones answer "is this still live", which is what the column is for.
 _MAX_SEEN_HISTORY = 50
+_ASSET_LOOKUP_BATCH = 1_000
 
 
 async def upsert_assets(
@@ -124,15 +128,32 @@ async def upsert_assets(
 
     merged = _merge_duplicates(records)
     keys = {(r.name, r.port, r.protocol) for r in merged}
+    # Discovery jobs for one organization can overlap.  Locking the organization makes the
+    # capacity check and subsequent insertions serial for this path; without it, two jobs
+    # could both observe spare capacity and overrun the entitlement together.
+    organization = (
+        await session.execute(
+            select(Organization)
+            .where(Organization.id == assessment.organization_id)
+            .with_for_update()
+        )
+    ).scalar_one()
     existing = await _load_by_keys(session, assessment.organization_id, keys)
+    assert_asset_capacity(
+        current_assets=await _count_organization_assets(session, assessment.organization_id),
+        new_assets=_new_asset_count(merged, existing),
+        entitlements=load_entitlements(organization.entitlements),
+    )
 
     now = _now()
     assessment_id = str(assessment.id)
     touched: list[Asset] = []
+    exposure_changed = False
 
     for record in merged:
         key = (record.name, record.port, record.protocol)
         asset = existing.get(key)
+        is_existing = asset is not None
         if asset is None:
             asset = Asset(
                 organization_id=assessment.organization_id,
@@ -150,8 +171,13 @@ async def upsert_assets(
             session.add(asset)
             existing[key] = asset
 
+        was_exposed = bool(asset.internet_exposed)
         _apply_record(asset, record, assessment_id=assessment_id, now=now)
+        exposure_changed |= is_existing and was_exposed != bool(asset.internet_exposed)
         touched.append(asset)
+
+    if exposure_changed:
+        organization.risk_policy_version += 1
 
     # Flushed so ``asset.id`` is available to the caller -- the approval payload is built
     # from these ids, and a pending row has none.
@@ -216,8 +242,10 @@ async def score_and_select(
         return []
 
     scored: list[tuple[float, Asset]] = []
+    criticality_changed = False
     for asset in assets:
         criticality, source, rationale = await infer_criticality(asset, settings)
+        criticality_changed |= asset.criticality != criticality.value
         asset.criticality = criticality.value
         asset.criticality_source = source.value
         asset.criticality_rationale = rationale
@@ -228,6 +256,16 @@ async def score_and_select(
         asset.selection_rationale = "; ".join(reasons) if reasons else "No risk signals observed."
         asset.selected_for_scanning = False
         scored.append((score, asset))
+
+    if criticality_changed:
+        organization = (
+            await session.execute(
+                select(Organization)
+                .where(Organization.id == assessment.organization_id)
+                .with_for_update()
+            )
+        ).scalar_one()
+        organization.risk_policy_version += 1
 
     # ``name``/``port`` as the tie-break keeps the order stable across runs, so re-running
     # a plan does not silently reshuffle which assets made the cut.
@@ -293,7 +331,7 @@ async def infer_criticality(
 
     keyword = _matched_keyword(asset.name, settings.agent.criticality_keywords)
     if keyword is not None:
-        level = Criticality.LOW if _is_nonprod(asset.name) else Criticality.HIGH
+        level = Criticality.LOW if _is_nonprod_asset(asset) else Criticality.HIGH
         detail = (
             f'Name contains "{keyword}", but also looks non-production.'
             if level is Criticality.LOW
@@ -389,6 +427,13 @@ async def set_criticality(
     asset.criticality_rationale = (
         payload.rationale or f"Set to {payload.criticality.value} by an operator."
     )
+    if asset.criticality != previous:
+        organization = await session.get(
+            Organization, principal.organization_id, with_for_update=True
+        )
+        if organization is None:
+            raise UserError("organization no longer exists", user_message="Organization not found.")
+        organization.risk_policy_version += 1
 
     await audit_service.record(
         session,
@@ -398,6 +443,49 @@ async def set_criticality(
         resource_id=asset.id,
         reason=payload.rationale,
         detail={"from": previous, "to": asset.criticality},
+    )
+    return asset
+
+
+async def set_asset_context(
+    session: AsyncSession,
+    principal: Principal,
+    asset_id: uuid.UUID,
+    payload: AssetContextIn,
+) -> Asset:
+    """Curate ownership and classification without trusting cross-tenant user ids."""
+    principal.require(Permission.ASSET_TAG)
+    repo: TenantRepository[Asset] = TenantRepository(session, Asset, principal.organization_id)
+    asset = await repo.get_or_404(asset_id)
+    changes = payload.model_dump(exclude_unset=True, mode="json")
+    if "owner_user_id" in changes and payload.owner_user_id is not None:
+        member = (
+            await session.execute(
+                select(Membership.id).where(
+                    Membership.organization_id == principal.organization_id,
+                    Membership.user_id == payload.owner_user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if member is None:
+            raise UserError(
+                "asset owner is not a member of this organization",
+                user_message="Choose a member of this organization as the asset owner.",
+            )
+    previous = {
+        name: str(value) if isinstance(value := getattr(asset, name), uuid.UUID) else value
+        for name in changes
+    }
+    for name in changes:
+        value = getattr(payload, name)
+        setattr(asset, name, value.value if name == "environment" else value)
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.ASSET_CONTEXT_SET,
+        principal=principal,
+        resource_type="asset",
+        resource_id=asset.id,
+        detail={"before": previous, "after": changes},
     )
     return asset
 
@@ -428,6 +516,8 @@ async def list_assets(
     conditions: list[Any] = []
     if filters.criticality is not None:
         conditions.append(Asset.criticality == filters.criticality.value)
+    if filters.environment is not None:
+        conditions.append(Asset.environment == filters.environment.value)
     if filters.selected is not None:
         conditions.append(Asset.selected_for_scanning.is_(filters.selected))
     if filters.internet_exposed is not None:
@@ -572,6 +662,14 @@ def _merge_duplicates(records: Sequence[DiscoveredAsset]) -> list[DiscoveredAsse
     return [merged[key] for key in order]
 
 
+def _new_asset_count(
+    records: Sequence[DiscoveredAsset],
+    existing: dict[tuple[str, int | None, str | None], Asset],
+) -> int:
+    """Count only inventory keys that would create a new organization asset."""
+    return sum(record.key not in existing for record in records)
+
+
 async def _load_by_keys(
     session: AsyncSession,
     organization_id: uuid.UUID,
@@ -586,11 +684,14 @@ async def _load_by_keys(
     names = {name for name, _, _ in keys}
     if not names:
         return {}
-    stmt = tenant_select(Asset, organization_id, selectinload(Asset.tags)).where(
-        Asset.name.in_(list(names))
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    return {(row.name, row.port, row.protocol): row for row in rows}
+    found: dict[tuple[str, int | None, str | None], Asset] = {}
+    ordered_names = sorted(names)
+    for offset in range(0, len(ordered_names), _ASSET_LOOKUP_BATCH):
+        batch = ordered_names[offset : offset + _ASSET_LOOKUP_BATCH]
+        stmt = tenant_select(Asset, organization_id).where(Asset.name.in_(batch))
+        for row in (await session.execute(stmt)).scalars().all():
+            found[(row.name, row.port, row.protocol)] = row
+    return found
 
 
 def _apply_record(
@@ -683,7 +784,7 @@ def _score(asset: Asset, settings: Settings) -> tuple[float, list[str]]:
         score += 0.10
         reasons.append(f'Name suggests a sensitive service ("{keyword}")')
 
-    if _is_nonprod(asset.name):
+    if _is_nonprod_asset(asset):
         # Subtractive rather than excluding: a vulnerable staging host still matters, it
         # just should not outrank production when the budget is tight.
         score -= 0.15
@@ -694,6 +795,19 @@ def _score(asset: Asset, settings: Settings) -> tuple[float, list[str]]:
         reasons.append(f"Status {asset.status}")
 
     return max(0.0, min(1.0, round(score, 4))), reasons
+
+
+def _is_nonprod_asset(asset: Asset) -> bool:
+    """Curated environment takes precedence over a hostname naming guess."""
+    if asset.environment == AssetEnvironment.PRODUCTION.value:
+        return False
+    if asset.environment in {
+        AssetEnvironment.STAGING.value,
+        AssetEnvironment.DEVELOPMENT.value,
+        AssetEnvironment.TEST.value,
+    }:
+        return True
+    return _is_nonprod(asset.name)
 
 
 def _criticality_from_tags(asset: Asset) -> tuple[Criticality, str] | None:
@@ -754,6 +868,17 @@ async def _count_assets(session: AsyncSession, assessment_id: uuid.UUID) -> int:
     )
 
 
+async def _count_organization_assets(session: AsyncSession, organization_id: uuid.UUID) -> int:
+    """Number of canonical inventory rows owned by an organization."""
+    return int(
+        (
+            await session.execute(
+                select(func.count()).select_from(Asset).where(Asset.organization_id == organization_id)
+            )
+        ).scalar_one()
+    )
+
+
 def _escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -771,6 +896,7 @@ __all__ = [
     "score_and_select",
     "selected_assets",
     "set_criticality",
+    "set_asset_context",
     "tag_asset",
     "upsert_assets",
 ]

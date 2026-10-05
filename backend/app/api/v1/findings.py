@@ -227,7 +227,7 @@ async def create_finding_ticket(
     already linked rather than opening a duplicate.  Jira is the only supported tracker in
     this release (FR-028); an unreachable Jira surfaces as a 502, not a half-written link.
     """
-    await ticket_service.create_ticket(
+    link = await ticket_service.create_ticket(
         session,
         principal,
         finding_id,
@@ -239,8 +239,7 @@ async def create_finding_ticket(
         include_remediation=payload.include_remediation,
     )
     await session.commit()
-    link = await ticket_service.find_ticket(session, principal, finding_id, provider="jira")
-    assert link is not None  # noqa: S101 - create_ticket guarantees a jira link for this finding
+    await session.refresh(link)
     return TicketLinkOut.model_validate(link)
 
 

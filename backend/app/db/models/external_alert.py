@@ -6,7 +6,16 @@ import datetime as dt
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -46,6 +55,16 @@ class ExternalSecurityAlert(Base, TenantMixin, TimestampMixin):
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     first_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    #: A single transient empty source result must not resolve an open alert.
+    missing_sync_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Cynux's local decision, deliberately separate from provider-owned ``status``.
+    triage_status: Mapped[str] = mapped_column(String(30), nullable=False, default="new")
+    triage_note: Mapped[str | None] = mapped_column(Text)
+    triage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    triaged_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    triaged_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
 
     integration: Mapped[Integration | None] = relationship(lazy=LAZY)
 
@@ -59,7 +78,13 @@ class ExternalSecurityAlert(Base, TenantMixin, TimestampMixin):
         CheckConstraint(
             "status IN ('open','resolved','dismissed','fixed')", name="valid_external_alert_status"
         ),
+        CheckConstraint("missing_sync_count >= 0", name="valid_missing_sync_count"),
+        CheckConstraint(
+            "triage_status IN ('new','investigating','risk_accepted','false_positive','closed')",
+            name="valid_external_alert_triage_status",
+        ),
         Index("ix_external_alerts_org_provider_status", "organization_id", "provider", "status"),
+        Index("ix_external_alerts_org_triage_status", "organization_id", "triage_status"),
     )
 
 

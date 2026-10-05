@@ -28,7 +28,7 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import LAZY, Base, TenantMixin, TimestampMixin, uuid_pk
-from app.db.enums import AssetStatus, Criticality, CriticalitySource
+from app.db.enums import AssetEnvironment, AssetStatus, Criticality, CriticalitySource
 
 if TYPE_CHECKING:
     from app.db.models.assessment import Assessment
@@ -80,6 +80,14 @@ class Asset(Base, TenantMixin, TimestampMixin):
         String(30), nullable=False, default=CriticalitySource.DEFAULT.value
     )
     criticality_rationale: Mapped[str | None] = mapped_column(Text)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    owner_team: Mapped[str | None] = mapped_column(String(120))
+    environment: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=AssetEnvironment.UNKNOWN.value
+    )
+    groups: Mapped[list[str]] = mapped_column(default=list, nullable=False)
 
     # --- FR-010 scope selection -------------------------------------------
     #: 0-1 ranking produced by the asset-analysis node.
@@ -135,8 +143,13 @@ class Asset(Base, TenantMixin, TimestampMixin):
             "'default')",
             name="valid_criticality_source",
         ),
+        CheckConstraint(
+            "environment IN ('unknown','production','staging','development','test')",
+            name="valid_asset_environment",
+        ),
         CheckConstraint("port IS NULL OR port BETWEEN 0 AND 65535", name="valid_port"),
         Index("ix_assets_organization_id_criticality", "organization_id", "criticality"),
+        Index("ix_assets_organization_id_environment", "organization_id", "environment"),
         Index(
             "ix_assets_assessment_id_selected_for_scanning",
             "assessment_id",

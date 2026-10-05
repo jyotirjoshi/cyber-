@@ -37,7 +37,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep
-from app.schemas.asset import AssetCriticalityIn, AssetFilter, AssetOut, AssetTagIn
+from app.schemas.asset import AssetContextIn, AssetCriticalityIn, AssetFilter, AssetOut, AssetTagIn
 from app.schemas.common import Page
 from app.services import asset as asset_service
 
@@ -113,6 +113,20 @@ async def set_asset_criticality(
     changes which assets get scanned, so it must be attributable.
     """
     await asset_service.set_criticality(session, principal, asset_id, payload)
+    await session.commit()
+    asset = await asset_service.get_asset(session, principal, asset_id)
+    return AssetOut.model_validate(asset)
+
+
+@router.patch("/{asset_id}/context", response_model=AssetOut)
+async def set_asset_context(
+    asset_id: uuid.UUID,
+    payload: AssetContextIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AssetOut:
+    """Set tenant-owned business context, with an audit trail (ASSET_TAG)."""
+    await asset_service.set_asset_context(session, principal, asset_id, payload)
     await session.commit()
     asset = await asset_service.get_asset(session, principal, asset_id)
     return AssetOut.model_validate(asset)

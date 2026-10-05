@@ -41,7 +41,7 @@ async def _check_defectdojo(settings: Settings) -> None:
         await client.aclose()
 
 
-async def _probe(name: str, check) -> DependencyHealth:  # type: ignore[no-untyped-def]
+async def _probe(name: str, check) -> DependencyHealth:
     start = time.perf_counter()
     try:
         await check()

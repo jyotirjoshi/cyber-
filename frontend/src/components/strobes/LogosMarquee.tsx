@@ -16,7 +16,7 @@ export function LogosMarquee() {
     <section className="py-12 border-t border-b border-emerald-500/15 bg-[#030603]/90 relative overflow-hidden">
       <div className="container-app text-center mb-6">
         <span className="text-xs font-mono tracking-[0.25em] text-emerald-500/70 uppercase">
-          CHOSEN BY TEAMS WHO CAN'T AFFORD TO GET IT WRONG
+          CHOSEN BY TEAMS WHO CAN&apos;T AFFORD TO GET IT WRONG
         </span>
       </div>
 

@@ -5,8 +5,8 @@ full attack-surface context when it writes findings. It:
 
 1. Generates up to 3 multi-hop attack paths using the attack path service.
 2. Applies SSVC triage to every finding, adding a decision-support outcome to each row.
-3. Runs compound-risk correlation to detect multi-finding attack chains and flag
-   likely false positives before the analysis model wastes tokens on them.
+3. Runs compound-risk correlation to detect multi-finding attack chains and retain
+   possible false positives for analyst review without suppressing analysis.
 4. Stores all results on the assessment for use in the report and dashboard.
 
 Design choices:
@@ -19,14 +19,15 @@ reported. The attack path context is additive intelligence, not a gate.
 - Attack paths → ``assessment.extra_data`` (new sub-key ``attack_paths``)
 - SSVC results → ``finding.risk_factors`` (new sub-key ``ssvc``)
 - Compound risks → ``assessment.extra_data`` (new sub-key ``compound_risks``)
-- False positive flags → ``finding.ai_skipped_reason`` when confidence is "high"
+- False positive candidates → ``finding.risk_factors`` when confidence is "high"
 
-**Runs before analysis.** The SSVC outcome and false-positive flag are available
-to the analysis node, so it can skip confirmed false positives and write the right
-urgency language into findings that are SSVC=Act.
+**Runs before analysis.** SSVC is available to the analysis node; an AI false-positive
+suggestion stays advisory, never automatically closes or skips a finding.
 """
 
 from __future__ import annotations
+
+import uuid
 
 import structlog
 from sqlalchemy import select
@@ -36,16 +37,59 @@ from sqlalchemy.orm import selectinload
 from app.agent.nodes._common import load_assessment, record_step
 from app.agent.registry import AgentDeps
 from app.agent.state import AssessmentState, state_uuid
+from app.core.logging_conf import redact_text
 from app.db.enums import AssessmentStage
 from app.db.models.finding import Finding
 from app.db.session import session_scope
 from app.services.attack_path import generate_attack_paths
-from app.services.correlation import correlate_findings
+from app.services.correlation import FalsePositiveCandidate, correlate_findings
 from app.services.ssvc import evaluate_ssvc
 
 log = structlog.get_logger(__name__)
 
 _NODE = "attack_path"
+_LEGACY_CORRELATION_SKIP = (
+    "Flagged as likely false positive by cross-scanner correlation analysis."
+)
+
+
+async def record_false_positive_candidates(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    assessment_id: uuid.UUID,
+    candidates: list[FalsePositiveCandidate],
+) -> int:
+    """Retain high-confidence AI suggestions without altering finding lifecycle or analysis."""
+    by_id = {candidate.finding_id: candidate for candidate in candidates
+             if candidate.confidence == "high"}
+    if not by_id:
+        return 0
+    rows = (
+        await session.execute(
+            select(Finding).where(
+                Finding.id.in_(by_id),
+                Finding.organization_id == organization_id,
+                Finding.assessment_id == assessment_id,
+            )
+        )
+    ).scalars().all()
+    count = 0
+    for finding in rows:
+        if finding.organization_id != organization_id or finding.assessment_id != assessment_id:
+            continue
+        candidate = by_id[finding.id]
+        factors = dict(finding.risk_factors or {})
+        factors["false_positive_candidate"] = {
+            "confidence": "high",
+            "reason": redact_text(candidate.reason.strip()[:500]),
+            "source": "ai_correlation",
+        }
+        finding.risk_factors = factors
+        if finding.ai_skipped_reason == _LEGACY_CORRELATION_SKIP:
+            finding.ai_skipped_reason = None
+        count += 1
+    return count
 
 
 async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, object]:
@@ -114,7 +158,7 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
         try:
             async with session_scope(deps.settings) as session:
                 assessment = await load_assessment(session, state)
-                result = await correlate_findings(
+                correlation_result = await correlate_findings(
                     session,
                     assessment,
                     gateway=deps.gateway,
@@ -122,7 +166,7 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
                 )
 
                 # Store compound risks on assessment metadata
-                if result.compound_risks:
+                if correlation_result.compound_risks:
                     meta = dict(assessment.extra_data or {}) if assessment.extra_data else {}
                     meta["compound_risks"] = [
                         {
@@ -132,40 +176,23 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
                             "effective_severity": cr.effective_severity,
                             "attack_chain": cr.attack_chain,
                         }
-                        for cr in result.compound_risks
+                        for cr in correlation_result.compound_risks
                     ]
                     assessment.extra_data = meta
-                    compound_count = len(result.compound_risks)
+                    compound_count = len(correlation_result.compound_risks)
 
-                # Flag high-confidence false positives so the analysis node skips them
-                if result.false_positives:
-                    fp_ids = {
-                        fp.finding_id
-                        for fp in result.false_positives
-                        if fp.confidence == "high"
-                    }
-                    if fp_ids:
-                        # Bulk-load and mark
-                        fp_findings = list(
-                            (
-                                await session.execute(
-                                    select(Finding).where(Finding.id.in_(fp_ids))
-                                )
-                            )
-                            .scalars()
-                            .all()
-                        )
-                        for ff in fp_findings:
-                            if ff.ai_skipped_reason is None:
-                                ff.ai_skipped_reason = (
-                                    "Flagged as likely false positive by cross-scanner "
-                                    "correlation analysis."
-                                )
-                        fp_flagged = len(fp_findings)
+                # Keep AI-suggested false positives advisory; analysis must still run.
+                if correlation_result.false_positives:
+                    fp_flagged = await record_false_positive_candidates(
+                        session,
+                        organization_id=org_id,
+                        assessment_id=assessment_id,
+                        candidates=correlation_result.false_positives,
+                    )
 
-                if result.coverage_gaps:
+                if correlation_result.coverage_gaps:
                     meta = dict(assessment.extra_data or {}) if assessment.extra_data else {}
-                    meta["coverage_gaps"] = result.coverage_gaps
+                    meta["coverage_gaps"] = correlation_result.coverage_gaps
                     assessment.extra_data = meta
 
         except Exception as exc:
@@ -182,7 +209,8 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
         if paths_stored:
             await step.thinking(
                 f"Attack surface analysis complete: {paths_stored} kill chain(s), "
-                f"{compound_count} compound risk(s), {fp_flagged} likely false positive(s) flagged."
+                f"{compound_count} compound risk(s), {fp_flagged} possible false-positive "
+                "candidate(s) retained for analyst review."
             )
 
     return {"stage": AssessmentStage.AI_ANALYSIS.value}

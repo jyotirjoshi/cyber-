@@ -195,7 +195,7 @@ async def import_from_defectdojo(
     *,
     client: DefectDojoClient,
     test_id: int,
-) -> list[Finding]:
+) -> int:
     """Pull one DefectDojo test's findings into the local projection.
 
     Upserts on ``(organization_id, defectdojo_finding_id)``.  A finding seen by an earlier
@@ -207,80 +207,76 @@ async def import_from_defectdojo(
     originates a status change -- DefectDojo does -- but a reader of the audit log still
     needs to see when a finding stopped being active and on whose scan.
     """
-    records = await client.list_findings(test_id=test_id)
     now = _now()
-
-    if not records:
-        await audit_service.record(
-            session,
-            action=audit_service.AuditAction.FINDING_IMPORT,
-            resource_type="assessment",
-            resource_id=assessment.id,
-            organization_id=assessment.organization_id,
-            detail={"defectdojo_test_id": test_id, "imported": 0, "created": 0},
-        )
-        log.info(
-            "finding.import_empty",
-            assessment_id=str(assessment.id),
-            defectdojo_test_id=test_id,
-        )
-        return []
-
-    existing = await _existing_by_dd_id(
-        session,
-        organization_id=assessment.organization_id,
-        dd_ids=[record.id for record in records],
-    )
     job = await _job_for_test(session, assessment, test_id=test_id)
-    hosts = {host for record in records for host in _hosts_of(record)}
-    by_host_port, by_host = await _asset_index(
-        session, organization_id=assessment.organization_id, hosts=hosts
-    )
-
-    findings: list[Finding] = []
+    total = 0
     created = 0
-    status_changes: list[dict[str, Any]] = []
+    status_change_count = 0
+    from app.services.canonical_ingest import ingest_native_findings
 
-    for record in records:
-        finding = existing.get(record.id)
-        if finding is None:
-            finding = Finding(
-                organization_id=assessment.organization_id,
-                defectdojo_finding_id=record.id,
-                title=record.title[:1000] or "(untitled finding)",
-                severity=record.severity.value,
-                status=FindingStatus.ACTIVE.value,
-                first_seen_at=now,
-            )
-            session.add(finding)
-            created += 1
-
-        previous_status = _apply_dd(
-            finding,
-            record,
-            assessment=assessment,
-            asset=_match_asset(record, by_host_port=by_host_port, by_host=by_host),
-            job=job,
-            now=now,
+    async for records in client.iter_finding_pages(test_id=test_id):
+        existing = await _existing_by_dd_id(
+            session,
+            organization_id=assessment.organization_id,
+            dd_ids=[record.id for record in records],
         )
-        if previous_status is not None:
-            status_changes.append(
-                {
-                    "defectdojo_finding_id": record.id,
-                    "from": previous_status,
-                    "to": finding.status,
-                }
-            )
-        findings.append(finding)
+        hosts = {host for record in records for host in _hosts_of(record)}
+        by_host_port, by_host = await _asset_index(
+            session, organization_id=assessment.organization_id, hosts=hosts
+        )
+        findings: list[Finding] = []
+        status_changes: list[dict[str, Any]] = []
+        for record in records:
+            finding = existing.get(record.id)
+            if finding is None:
+                finding = Finding(
+                    organization_id=assessment.organization_id,
+                    defectdojo_finding_id=record.id,
+                    title=record.title[:1000] or "(untitled finding)",
+                    severity=record.severity.value,
+                    status=FindingStatus.ACTIVE.value,
+                    first_seen_at=now,
+                )
+                session.add(finding)
+                created += 1
 
-    # Flush before the counters: ``refresh_counters`` aggregates in SQL, so rows still
-    # pending in the session would be invisible to it and the totals would lag by one
-    # import.
-    await session.flush()
-    await refresh_counters(session, assessment)
+            previous_status = _apply_dd(
+                finding,
+                record,
+                assessment=assessment,
+                asset=_match_asset(record, by_host_port=by_host_port, by_host=by_host),
+                job=job,
+                now=now,
+            )
+            if previous_status is not None:
+                status_changes.append(
+                    {
+                        "defectdojo_finding_id": record.id,
+                        "from": previous_status,
+                        "to": finding.status,
+                    }
+                )
+            findings.append(finding)
+
+        await session.flush()
+        await ingest_native_findings(session, assessment.organization_id, findings)
+        total += len(findings)
+        status_change_count += len(status_changes)
+        for change in status_changes:
+            await audit_service.record(
+                session,
+                action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
+                resource_type="finding",
+                organization_id=assessment.organization_id,
+                detail=change,
+                reason="Synchronized from DefectDojo, which owns finding state.",
+            )
+
+    if total:
+        await refresh_counters(session, assessment)
 
     if job is not None:
-        job.imported_finding_count = len(findings)
+        job.imported_finding_count = total
         job.defectdojo_test_id = test_id
 
     await audit_service.record(
@@ -291,31 +287,22 @@ async def import_from_defectdojo(
         organization_id=assessment.organization_id,
         detail={
             "defectdojo_test_id": test_id,
-            "imported": len(findings),
+            "imported": total,
             "created": created,
-            "updated": len(findings) - created,
-            "status_changes": len(status_changes),
+            "updated": total - created,
+            "status_changes": status_change_count,
         },
     )
-    for change in status_changes:
-        await audit_service.record(
-            session,
-            action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
-            resource_type="finding",
-            organization_id=assessment.organization_id,
-            detail=change,
-            reason="Synchronized from DefectDojo, which owns finding state.",
-        )
 
     log.info(
         "finding.imported",
         assessment_id=str(assessment.id),
         defectdojo_test_id=test_id,
-        total=len(findings),
+        total=total,
         created=created,
-        status_changes=len(status_changes),
+        status_changes=status_change_count,
     )
-    return findings
+    return total
 
 
 # ---------------------------------------------------------------------------

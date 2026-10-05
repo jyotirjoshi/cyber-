@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from alembic import op
 
-
 revision = "0005_llm_byok_integration"
 down_revision = "0004_ctem_foundation"
 branch_labels = None

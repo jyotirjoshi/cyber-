@@ -33,31 +33,122 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep, RedisDep, SettingsDep
 from app.api.v1.projections import assessment_detail_out, assessment_out
-from app.db.enums import AgentRunStatus
-from app.db.models.agent import AgentRun, AgentSession
-from app.db.models.assessment import Assessment
+from app.core.errors import ResourceNotFoundError
+from app.db.enums import Permission
+from app.db.models.agent import AgentRun, RunDispatch
+from app.db.models.assessment import Assessment, RecurringScan, ScanProfile
+from app.db.models.scanner import ScannerJob
+from app.db.repository import tenant_select
 from app.schemas.assessment import (
     AssessmentCreateIn,
     AssessmentDetailOut,
     AssessmentFilter,
     AssessmentOut,
     CancelIn,
+    RecurringScanCreateIn,
+    RecurringScanOut,
+    ScanProfileCreateIn,
+    ScanProfileOut,
+    WorkerMetricsOut,
 )
 from app.schemas.common import Page
 from app.services import assessment as assessment_service
+from app.services import recurring_scan as recurring_scan_service
 from app.services.context import Principal
-from app.worker import RunAction, RunRequest, publish_run_request
+from app.worker.dispatch import deliver_run_dispatch, stage_assessment_run
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
 
 
+@router.get("/worker/metrics", response_model=WorkerMetricsOut)
+async def worker_metrics(principal: PrincipalDep, session: DbSession) -> WorkerMetricsOut:
+    principal.require(Permission.ASSESSMENT_READ)
+    org_id = principal.organization_id
+    run_rows = (await session.execute(
+        tenant_select(AgentRun, org_id)
+        .with_only_columns(AgentRun.status, func.count())
+        .where(AgentRun.graph == "assessment")
+        .group_by(AgentRun.status)
+    )).all()
+    dispatch_rows = (await session.execute(
+        tenant_select(RunDispatch, org_id)
+        .with_only_columns(RunDispatch.status, func.count())
+        .group_by(RunDispatch.status)
+    )).all()
+    scanner_rows = (await session.execute(
+        tenant_select(ScannerJob, org_id)
+        .with_only_columns(ScannerJob.status, func.count())
+        .group_by(ScannerJob.status)
+    )).all()
+    return WorkerMetricsOut(
+        runs={row[0]: row[1] for row in run_rows},
+        pending_dispatches=next((row[1] for row in dispatch_rows if row[0] == "pending"), 0),
+        scanner_jobs={row[0]: row[1] for row in scanner_rows},
+    )
+
+
+@router.get("/profiles", response_model=list[ScanProfileOut])
+async def list_scan_profiles(principal: PrincipalDep, session: DbSession) -> list[ScanProfile]:
+    principal.require(Permission.ASSESSMENT_READ)
+    return list((await session.scalars(
+        tenant_select(ScanProfile, principal.organization_id).order_by(ScanProfile.name).limit(200)
+    )).all())
+
+
+@router.post("/profiles", response_model=ScanProfileOut, status_code=status.HTTP_201_CREATED)
+async def create_scan_profile(
+    payload: ScanProfileCreateIn, principal: PrincipalDep, session: DbSession
+) -> ScanProfile:
+    profile = await recurring_scan_service.create_scan_profile(session, principal, payload)
+    await session.commit()
+    return profile
+
+
+@router.get("/schedules", response_model=list[RecurringScanOut])
+async def list_recurring_scans(principal: PrincipalDep, session: DbSession) -> list[RecurringScan]:
+    principal.require(Permission.ASSESSMENT_READ)
+    return list((await session.scalars(
+        tenant_select(RecurringScan, principal.organization_id)
+        .order_by(RecurringScan.created_at.desc()).limit(200)
+    )).all())
+
+
+@router.post("/schedules", response_model=RecurringScanOut, status_code=status.HTTP_201_CREATED)
+async def create_recurring_scan(
+    payload: RecurringScanCreateIn, principal: PrincipalDep, session: DbSession,
+    settings: SettingsDep,
+) -> RecurringScan:
+    schedule = await recurring_scan_service.create_recurring_scan(
+        session, principal, payload, settings
+    )
+    await session.commit()
+    return schedule
+
+
+@router.post("/schedules/{schedule_id}/pause", response_model=RecurringScanOut)
+async def pause_recurring_scan(
+    schedule_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> RecurringScan:
+    principal.require(Permission.ASSESSMENT_CREATE)
+    schedule = (await session.execute(
+        tenant_select(RecurringScan, principal.organization_id)
+        .where(RecurringScan.id == schedule_id).with_for_update()
+    )).scalar_one_or_none()
+    if schedule is None:
+        raise ResourceNotFoundError("Recurring scan not found")
+    schedule.enabled = False
+    await session.commit()
+    return schedule
+
+
 def _seed_agent_run(
     session: AsyncSession, principal: Principal, assessment: Assessment
-) -> uuid.UUID:
+) -> tuple[uuid.UUID, uuid.UUID]:
     """Create the conversation and run rows the worker will drive, and return the run id.
 
     Both ids are minted here so ``thread_id`` can be ``str(run_id)`` -- the LangGraph
@@ -70,30 +161,7 @@ def _seed_agent_run(
     Staged, not committed: the caller commits the whole unit of work, then publishes the
     ``START`` request -- the run must be durable before the worker can load it.
     """
-    session_id = uuid.uuid4()
-    run_id = uuid.uuid4()
-    session.add(
-        AgentSession(
-            id=session_id,
-            organization_id=principal.organization_id,
-            user_id=principal.user_id,
-            title=assessment.title,
-        )
-    )
-    assessment.agent_session_id = session_id
-    session.add(
-        AgentRun(
-            id=run_id,
-            organization_id=principal.organization_id,
-            session_id=session_id,
-            assessment_id=assessment.id,
-            triggered_by_id=principal.user_id,
-            thread_id=str(run_id),
-            graph="assessment",
-            status=AgentRunStatus.QUEUED.value,
-        )
-    )
-    return run_id
+    return stage_assessment_run(session, principal, assessment)
 
 
 @router.get("", response_model=Page[AssessmentOut])
@@ -131,15 +199,15 @@ async def create_assessment(
     ``START`` request published -- so the worker never sees a run that is not yet durable.
     """
     assessment = await assessment_service.create_assessment(session, principal, payload, settings)
-    run_id = _seed_agent_run(session, principal, assessment)
+    _, dispatch_id = _seed_agent_run(session, principal, assessment)
     await session.commit()
 
-    detail = await assessment_service.get_assessment(session, principal, assessment.id, detail=True)
-    await publish_run_request(
-        redis,
-        settings,
-        RunRequest.new(run_id, RunAction.START, principal=principal.to_dict()),
+    await deliver_run_dispatch(
+        session, organization_id=principal.organization_id, dispatch_id=dispatch_id,
+        redis=redis, settings=settings,
     )
+    await session.commit()
+    detail = await assessment_service.get_assessment(session, principal, assessment.id, detail=True)
     return await assessment_detail_out(session, detail)
 
 

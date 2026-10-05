@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import uuid
+from contextlib import asynccontextmanager
 
 import pytest
 
 import app.agent.runner as runner_module
-from app.agent.runner import AgentRunner
 from app.agent.registry import AgentDeps
+from app.agent.runner import AgentRunner
 from app.core.config import Settings
 from app.db.enums import IntegrationKind, Role
 from app.llm.gateway import LLMGateway
@@ -61,8 +61,8 @@ async def test_worker_graph_resolves_llm_settings_for_the_run_organization(
 
     assert await runner._graph_for_organization(organization_id) is graph
     principal = captured["principal"]
-    assert getattr(principal, "organization_id") == organization_id
-    assert getattr(principal, "role") is Role.VIEWER
-    assert getattr(principal, "actor_type") == ACTOR_WORKER
+    assert principal.organization_id == organization_id
+    assert principal.role is Role.VIEWER
+    assert principal.actor_type == ACTOR_WORKER
     assert captured["kind"] is IntegrationKind.LLM
-    assert getattr(captured["deps"], "gateway")._settings is settings
+    assert captured["deps"].gateway._settings is settings

@@ -45,6 +45,8 @@ from app.db.base import LAZY, Base
 from app.db.enums import (
     ALLOWED_TRANSITIONS,
     PERMISSIONS,
+    AgentActionName,
+    AgentActionStatus,
     AgentRunStatus,
     ApprovalDecision,
     ApprovalKind,
@@ -52,13 +54,16 @@ from app.db.enums import (
     AssessmentDepth,
     AssessmentStage,
     AssessmentStatus,
+    AssetEnvironment,
     AssetStatus,
     AuditOutcome,
+    CanonicalFindingStatus,
     Criticality,
     CriticalitySource,
     EngagementType,
     EnrichmentStatus,
     ExecutionMode,
+    ExternalAlertTriageStatus,
     FindingStatus,
     IntegrationKind,
     IntegrationStatus,
@@ -80,6 +85,7 @@ from app.db.enums import (
     StrEnum,
     ValidationStatus,
 )
+from app.worker.protocol import RunAction
 
 
 class EnumColumn(NamedTuple):
@@ -134,6 +140,7 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     ),
     # --- assets -----------------------------------------------------------
     EnumColumn("assets", "status", AssetStatus),
+    EnumColumn("assets", "environment", AssetEnvironment),
     EnumColumn("assets", "criticality", Criticality),
     EnumColumn("assets", "criticality_source", CriticalitySource),
     # --- scanners ---------------------------------------------------------
@@ -142,10 +149,13 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     EnumColumn("scanner_artifacts", "kind", ArtifactKind),
     # --- findings ---------------------------------------------------------
     EnumColumn("findings", "severity", Severity),
+    EnumColumn("canonical_findings", "severity", Severity),
+    EnumColumn("canonical_findings", "status", CanonicalFindingStatus),
     EnumColumn("findings", "status", FindingStatus),
     EnumColumn("findings", "priority", Priority),
     EnumColumn("findings", "asset_criticality", Criticality),
     EnumColumn("findings", "validation_status", ValidationStatus),
+    EnumColumn("external_security_alerts", "triage_status", ExternalAlertTriageStatus),
     EnumColumn("finding_enrichments", "status", EnrichmentStatus),
     EnumColumn("finding_enrichments", "nvd_status", EnrichmentStatus),
     EnumColumn("finding_enrichments", "kev_status", EnrichmentStatus),
@@ -163,6 +173,9 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
         ),
     ),
     # --- agent ------------------------------------------------------------
+    EnumColumn("agent_actions", "action", AgentActionName),
+    EnumColumn("run_dispatches", "action", RunAction),
+    EnumColumn("agent_actions", "status", AgentActionStatus),
     EnumColumn("agent_messages", "role", MessageRole),
     EnumColumn("agent_runs", "status", AgentRunStatus),
     EnumColumn("agent_steps", "status", StepStatus),
@@ -188,6 +201,7 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
         ("reports", "audience"),  # executive / technical
         ("external_security_alerts", "severity"),
         ("external_security_alerts", "status"),
+        ("run_dispatches", "status"),
     }
 )
 

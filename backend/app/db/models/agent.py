@@ -33,7 +33,7 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import LAZY, Base, TenantMixin, TimestampMixin, uuid_pk
-from app.db.enums import AgentRunStatus, MessageRole, StepStatus
+from app.db.enums import AgentActionStatus, AgentRunStatus, MessageRole, StepStatus
 
 if TYPE_CHECKING:
     from app.db.models.assessment import Assessment
@@ -145,6 +145,82 @@ class AgentMessage(Base, TenantMixin, TimestampMixin):
     @property
     def role_enum(self) -> MessageRole:
         return MessageRole(self.role)
+
+
+class AgentAction(Base, TenantMixin, TimestampMixin):
+    """A single proposed external action, approved once against its immutable payload hash."""
+
+    __tablename__ = "agent_actions"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="SET NULL")
+    )
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
+    label: Mapped[str] = mapped_column(String(300), nullable=False)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    #: SHA-256 over a canonical payload. Execution checks this before acting.
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default=AgentActionStatus.PENDING.value, index=True
+    )
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+    executed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    result_summary: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','update_github_alert','create_jira_ticket','update_canonical_work')",
+            name="valid_agent_action",
+        ),
+        CheckConstraint(
+            "status IN ('pending','approved','rejected','executed','failed')",
+            name="valid_agent_action_status",
+        ),
+        CheckConstraint(
+            "status = 'pending' OR approved_by_user_id IS NOT NULL",
+            name="agent_action_resolution_requires_actor",
+        ),
+        Index("ix_agent_actions_org_session_status", "organization_id", "session_id", "status"),
+    )
+
+
+class RunDispatch(Base, TenantMixin, TimestampMixin):
+    """Transactional outbox entry for one start or approval-resume request."""
+
+    __tablename__ = "run_dispatches"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(10), nullable=False)
+    dispatch_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    principal: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    stream_message_id: Mapped[str | None] = mapped_column(String(64))
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "dispatch_key", name="unique_run_dispatch_key"),
+        CheckConstraint("action IN ('start','resume')", name="valid_run_dispatch_action"),
+        CheckConstraint("status IN ('pending','sent')", name="valid_run_dispatch_status"),
+        Index("ix_run_dispatches_status_available_at", "status", "available_at"),
+    )
 
 
 class AgentRun(Base, TenantMixin, TimestampMixin):
@@ -297,4 +373,4 @@ class AgentStep(Base, TenantMixin, TimestampMixin):
         return StepStatus(self.status)
 
 
-__all__ = ["AgentMessage", "AgentRun", "AgentSession", "AgentStep"]
+__all__ = ["AgentAction", "AgentMessage", "AgentRun", "AgentSession", "AgentStep", "RunDispatch"]

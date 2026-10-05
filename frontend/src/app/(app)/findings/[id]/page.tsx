@@ -25,6 +25,7 @@ import { useApiResource, useMutation } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
+import { falsePositiveCandidate } from "@/lib/false-positive-candidate";
 import { formatDate, formatDateTime, humanize } from "@/lib/format";
 import type { EnrichmentStatus, ValidateFindingIn } from "@/lib/types";
 
@@ -223,6 +224,7 @@ export default function FindingDetailPage() {
   }
 
   const f = data;
+  const fpCandidate = falsePositiveCandidate(f.risk_factors);
   const enr = f.enrichment;
   const hasAnalysis =
     f.ai_analyzed_at != null &&
@@ -607,6 +609,18 @@ export default function FindingDetailPage() {
 
         {/* Sidebar */}
         <div className="space-y-6">
+          {fpCandidate && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Possible false positive</CardTitle>
+                <Badge tone="warn">AI suggestion · not verified</Badge>
+              </CardHeader>
+              <CardBody className="space-y-2 text-sm text-muted">
+                <p>{fpCandidate.reason}</p>
+                <p>Review scanner evidence before changing this finding’s status. Analysis and remediation remain active.</p>
+              </CardBody>
+            </Card>
+          )}
           {/* SSVC triage */}
           {(() => {
             const ssvc = f.risk_factors?.ssvc as

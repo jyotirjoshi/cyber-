@@ -136,13 +136,17 @@ class LLMGateway:
             from app.llm.openai_client import OpenAIClient
 
             client = OpenAIClient(self._llm)
+        elif provider == "openrouter":
+            from app.llm.openai_client import OpenAIClient
+
+            client = OpenAIClient(self._llm, provider="openrouter")
         elif provider == "google":
             from app.llm.google_client import GoogleClient
 
             client = GoogleClient(self._llm)
         else:
             raise ConfigurationError(
-                f"Unsupported LLM provider {provider!r}. Supported: anthropic, openai, google.",
+                f"Unsupported LLM provider {provider!r}. Supported: anthropic, openai, google, openrouter.",
                 setting="CYNUX_LLM__PROVIDER",
             )
 

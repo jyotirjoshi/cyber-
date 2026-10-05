@@ -10,8 +10,8 @@ authority.
 be hours stale and an approval can be granted, customized, rejected or revoked in the gap, so
 the node calls :func:`app.services.approval.granted_approval` inside its own transaction and
 drives its target set from that approval's ``approved_payload`` alone
-(:func:`~app.services.approval.approval_targets`).  ``granted_approval`` already filters to a
-resolved, granted decision, so a ``None`` return means *do not scan*.  The ``approval_id`` in
+(:func:`~app.services.approval.approval_targets`).  ``granted_approval`` returns authority only
+when the latest approval is resolved and granted, so ``None`` means *do not scan*.  The ``approval_id`` in
 the channel is a convenience for logging; it is never authority (see :mod:`app.agent.state`).
 
 **Every approved target is re-validated (FR-006).**  Recon wrote its discovered assets without
@@ -60,6 +60,7 @@ from app.core.targets import validate_target
 from app.db.enums import (
     AssessmentStage,
     AssessmentStatus,
+    AuditOutcome,
     JobStatus,
     RiskLevel,
     ScannerName,
@@ -69,10 +70,17 @@ from app.db.models.asset import Asset
 from app.db.models.identity import Organization
 from app.db.models.scanner import ScannerJob
 from app.db.session import session_scope
+from app.services import audit as audit_service
 from app.services.approval import approval_targets, granted_approval
 from app.services.assessment import record_degradation, transition
 from app.services.asset import assets_by_ids
-from app.services.job import claim_slot, enqueue_job, execute_job, release_slot
+from app.services.job import (
+    claim_slot,
+    enqueue_job,
+    execute_job,
+    organization_scanner_limit,
+    release_slot,
+)
 from app.services.organization import load_policy
 
 log = structlog.get_logger(__name__)
@@ -422,7 +430,10 @@ async def _enqueue_and_execute(
     """
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
-        job = await enqueue_job(session, assessment, scanner=scanner, targets=targets)
+        job = await enqueue_job(
+            session, assessment, scanner=scanner, targets=targets,
+            idempotency_key=f"agent:{state_uuid(state, 'run_id')}:{scanner.value}",
+        )
         job_id = job.id
 
     async with session_scope(deps.settings) as session:
@@ -432,6 +443,39 @@ async def _enqueue_and_execute(
                 "scanner job disappeared between enqueue and execution",
                 context={"job_id": str(job_id)},
             )
+        if row.organization_id != state_uuid(state, "organization_id"):
+            raise ScannerError(
+                "scanner job organization does not match the active run",
+                context={"job_id": str(job_id)},
+            )
+        if row.status != JobStatus.QUEUED.value:
+            duration = row.duration_seconds
+            return row.status, int(duration * 1000) if duration is not None else None
+        current_assessment = await load_assessment(session, state)
+        approval = await granted_approval(session, current_assessment.id)
+        allowed_targets, allowed_scanners, _ = await _resolve_scope(
+            session, state, approval, deps.settings
+        )
+        if (
+            current_assessment.status_enum is not AssessmentStatus.SCANNING
+            or scanner not in allowed_scanners
+            or set(row.targets) != set(allowed_targets)
+        ):
+            row.status = JobStatus.CANCELLED.value
+            row.failure_code = "scan_authorization_changed"
+            await audit_service.record(
+                session,
+                action=audit_service.AuditAction.SCANNER_CANCEL,
+                principal=None,
+                organization_id=row.organization_id,
+                resource_type="scanner_job",
+                resource_id=row.id,
+                outcome=AuditOutcome.DENIED,
+                reason="scan approval or target policy changed before execution",
+                detail={"scanner": scanner.value, "status": row.status},
+            )
+            log.warning("agent.scan.authorization_changed", job_id=str(job_id))
+            return row.status, None
         finished = await execute_job(
             session, row, runner=deps.runner, storage=deps.storage, settings=deps.settings
         )
@@ -450,7 +494,13 @@ async def _acquire_slot(deps: AgentDeps, org_id: uuid.UUID) -> bool:
     """
     attempts = max(1, int(_SLOT_WAIT_SECONDS / _SLOT_POLL_SECONDS))
     for attempt in range(attempts):
-        if await claim_slot(deps.redis, deps.settings, org_id):
+        async with session_scope(deps.settings) as session:
+            org_limit = await organization_scanner_limit(session, org_id, deps.settings)
+        if org_limit < 1:
+            return False
+        if await claim_slot(
+            deps.redis, deps.settings, org_id, organization_limit=org_limit
+        ):
             return True
         if attempt + 1 < attempts:
             await asyncio.sleep(_SLOT_POLL_SECONDS)

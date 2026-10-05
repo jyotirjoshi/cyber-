@@ -22,6 +22,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -47,6 +48,11 @@ class Organization(Base, TimestampMixin):
     #: Organization-level policy: extra denied targets, approval thresholds,
     #: notification routing. Validated against app.schemas.organization.OrgPolicy.
     policy: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
+    #: Product capacity and capability flags, deliberately separate from the security
+    #: policy above. Empty values on pre-existing organizations resolve through the
+    #: fail-closed entitlement service until an operator assigns a snapshot.
+    entitlements: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    risk_policy_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -68,6 +74,7 @@ class Organization(Base, TimestampMixin):
             "max_concurrent_scanner_jobs BETWEEN 1 AND 64",
             name="concurrency_bounds",
         ),
+        CheckConstraint("risk_policy_version >= 0", name="valid_risk_policy_version"),
     )
 
 

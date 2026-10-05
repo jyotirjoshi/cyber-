@@ -84,10 +84,16 @@ class AuditAction:
     APPROVAL_CUSTOMIZED = "approval.customized"
     APPROVAL_REJECTED = "approval.rejected"
     APPROVAL_EXPIRED = "approval.expired"
+    AGENT_ACTION_PROPOSED = "agent.action.proposed"
+    AGENT_ACTION_APPROVED = "agent.action.approved"
+    AGENT_ACTION_REJECTED = "agent.action.rejected"
+    AGENT_ACTION_EXECUTED = "agent.action.executed"
+    AGENT_ACTION_FAILED = "agent.action.failed"
 
     # -- assets (FR-009, FR-010, FR-022) ------------------------------------
     ASSET_TAG = "asset.tag"
     ASSET_CRITICALITY_SET = "asset.criticality.set"
+    ASSET_CONTEXT_SET = "asset.context.set"
     ASSET_SCOPE_SELECT = "asset.scope.select"
 
     # -- scanners (FR-012 .. FR-015) ----------------------------------------
@@ -101,21 +107,26 @@ class AuditAction:
     # -- findings (FR-016 .. FR-023) ----------------------------------------
     FINDING_IMPORT = "finding.import"
     FINDING_STATUS_CHANGE = "finding.status.change"
+    FINDING_WORK_UPDATE = "finding.work.update"
     FINDING_ANALYZE = "finding.analyze"
     FINDING_VALIDATE = "finding.validate"
     FINDING_PRIORITIZE = "finding.prioritize"
     FINDING_ENRICH = "finding.enrich"
+    EXTERNAL_ALERT_TRIAGE = "external_alert.triage"
+    EXTERNAL_ALERT_SOURCE_UPDATE = "external_alert.source_update"
     REMEDIATION_GENERATE = "remediation.generate"
     REMEDIATION_VALIDATE = "remediation.validate"
 
     # -- external actions (FR-027 .. FR-029) --------------------------------
     TICKET_CREATE = "ticket.create"
+    NOTIFICATION_QUEUE = "notification.queue"
     NOTIFICATION_SEND = "notification.send"
     INTEGRATION_CONFIGURE = "integration.configure"
     INTEGRATION_CREDENTIAL_UPDATE = "integration.credential.update"
     INTEGRATION_TEST = "integration.test"
     INTEGRATION_DISABLE = "integration.disable"
     INTEGRATION_SYNC = "integration.sync"
+    INTEGRATION_SCAN_LAUNCH = "integration.scan.launch"
 
     # -- reports (FR-030) ---------------------------------------------------
     REPORT_GENERATE = "report.generate"

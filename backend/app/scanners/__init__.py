@@ -3,16 +3,16 @@
 Two package-wide conventions, both of which exist because the alternative is a security bug
 rather than an inconvenience:
 
-**A scanner that ran and failed is a result, not an exception.**  ``SubprocessRunner.run``
+**A scanner that ran and failed is a result, not an exception.**  ``DockerRunner.run``
 returns a :class:`~app.scanners.base.ScannerResult` with a non-zero ``exit_code`` for a
 Nuclei run that crashed, a Nmap scan that timed out, and a ZAP baseline that reported warnings.
 FR-040 requires an assessment to degrade rather than collapse when one tool fails, and that is
-only possible if the failure arrives as data.  Exceptions are reserved for "running this at all
-was wrong or impossible": an argv that failed validation, a binary outside the allow-list, or a
-binary that is not installed.
+only possible if the failure arrives as data. Exceptions are reserved for "running this at all
+was wrong or impossible": an argv that failed validation, an image outside the allow-list, or
+an unavailable container runtime.
 
 **Argv validation guards every scanner invocation.**  There is no shell involved:
-``asyncio.create_subprocess_exec`` takes a list. Every element is checked against
+the container API takes a list. Every element is checked against
 :data:`~app.scanners.sandbox.ARGV_SAFE` before execution, so a target that acquired a ``;``
 still cannot become a second command.
 """
@@ -46,7 +46,7 @@ from app.scanners.registry import (
     get_adapter,
     scan_type_for,
 )
-from app.scanners.runner import DockerRunner, SubprocessRunner
+from app.scanners.runner import DockerRunner
 from app.scanners.sandbox import (
     ALLOWED_ENV_NAMES,
     ALLOWED_WORK_MOUNTS,
@@ -69,8 +69,7 @@ __all__ = [
     "WORK_MOUNT",
     "ArtifactFile",
     "DiscoveredAsset",
-    "DockerRunner",       # alias for SubprocessRunner
-    "SubprocessRunner",
+    "DockerRunner",
     "ScannerAdapter",
     "ScannerRequest",
     "ScannerResult",

@@ -60,6 +60,11 @@ from app.schemas.organization import (
 from app.services import audit
 from app.services.audit import AuditAction
 from app.services.context import Principal
+from app.services.entitlements import (
+    DEFAULT_ENTITLEMENTS,
+    assert_member_capacity,
+    load_entitlements,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -164,6 +169,7 @@ async def create_organization(
         name=name.strip(),
         slug=await allocate_slug(session, candidate),
         policy={},
+        entitlements=DEFAULT_ENTITLEMENTS.model_dump(),
         is_active=True,
     )
     session.add(organization)
@@ -264,9 +270,13 @@ async def update_organization(
         changes["max_concurrent_scanner_jobs"] = payload.max_concurrent_scanner_jobs
         organization.max_concurrent_scanner_jobs = payload.max_concurrent_scanner_jobs
     if payload.policy is not None:
+        previous_risk_weights = load_policy(organization).risk_weights.model_dump(mode="json")
         validated = _validate_policy(payload.policy)
         changes["policy_keys"] = sorted(validated.keys())
         organization.policy = validated
+        if validated["risk_weights"] != previous_risk_weights:
+            organization.risk_policy_version += 1
+            changes["risk_policy_version"] = organization.risk_policy_version
 
     if not changes:
         return organization
@@ -462,6 +472,32 @@ async def invite_member(
 
     email = payload.email.strip().lower()
     user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
+
+    # Memberships are the paid-capacity unit, so serialize the duplicate check, quota check
+    # and insert per organization.  A user may still be invited to a different organization
+    # concurrently; that is intentionally independent and handled by the user-email unique
+    # constraint below.
+    organization = (
+        await session.execute(
+            select(Organization)
+            .where(Organization.id == principal.organization_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+    if user is not None:
+        existing = await resolve_membership(session, user.id, principal.organization_id)
+        if existing is not None:
+            raise ConflictError(
+                "already a member",
+                user_message="That person is already a member of this organization.",
+                context={"role": existing.role},
+            )
+    assert_member_capacity(
+        current_members=await _count_organization_members(session, principal.organization_id),
+        new_members=1,
+        entitlements=load_entitlements(organization.entitlements),
+    )
+
     created = user is None
     if user is None:
         user = User(
@@ -483,14 +519,6 @@ async def invite_member(
                 user_message="That user was just added. Refresh and try again.",
                 cause=exc,
             ) from exc
-
-    existing = await resolve_membership(session, user.id, principal.organization_id)
-    if existing is not None:
-        raise ConflictError(
-            "already a member",
-            user_message="That person is already a member of this organization.",
-            context={"role": existing.role},
-        )
 
     membership = Membership(
         organization_id=principal.organization_id,
@@ -669,6 +697,19 @@ async def _owner_count(session: AsyncSession, principal: Principal) -> int:
         )
     )
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def _count_organization_members(session: AsyncSession, organization_id: uuid.UUID) -> int:
+    """Count invited and accepted memberships occupying organization capacity."""
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(Membership)
+                .where(Membership.organization_id == organization_id)
+            )
+        ).scalar_one()
+    )
 
 
 async def _has_any_membership(session: AsyncSession, user_id: uuid.UUID) -> bool:

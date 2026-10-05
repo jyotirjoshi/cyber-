@@ -17,7 +17,7 @@ export function Footer() {
               <span className="text-lg font-bold text-white tracking-tight">strobes</span>
             </Link>
             <p className="text-xs text-emerald-100/60 max-w-sm leading-relaxed font-sans">
-              Adversarial exposure validation that proves what's exploitable. AI agents validating findings the way an attacker would.
+              Adversarial exposure validation that proves what&apos;s exploitable. AI agents validating findings the way an attacker would.
             </p>
             <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded bg-emerald-950/80 border border-emerald-500/30 text-[11px] text-emerald-400">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from alembic import op
 
-
 revision = "0006_wazuh_integration"
 down_revision = "0005_llm_byok_integration"
 branch_labels = None

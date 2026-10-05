@@ -7,10 +7,10 @@ Create Date: 2026-09-19
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
+from alembic import op
 
 revision = "0004_ctem_foundation"
 down_revision = "0003_finding_elite_ai_fields"

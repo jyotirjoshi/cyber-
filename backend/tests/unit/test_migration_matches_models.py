@@ -85,6 +85,7 @@ class OpRecorder:
         self.dropped_tables: list[str] = []
         self.dropped_indexes: list[tuple[str, str]] = []
         self.other: list[str] = []
+        self.events: list[str] = []
 
     # -- upgrade ------------------------------------------------------------
 
@@ -99,15 +100,30 @@ class OpRecorder:
     def add_column(self, table_name: str, column: sa.Column[Any], **kwargs: Any) -> None:
         self.other.append(f"add_column:{table_name}:{column.name}")
 
+    def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        self.other.append(f"alter_column:{table_name}:{column_name}:{kwargs}")
+
+    def create_unique_constraint(
+        self, name: str, table_name: str, columns: list[str], **kwargs: Any
+    ) -> None:
+        self.other.append(f"create_unique:{table_name}:{name}:{columns}")
+
     def create_check_constraint(
         self, name: str, table_name: str, condition: str, **kwargs: Any
     ) -> None:
         self.other.append(f"create_check:{table_name}:{name}:{condition}")
 
+    def create_foreign_key(
+        self, name: str, source: str, referent: str,
+        local_cols: list[str], remote_cols: list[str], **kwargs: Any,
+    ) -> None:
+        self.other.append(f"create_fk:{source}:{name}:{referent}:{local_cols}:{remote_cols}")
+
     # -- downgrade ----------------------------------------------------------
 
     def drop_table(self, name: str, **kwargs: Any) -> None:
         self.dropped_tables.append(name)
+        self.events.append(f"drop_table:{name}")
 
     def drop_index(self, name: str, table_name: str = "", **kwargs: Any) -> None:
         self.dropped_indexes.append((name, table_name))
@@ -117,6 +133,7 @@ class OpRecorder:
 
     def drop_constraint(self, name: str, table_name: str, **kwargs: Any) -> None:
         self.other.append(f"drop_constraint:{table_name}:{name}")
+        self.events.append(f"drop_constraint:{table_name}:{name}")
 
     # -- misc ---------------------------------------------------------------
 
@@ -162,10 +179,29 @@ class MetadataOp:
     def add_column(self, table_name: str, column: sa.Column[Any], **kwargs: Any) -> None:
         self.metadata.tables[table_name].append_column(column)
 
+    def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        column = self.metadata.tables[table_name].c[column_name]
+        if "nullable" in kwargs:
+            column.nullable = kwargs["nullable"]
+
+    def create_unique_constraint(
+        self, name: str, table_name: str, columns: list[str], **kwargs: Any
+    ) -> None:
+        self.metadata.tables[table_name].append_constraint(sa.UniqueConstraint(*columns, name=name))
+
     def create_check_constraint(
         self, name: str, table_name: str, condition: str, **kwargs: Any
     ) -> None:
         self.metadata.tables[table_name].append_constraint(sa.CheckConstraint(condition, name=name))
+
+    def create_foreign_key(
+        self, name: str, source: str, referent: str,
+        local_cols: list[str], remote_cols: list[str], **kwargs: Any,
+    ) -> None:
+        self.metadata.tables[source].append_constraint(sa.ForeignKeyConstraint(
+            local_cols, [f"{referent}.{column}" for column in remote_cols],
+            name=name, ondelete=kwargs.get("ondelete"),
+        ))
 
     def create_index(
         self, name: str, table_name: str, columns: list[str], unique: bool = False, **kwargs: Any
@@ -181,6 +217,10 @@ class MetadataOp:
 
     def f(self, name: str) -> str:
         return name
+
+    def execute(self, statement: Any, **kwargs: Any) -> None:
+        """Data-only migrations do not change the schema metadata being compared."""
+        assert str(statement).lstrip().upper().startswith("UPDATE ")
 
 
 @pytest.fixture(scope="module")
@@ -462,22 +502,43 @@ def test_downgrade_drops_tables_in_reverse_dependency_order(
 ) -> None:
     """A child table must be dropped before its parent, or the FK blocks the drop."""
     order = {name: i for i, name in enumerate(recorded_downgrade.dropped_tables)}
+    initial = _initial_foreign_keys(recorded)
     for name, table in _model_tables().items():
         for fk in table.foreign_keys:
             parent = fk.column.table.name
             if parent == name or parent not in order:
                 continue
-            assert order[name] < order[parent], f"downgrade drops {parent} before its child {name}"
+            if (name, parent) in initial or order[name] < order[parent]:
+                assert order[name] < order[parent], f"downgrade drops {parent} before its child {name}"
+            else:
+                drop = f"drop_constraint:{name}:{fk.constraint.name}"
+                assert drop in recorded_downgrade.events
+                assert recorded_downgrade.events.index(drop) < recorded_downgrade.events.index(
+                    f"drop_table:{parent}"
+                )
+
+
+def _initial_foreign_keys(recorded: OpRecorder) -> set[tuple[str, str]]:
+    """Foreign keys present at CREATE TABLE time, excluding later ALTERs."""
+    relationships: set[tuple[str, str]] = set()
+    for name, args in recorded.tables.items():
+        for item in args:
+            if isinstance(item, sa.Column):
+                targets = [fk.target_fullname for fk in item.foreign_keys]
+            elif isinstance(item, sa.ForeignKeyConstraint):
+                targets = [fk.target_fullname for fk in item.elements]
+            else:
+                continue
+            relationships.update((name, target.split(".", 1)[0]) for target in targets)
+    return relationships
 
 
 def test_tables_are_created_in_dependency_order(recorded: OpRecorder) -> None:
     """The mirror of the above: a FK cannot reference a table that does not exist yet."""
     order = {name: i for i, name in enumerate(recorded.tables)}
-    for name, table in _model_tables().items():
-        for fk in table.foreign_keys:
-            parent = fk.column.table.name
-            if parent == name or parent not in order:
-                continue
-            assert (
-                order[parent] < order[name]
-            ), f"{name} is created before the table it references, {parent}"
+    for name, parent in _initial_foreign_keys(recorded):
+        if parent == name or parent not in order:
+            continue
+        assert order[parent] < order[name], (
+            f"{name} is created before the table it references, {parent}"
+        )

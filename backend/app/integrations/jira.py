@@ -3,14 +3,12 @@
 One finding becomes at most one Jira issue, and keeping that true is the whole difficulty.
 Three mechanisms stack up, because none alone is sufficient:
 
-1.  An ``Idempotency-Key`` derived from the finding id, so the HTTP spine is permitted to
-    retry the ``POST``.  Jira Cloud does not honour the header, so this is what makes the
-    retry *allowed*, not what makes it *safe*.
-2.  A JQL pre-check for an existing issue carrying the finding's Cynux label.  This catches
+1.  The Jira issue-creation POST is never automatically retried: Jira does not honour
+    ``Idempotency-Key``, so a timeout after commit has an ambiguous outcome.
+2.  A JQL pre-check for an existing issue carrying the finding's Cynux label. This catches
     the case where the first attempt actually succeeded and the response was lost.
-3.  The unique constraint on ``ticket_links``, which is the only guarantee that survives two
-    workers racing.  The service layer relies on it; this client just makes the first two
-    cheap enough that the constraint rarely fires.
+3.  The unique constraint on ``ticket_links`` prevents duplicate local links. It cannot
+    undo duplicate remote issues, so failed JQL checks and ambiguous POSTs fail closed.
 
 The Cynux label -- :func:`finding_label` -- is what ties the three together.  It is written
 onto every issue Cynux files so the JQL check has something exact to match on; matching on
@@ -32,7 +30,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from app.core.config import Settings
-from app.core.errors import IntegrationError, IntegrationNotConfiguredError
+from app.core.errors import (
+    IntegrationError,
+    IntegrationNotConfiguredError,
+    InvalidConfigurationError,
+)
 from app.db.enums import Priority, Severity
 from app.integrations.circuit import BreakerConfig
 from app.integrations.http import ResilientClient, RetryPolicy, build_client, reveal
@@ -50,6 +52,16 @@ LABEL_PREFIX = "cynux-finding"
 #: Jira rejects labels containing whitespace and silently mangles some punctuation, so the
 #: label is restricted to a conservative character set.
 _LABEL_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]")
+_PROJECT_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,39}\Z")
+
+
+def _safe_project_key(value: str) -> str:
+    if not _PROJECT_KEY_RE.fullmatch(value):
+        raise InvalidConfigurationError(
+            "Invalid Jira project key", user_message="The Jira project key is invalid."
+        )
+    return value
+
 
 #: Cynux priority to a Jira priority name. Jira instances rename these freely, so a failure
 #: to set priority is tolerated (see :meth:`JiraClient.create_issue`) rather than fatal --
@@ -217,23 +229,20 @@ class JiraClient:
         base = self._cfg.base_url or ""
         return [_parse_issue(issue, base_url=base) for issue in (payload or {}).get("issues") or []]
 
-    async def find_for_finding(self, finding_id: str) -> JiraIssue | None:
+    async def find_for_finding(
+        self, finding_id: str, *, project_key: str | None = None
+    ) -> JiraIssue | None:
         """Look for an issue Cynux already filed for this finding.
 
-        Deliberately swallows failures: this is a duplicate-avoidance optimization, and a
-        Jira search outage must not block filing the ticket. Worst case we file a second
-        issue, which the ``ticket_links`` unique constraint then prevents from being
-        recorded twice.
+        Search failure is not equivalent to no issue. Proceeding with a POST would risk
+        creating a duplicate in Jira, which a local ticket_links constraint cannot undo.
         """
         label = finding_label(finding_id)
-        try:
-            issues = await self.search(
-                f'project = "{self.project_key}" AND labels = "{label}" ORDER BY created DESC',
-                max_results=1,
-            )
-        except IntegrationError as exc:
-            logger.warning("jira.duplicate_check_failed", error=exc.code)
-            return None
+        target_project = _safe_project_key(project_key or self.project_key)
+        issues = await self.search(
+            f'project = "{target_project}" AND labels = "{label}" ORDER BY created DESC',
+            max_results=1,
+        )
         return issues[0] if issues else None
 
     # -- create --------------------------------------------------------------
@@ -247,6 +256,7 @@ class JiraClient:
         priority: Priority | None = None,
         labels: list[str] | None = None,
         issue_type: str | None = None,
+        project_key: str | None = None,
         assignee_account_id: str | None = None,
         components: list[str] | None = None,
     ) -> JiraIssue:
@@ -256,10 +266,11 @@ class JiraClient:
         returns it rather than filing a duplicate, and stamps the finding label so the next
         check will find it.
         """
+        target_project = _safe_project_key(project_key or self.project_key)
         client = self._require()
 
         if finding_id:
-            existing = await self.find_for_finding(finding_id)
+            existing = await self.find_for_finding(finding_id, project_key=project_key)
             if existing is not None:
                 logger.info("jira.issue_exists", finding_id=finding_id, issue_key=existing.key)
                 return existing
@@ -269,7 +280,7 @@ class JiraClient:
             all_labels.append(finding_label(finding_id))
 
         fields: dict[str, Any] = {
-            "project": {"key": self.project_key},
+            "project": {"key": target_project},
             #: Jira truncates summaries over 255 characters server-side, which produces a
             #: mid-word cut. Trimming here keeps the ellipsis intentional.
             "summary": (summary[:252] + "...") if len(summary) > 255 else summary,
@@ -288,12 +299,13 @@ class JiraClient:
             payload = await client.post_json(
                 "/rest/api/3/issue",
                 json={"fields": fields},
-                #: Makes the POST retryable in the spine. See the module docstring: this is
-                #: necessary but not sufficient, which is why the JQL pre-check exists.
-                idempotency_key=f"cynux-finding-{finding_id}" if finding_id else None,
             )
-        except IntegrationError:
-            if "priority" not in fields and "components" not in fields:
+        except IntegrationError as exc:
+            # Only a definitive validation rejection is safe to retry with fewer fields.
+            # A timeout or 5xx may mean Jira created the issue but lost the response.
+            if exc.context.get("status") != 400 or (
+                "priority" not in fields and "components" not in fields
+            ):
                 raise
             #: Priority schemes and component lists are per-project configuration Cynux
             #: cannot know. Rather than fail the whole ticket, retry without the fields a
@@ -308,7 +320,6 @@ class JiraClient:
             payload = await client.post_json(
                 "/rest/api/3/issue",
                 json={"fields": fields},
-                idempotency_key=f"cynux-finding-{finding_id}-retry" if finding_id else None,
             )
 
         if not payload or not payload.get("key"):

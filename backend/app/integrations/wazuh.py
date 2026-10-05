@@ -68,7 +68,7 @@ class WazuhClient:
     def _basic_auth_header(self) -> str:
         username = self._cfg.api_username or ""
         password = reveal(self._cfg.api_password)
-        encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
         return f"Basic {encoded}"
 
     @staticmethod
@@ -103,4 +103,64 @@ class WazuhClient:
         return True
 
 
-__all__ = ["PROVIDER", "WazuhClient"]
+class WazuhIndexerClient:
+    """Read alert documents from Wazuh's separate OpenSearch-compatible Indexer."""
+
+    _ALERT_INDEX = "/wazuh-alerts*/_search"
+
+    def __init__(self, settings: Settings, redis: Redis | None = None) -> None:
+        self.settings = settings
+        self._cfg = settings.wazuh
+        self._redis = redis
+        self._client: ResilientClient | None = None
+
+    def _require(self) -> ResilientClient:
+        if not self._cfg.indexer_configured:
+            raise IntegrationNotConfiguredError(
+                PROVIDER,
+                hint=(
+                    "Configure the Wazuh Indexer URL and its read-only credentials before "
+                    "synchronizing alerts."
+                ),
+            )
+        if self._client is None:
+            self._client = build_client(
+                provider=f"{PROVIDER} Indexer",
+                base_url=self._cfg.indexer_base_url or "",
+                settings=self.settings,
+                redis=self._redis,
+                timeout=float(self._cfg.timeout_seconds),
+                verify=self._cfg.verify_tls,
+                retry=RetryPolicy(max_attempts=2, backoff_base=1.0),
+                breaker_config=BreakerConfig(failure_threshold=4, cooldown_seconds=180),
+            )
+        return self._client
+
+    def _headers(self) -> dict[str, str]:
+        username = self._cfg.indexer_username or ""
+        password = reveal(self._cfg.indexer_password)
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        return {"Authorization": f"Basic {encoded}", "Content-Type": "application/json"}
+
+    async def list_alerts(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return recent alert hits without mutating Wazuh or its indices."""
+        bounded_limit = min(max(limit, 1), 500)
+        payload = await self._require().post_json(
+            self._ALERT_INDEX,
+            headers=self._headers(),
+            json={
+                "size": bounded_limit,
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "query": {"range": {"@timestamp": {"gte": "now-24h"}}},
+            },
+        )
+        hits = payload.get("hits", {}).get("hits", []) if isinstance(payload, dict) else []
+        return [hit for hit in hits if isinstance(hit, dict)]
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+
+__all__ = ["PROVIDER", "WazuhClient", "WazuhIndexerClient"]

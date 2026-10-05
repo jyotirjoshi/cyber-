@@ -282,6 +282,16 @@ class ValidationStatus(StrEnum):
     RECHECK_REQUIRED = "recheck_required"
 
 
+class ExternalAlertTriageStatus(StrEnum):
+    """Cynux's local analyst disposition, never a provider status."""
+
+    NEW = "new"
+    INVESTIGATING = "investigating"
+    RISK_ACCEPTED = "risk_accepted"
+    FALSE_POSITIVE = "false_positive"
+    CLOSED = "closed"
+
+
 class Scope(StrEnum):
     EXTERNAL = "external"
     INTERNAL = "internal"
@@ -299,6 +309,14 @@ class AssetStatus(StrEnum):
     INACTIVE = "inactive"
     UNREACHABLE = "unreachable"
     OUT_OF_SCOPE = "out_of_scope"
+
+
+class AssetEnvironment(StrEnum):
+    UNKNOWN = "unknown"
+    PRODUCTION = "production"
+    STAGING = "staging"
+    DEVELOPMENT = "development"
+    TEST = "test"
 
 
 class Criticality(StrEnum):
@@ -421,6 +439,16 @@ class FindingStatus(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class CanonicalFindingStatus(StrEnum):
+    NEW = "new"
+    OPEN = "open"
+    REOPENED = "reopened"
+    MITIGATED = "mitigated"
+    ACCEPTED_RISK = "accepted_risk"
+    FALSE_POSITIVE = "false_positive"
+    CLOSED = "closed"
+
+
 class Priority(StrEnum):
     """FR-023 output. Distinct from severity: severity is the scanner's opinion,
     priority is Cynux's after exposure, exploitation and business context."""
@@ -490,6 +518,28 @@ class MessageRole(StrEnum):
     TOOL = "tool"
 
 
+class AgentActionName(StrEnum):
+    """An allow-listed external action the agent may propose, never invent."""
+
+    SYNC_GITHUB_ALERTS = "sync_github_alerts"
+    SYNC_GITLAB_ALERTS = "sync_gitlab_alerts"
+    SYNC_WAZUH_ALERTS = "sync_wazuh_alerts"
+    SYNC_SONARQUBE_ALERTS = "sync_sonarqube_alerts"
+    SYNC_SNYK_ISSUES = "sync_snyk_issues"
+    SYNC_TENABLE_VULNERABILITIES = "sync_tenable_vulnerabilities"
+    UPDATE_GITHUB_ALERT = "update_github_alert"
+    CREATE_JIRA_TICKET = "create_jira_ticket"
+    UPDATE_CANONICAL_WORK = "update_canonical_work"
+
+
+class AgentActionStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
 class ApprovalDecision(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -523,6 +573,9 @@ class IntegrationKind(StrEnum):
     GITHUB = "github"
     GITLAB = "gitlab"
     WAZUH = "wazuh"
+    SONARQUBE = "sonarqube"
+    SNYK = "snyk"
+    TENABLE = "tenable"
 
 
 class IntegrationStatus(StrEnum):
@@ -591,7 +644,9 @@ __all__ = [
     "EnrichmentStatus",
     "EngagementType",
     "ExecutionMode",
+    "ExternalAlertTriageStatus",
     "FindingStatus",
+    "CanonicalFindingStatus",
     "IntegrationKind",
     "IntegrationStatus",
     "JobStatus",

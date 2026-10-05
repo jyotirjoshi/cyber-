@@ -43,6 +43,8 @@ class ScannerJob(Base, TenantMixin, TimestampMixin):
         PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False
     )
     scanner: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    #: Stable graph-step key; NULL for manually requested, repeatable jobs.
+    idempotency_key: Mapped[str | None] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, default=JobStatus.QUEUED.value, index=True
     )
@@ -108,6 +110,10 @@ class ScannerJob(Base, TenantMixin, TimestampMixin):
         Index("ix_scanner_jobs_assessment_id_scanner", "assessment_id", "scanner"),
         Index("ix_scanner_jobs_organization_id_status", "organization_id", "status"),
         Index("ix_scanner_jobs_worker_id_status", "worker_id", "status"),
+        UniqueConstraint(
+            "organization_id", "idempotency_key",
+            name="unique_scanner_job_idempotency_key",
+        ),
     )
 
     @property

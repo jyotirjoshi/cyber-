@@ -10,6 +10,8 @@ asyncpg==0.30.0
 alembic==1.14.0
 psycopg[binary,pool]==3.2.3
 redis[hiredis]==5.2.1
+croniter==6.2.4
+docker==7.1.0
 langgraph==0.2.60
 langgraph-checkpoint-postgres==2.0.9
 langsmith==0.2.10

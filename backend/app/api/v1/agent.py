@@ -30,6 +30,7 @@ a duplicate. No endpoint here echoes untrusted content back into a prompt or a l
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -42,13 +43,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import DbSession, EventBusDep, PaginationDep, PrincipalDep
-from app.core.errors import ConflictError
+from app.api.deps import (
+    DbSession,
+    EventBusDep,
+    GatewayDep,
+    PaginationDep,
+    PrincipalDep,
+    RedisDep,
+    SettingsDep,
+)
+from app.core.errors import ConflictError, CynuxError, ModelUnavailableError
 from app.db.enums import MessageRole, Permission
-from app.db.models.agent import AgentMessage, AgentRun, AgentSession
+from app.db.models.agent import AgentAction, AgentMessage, AgentRun, AgentSession
 from app.db.models.assessment import Assessment
 from app.db.repository import TenantRepository, tenant_select
 from app.schemas.agent import (
+    AgentActionOut,
+    AgentActionProposeIn,
+    AgentActionResolveIn,
     AgentEvent,
     AgentMessageIn,
     AgentMessageOut,
@@ -57,7 +69,10 @@ from app.schemas.agent import (
     AgentSessionOut,
 )
 from app.schemas.common import Page
+from app.services import agent_action as agent_action_service
 from app.services import audit as audit_service
+from app.services.agent_chat import create_reply
+from app.services.agent_chat_actions import propose_chat_actions
 from app.services.context import Principal
 from app.services.events import EventEmitter
 
@@ -67,6 +82,96 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 _TITLE_MAX_CHARS = 80
 _MAX_SEQ_RETRIES = 3
+
+
+@router.get("/actions", response_model=list[AgentActionOut])
+async def list_agent_actions(
+    principal: PrincipalDep,
+    session: DbSession,
+    session_id: uuid.UUID | None = None,
+) -> list[AgentActionOut]:
+    """Pending and resolved agent actions for one organization; no provider call is made."""
+    principal.require(Permission.AGENT_CHAT)
+    stmt = (
+        tenant_select(AgentAction, principal.organization_id)
+        .order_by(AgentAction.created_at.desc(), AgentAction.id.desc())
+        .limit(100)
+    )
+    if session_id is not None:
+        await TenantRepository(session, AgentSession, principal.organization_id).get_or_404(
+            session_id
+        )
+        stmt = stmt.where(AgentAction.session_id == session_id)
+    rows = (await session.execute(stmt)).scalars().all()
+    return [AgentActionOut.model_validate(row) for row in rows]
+
+
+@router.post("/actions", response_model=AgentActionOut, status_code=status.HTTP_201_CREATED)
+async def propose_agent_action(
+    payload: AgentActionProposeIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentActionOut:
+    """Queue exactly one external operation for a human decision; it does not execute it."""
+    action = await agent_action_service.propose_action(
+        session,
+        principal,
+        session_id=payload.session_id,
+        action=payload.action,
+        label=payload.label,
+        rationale=payload.rationale,
+        payload=payload.payload,
+    )
+    await session.commit()
+    return AgentActionOut.model_validate(action)
+
+
+@router.post("/actions/{action_id}/resolve", response_model=AgentActionOut)
+async def resolve_agent_action(
+    action_id: uuid.UUID,
+    payload: AgentActionResolveIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentActionOut:
+    """Approve or reject one exact action. Approval is not reusable for another action."""
+    action = await agent_action_service.resolve_action(
+        session, principal, action_id, approve=payload.approve, note=payload.note
+    )
+    await session.commit()
+    return AgentActionOut.model_validate(action)
+
+
+@router.post("/actions/{action_id}/execute", response_model=AgentActionOut)
+async def execute_agent_action(
+    action_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> AgentActionOut:
+    """Run one approved action once, with a tenant-scoped row lock and exact-payload check."""
+    principal.require(Permission.AGENT_CHAT)
+    action = (
+        await session.execute(
+            tenant_select(AgentAction, principal.organization_id)
+            .where(AgentAction.id == action_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if action is None:
+        action = await TenantRepository(session, AgentAction, principal.organization_id).get_or_404(
+            action_id
+        )
+    if action.status in {"executed", "failed"}:
+        # A background worker can settle the row while the approving browser waits
+        # for this lock. Return its result without invoking the provider twice.
+        agent_action_service.require_action_permission(principal, action.action)
+        return AgentActionOut.model_validate(action)
+    result = await agent_action_service.execute_and_settle_action(
+        session, principal, action, settings=settings, redis=redis
+    )
+    await session.commit()
+    return AgentActionOut.model_validate(result)
 
 
 @router.get("/sessions", response_model=Page[AgentSessionOut])
@@ -175,6 +280,8 @@ async def post_message(
     principal: PrincipalDep,
     session: DbSession,
     event_bus: EventBusDep,
+    gateway: GatewayDep,
+    settings: SettingsDep,
 ) -> AgentMessageOut:
     """Append a human turn to a conversation and broadcast it (FR-005, FR-032).
 
@@ -257,6 +364,55 @@ async def post_message(
         await emitter.message(message_out)
     except RedisError:
         log.warning("agent_message_broadcast_failed", session_id=str(convo_id))
+
+    # Chat is intentionally synchronous: it is a short model completion, not an assessment run.
+    # The reply is committed before this request resolves, so a reload cannot lose it and normal
+    # guidance does not depend on the assessment worker.
+    try:
+        try:
+            await emitter.thinking("Checking the request and preparing a response…", node="chat")
+        except RedisError:
+            log.warning("agent_chat_thinking_broadcast_failed", session_id=str(convo_id))
+
+        action_outcomes = await propose_chat_actions(
+            session,
+            principal,
+            session_id=convo_id,
+            question=payload.content,
+            gateway=gateway,
+            settings=settings,
+        )
+        if action_outcomes:
+            await session.commit()
+
+        assistant = await create_reply(
+            session,
+            organization_id=org_id,
+            conversation_id=convo_id,
+            gateway=gateway,
+            principal=principal,
+            action_result=json.dumps(action_outcomes, separators=(",", ":"))
+            if action_outcomes
+            else None,
+        )
+        assistant_out = AgentMessageOut.model_validate(assistant)
+        try:
+            await emitter.message(assistant_out)
+            await emitter.complete()
+        except RedisError:
+            log.warning("agent_chat_reply_broadcast_failed", session_id=str(convo_id))
+    except CynuxError as exc:
+        log.info("agent_chat_reply_unavailable", session_id=str(convo_id), error_code=exc.code)
+        try:
+            await emitter.error(exc)
+        except RedisError:
+            log.warning("agent_chat_error_broadcast_failed", session_id=str(convo_id))
+    except Exception as exc:  # pragma: no cover - defensive boundary around third-party SDKs
+        log.exception("agent_chat_reply_failed", session_id=str(convo_id))
+        try:
+            await emitter.error(ModelUnavailableError("Chat completion failed", cause=exc))
+        except RedisError:
+            log.warning("agent_chat_error_broadcast_failed", session_id=str(convo_id))
 
     return message_out
 

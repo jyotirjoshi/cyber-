@@ -37,8 +37,8 @@ from app.db.session import get_db
 from app.integrations.dify import DifyClient
 from app.integrations.storage import ObjectStorage
 from app.llm.gateway import LLMGateway
-from app.services import integration as integration_service
 from app.schemas.common import PaginationParams, SortParams
+from app.services import integration as integration_service
 from app.services.auth import authenticate_token, resolve_principal
 from app.services.context import Principal
 from app.services.events import EventBus

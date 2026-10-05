@@ -98,6 +98,16 @@ class IntegrationSyncOut(BaseModel):
     alerts_staged: int = Field(ge=0)
 
 
+class TenableScanStatusOut(BaseModel):
+    scan_id: str
+    status: str
+
+
+class TenableScanLaunchOut(BaseModel):
+    scan_id: str
+    run_uuid: str | None = None
+
+
 class IntegrationHealthOut(BaseModel):
     """Dashboard row (FR-031)."""
 

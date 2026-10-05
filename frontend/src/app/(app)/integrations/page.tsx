@@ -15,12 +15,17 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { fieldError } from "@/lib/errors";
 import { formatDate, formatRelative, humanize } from "@/lib/format";
+import { configuredTenableScanIds, handleIntegrationSyncSuccess, handleIntegrationTestSuccess } from "@/lib/integration-actions";
+import { ADDABLE_INTEGRATIONS, BYOK_PROVIDERS, INTEGRATION_SETUP_HINTS } from "@/lib/integration-catalog";
 import type {
   IntegrationKind,
   IntegrationOut,
+  IntegrationSyncOut,
   IntegrationStatus,
   IntegrationTestOut,
   IntegrationUpsertIn,
+  TenableScanLaunchOut,
+  TenableScanStatusOut,
 } from "@/lib/types";
 
 /** Integration status → shared badge tone. Static map so Tailwind classes stay literal. */
@@ -36,7 +41,7 @@ interface CredRow {
   value: string;
 }
 
-type BYOKProvider = "openai" | "anthropic" | "google";
+type BYOKProvider = (typeof BYOK_PROVIDERS)[number]["kind"];
 
 function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
   const { toast } = useToast();
@@ -44,6 +49,7 @@ function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
   const [model, setModel] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
   const [formError, setFormError] = React.useState<string | null>(null);
+
   const upsert = useMutation((body: IntegrationUpsertIn) => api.integrations.upsert(body), {
     onSuccess: () => {
       setApiKey("");
@@ -87,9 +93,9 @@ function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
               value={provider}
               onChange={(event) => setProvider(event.target.value as BYOKProvider)}
             >
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="google">Google</option>
+              {BYOK_PROVIDERS.map((item) => (
+                <option key={item.kind} value={item.kind}>{item.label}</option>
+              ))}
             </Select>
           </Field>
           <Field label="Model" htmlFor="byok-model" hint="Use the exact model ID enabled for your key.">
@@ -120,18 +126,6 @@ function ByokSetupCard({ onChanged }: { onChanged: () => void }) {
     </Card>
   );
 }
-
-const ADDABLE_INTEGRATIONS: Array<{ kind: IntegrationKind; label: string }> = [
-  { kind: "defectdojo", label: "DefectDojo" },
-  { kind: "jira", label: "Jira" },
-  { kind: "slack", label: "Slack" },
-  { kind: "email", label: "SMTP email" },
-  { kind: "dify", label: "Dify knowledge base" },
-  { kind: "misp", label: "MISP" },
-  { kind: "nvd", label: "NVD" },
-  { kind: "github", label: "GitHub" },
-  { kind: "gitlab", label: "GitLab" },
-];
 
 function AddIntegrationCard({ existing, onChanged }: { existing: IntegrationOut[]; onChanged: () => void }) {
   const { toast } = useToast();
@@ -208,14 +202,31 @@ function IntegrationCard({
       : [{ key: "", value: "" }],
   );
   const [formError, setFormError] = React.useState<string | null>(null);
+  const [scanChoice, setScanChoice] = React.useState("");
+  const [scanStatus, setScanStatus] = React.useState<TenableScanStatusOut | null>(null);
+  const [lastLaunch, setLastLaunch] = React.useState<TenableScanLaunchOut | null>(null);
 
   const test = useMutation((kind: IntegrationKind) => api.integrations.test(kind), {
     onSuccess: (r: IntegrationTestOut) =>
-      toast({
-        title: r.healthy ? "Healthy" : "Unhealthy",
-        description: r.detail || undefined,
-        tone: r.healthy ? "ok" : "danger",
-      }),
+      handleIntegrationTestSuccess(r, { refresh: onChanged, toast }),
+  });
+
+  const sync = useMutation((kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable") => api.integrations.sync(kind), {
+    onSuccess: (result: IntegrationSyncOut) => {
+      handleIntegrationSyncSuccess(result, { toast });
+      onChanged();
+    },
+  });
+
+  const checkScan = useMutation((scanId: string) => api.integrations.tenableStatus(scanId), {
+    onSuccess: (result) => setScanStatus(result),
+  });
+  const launchScan = useMutation((scanId: string) => api.integrations.launchTenable(scanId), {
+    onSuccess: (result) => {
+      setLastLaunch(result);
+      setScanStatus(null);
+      toast({ title: "Tenable scan launched", description: result.run_uuid ? `Run ${result.run_uuid}. Check status before syncing findings.` : "Check status before syncing findings.", tone: "ok" });
+    },
   });
 
   const remove = useMutation((kind: IntegrationKind) => api.integrations.remove(kind), {
@@ -234,6 +245,19 @@ function IntegrationCard({
   });
 
   const idBase = integration.kind;
+  const tenableScans = integration.kind === "tenable" ? configuredTenableScanIds(integration.config) : [];
+  const selectedScan = tenableScans.includes(scanChoice) ? scanChoice : (tenableScans[0] ?? "");
+  const setupHint = integration.kind === "sonarqube" || integration.kind === "snyk" || integration.kind === "tenable"
+    ? INTEGRATION_SETUP_HINTS[integration.kind] : null;
+  const syncKind =
+    integration.kind === "github" ||
+    integration.kind === "gitlab" ||
+    integration.kind === "wazuh" ||
+    integration.kind === "sonarqube" ||
+    integration.kind === "snyk" ||
+    integration.kind === "tenable"
+      ? integration.kind
+      : null;
 
   const updateRow = (idx: number, patch: Partial<CredRow>) =>
     setCredRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -337,6 +361,36 @@ function IntegrationCard({
             <p className="text-xs text-faint">No credentials stored.</p>
           )}
         </div>
+
+        {integration.kind === "tenable" && (
+          <div className="space-y-2 border-t border-line pt-3">
+            <Field label="Configured scan" htmlFor={`${idBase}-scan`}>
+              <Select id={`${idBase}-scan`} value={selectedScan}
+                onChange={(event) => { setScanChoice(event.target.value); setScanStatus(null); setLastLaunch(null); }}>
+                {tenableScans.length === 0 && <option value="">Configure a scan UUID first</option>}
+                {tenableScans.map((scanId) => <option key={scanId} value={scanId}>{scanId}</option>)}
+              </Select>
+            </Field>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="secondary" disabled={!selectedScan || checkScan.loading}
+                loading={checkScan.loading} onClick={() => void checkScan.run(selectedScan)}>
+                Check status
+              </Button>
+              {canManage && <Button size="sm" variant="primary" disabled={!selectedScan || launchScan.loading || !integration.is_enabled}
+                loading={launchScan.loading} onClick={() => {
+                  if (window.confirm(`Launch Tenable scan ${selectedScan} against its saved targets?`)) {
+                    void launchScan.run(selectedScan);
+                  }
+                }}>
+                Launch scan
+              </Button>}
+            </div>
+            {scanStatus?.scan_id === selectedScan && <p className="text-xs text-muted">Tenable status: {scanStatus.status}</p>}
+            {lastLaunch?.scan_id === selectedScan && <p className="break-all text-xs text-muted">Last launch accepted{lastLaunch.run_uuid ? `: ${lastLaunch.run_uuid}` : "."}</p>}
+            <InlineError message={checkScan.errorMessage ?? launchScan.errorMessage} />
+          </div>
+        )}
+        <InlineError message={test.errorMessage ?? sync.errorMessage ?? remove.errorMessage} />
       </CardBody>
 
       {canManage && (
@@ -349,6 +403,16 @@ function IntegrationCard({
           >
             Test
           </Button>
+          {syncKind && (
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={sync.loading}
+              onClick={() => void sync.run(syncKind)}
+            >
+              Sync findings
+            </Button>
+          )}
           <Button size="sm" variant="outline" onClick={() => setOpen((o) => !o)}>
             {open ? "Close" : "Configure"}
           </Button>
@@ -378,7 +442,7 @@ function IntegrationCard({
           <Field
             label="Base URL"
             htmlFor={`${idBase}-base_url`}
-            hint="Leave blank to clear."
+            hint={integration.kind === "sonarqube" ? "SonarQube Server root URL, without /api. Leave blank to clear." : integration.kind === "snyk" ? "Optional regional Snyk API URL. Leave blank for api.snyk.io." : integration.kind === "tenable" ? "Tenable VM cloud URL is fixed at cloud.tenable.com." : "Leave blank to clear."}
             error={fieldError(upsert.error, "base_url")}
           >
             <Input
@@ -403,7 +467,7 @@ function IntegrationCard({
           <Field
             label="Config (JSON)"
             htmlFor={`${idBase}-config`}
-            hint="A JSON object of non-secret settings."
+            hint={integration.kind === "sonarqube" ? "Enter the SonarQube project keys to sync; no secrets here." : integration.kind === "snyk" ? "Enter your Snyk organization UUID; no secrets here." : integration.kind === "tenable" ? "Enter up to 20 Tenable scan UUIDs; access and secret keys go in credentials." : "A JSON object of non-secret settings."}
             error={fieldError(upsert.error, "config")}
           >
             <Textarea
@@ -411,7 +475,7 @@ function IntegrationCard({
               className="font-mono text-xs"
               spellCheck={false}
               rows={4}
-              placeholder="{}"
+              placeholder={setupHint?.config ?? "{}"}
               value={configText}
               onChange={(e) => setConfigText(e.target.value)}
             />
@@ -432,7 +496,7 @@ function IntegrationCard({
             {credRows.map((row, idx) => (
               <div key={idx} className="flex items-center gap-2">
                 <Input
-                  placeholder="key"
+                  placeholder={setupHint?.credential ?? "key"}
                   aria-label="Credential key"
                   className="flex-1"
                   value={row.key}

@@ -440,10 +440,10 @@ async def _upload_and_project(
 
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
-        findings = await import_from_defectdojo(
+        imported_count = await import_from_defectdojo(
             session, assessment, client=ctx.client, test_id=result.test_id
         )
-        return len(findings), result
+        return imported_count, result
 
 
 # ---------------------------------------------------------------------------

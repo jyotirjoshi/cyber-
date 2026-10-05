@@ -16,9 +16,10 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { fieldError, getErrorMessage } from "@/lib/errors";
 import { formatDateTime, humanize } from "@/lib/format";
-import type { AssetOut, Criticality } from "@/lib/types";
+import type { AssetEnvironment, AssetOut, Criticality } from "@/lib/types";
 
 const CRITICALITIES: Criticality[] = ["critical", "high", "normal", "low", "unknown"];
+const ENVIRONMENTS: AssetEnvironment[] = ["unknown", "production", "staging", "development", "test"];
 
 /** AssetOut carries ip/port rather than a single endpoint field — derive a locator for display. */
 function assetEndpoint(asset: AssetOut): string | null {
@@ -55,11 +56,33 @@ export default function AssetDetailPage() {
   const [critRationale, setCritRationale] = React.useState("");
   const [tagKey, setTagKey] = React.useState("");
   const [tagValue, setTagValue] = React.useState("");
+  const [ownerTeam, setOwnerTeam] = React.useState("");
+  const [environment, setEnvironment] = React.useState<AssetEnvironment>("unknown");
+  const [groups, setGroups] = React.useState("");
 
   // Keep the criticality selector in sync with whatever the server currently reports.
   React.useEffect(() => {
-    if (data) setCritValue(data.criticality);
+    if (data) {
+      setCritValue(data.criticality);
+      setOwnerTeam(data.owner_team ?? "");
+      setEnvironment(data.environment);
+      setGroups(data.groups.join(", "));
+    }
   }, [data]);
+
+  const contextMut = useMutation(
+    () => api.assets.setContext(id, {
+      owner_team: ownerTeam.trim() || null,
+      environment,
+      groups: groups.split(",").map((value) => value.trim()).filter(Boolean),
+    }),
+    {
+      onSuccess: (result) => {
+        setData(result);
+        toast({ title: "Asset context updated", tone: "ok" });
+      },
+    },
+  );
 
   const critMut = useMutation(
     () =>
@@ -259,6 +282,37 @@ export default function AssetDetailPage() {
         </div>
 
         <div className="space-y-6">
+          <Card>
+            <CardHeader><CardTitle>Business context</CardTitle></CardHeader>
+            <CardBody className="space-y-4">
+              <dl className="grid grid-cols-2 gap-4">
+                <Detail label="Environment" value={humanize(asset.environment)} />
+                <Detail label="Owner team" value={asset.owner_team} />
+                <Detail label="Owner user ID" value={asset.owner_user_id} />
+                <Detail label="Groups" value={asset.groups.join(", ") || null} />
+              </dl>
+              {canTag && (
+                <form className="space-y-3 border-t border-line pt-4" onSubmit={(e) => {
+                  e.preventDefault();
+                  void contextMut.run();
+                }}>
+                  <Field label="Owner team" htmlFor="owner-team" error={fieldError(contextMut.error, "owner_team")}>
+                    <Input id="owner-team" maxLength={120} value={ownerTeam} onChange={(e) => setOwnerTeam(e.target.value)} />
+                  </Field>
+                  <Field label="Environment" htmlFor="asset-environment" error={fieldError(contextMut.error, "environment")}>
+                    <Select id="asset-environment" value={environment} onChange={(e) => setEnvironment(e.target.value as AssetEnvironment)}>
+                      {ENVIRONMENTS.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
+                    </Select>
+                  </Field>
+                  <Field label="Groups (comma-separated)" htmlFor="asset-groups" error={fieldError(contextMut.error, "groups")}>
+                    <Input id="asset-groups" value={groups} onChange={(e) => setGroups(e.target.value)} />
+                  </Field>
+                  <InlineError message={contextMut.errorMessage} />
+                  <Button type="submit" size="sm" loading={contextMut.loading}>Save context</Button>
+                </form>
+              )}
+            </CardBody>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>Criticality</CardTitle>

@@ -1,0 +1,531 @@
+"""Guardrails for individual, user-approved agent actions.
+
+This module is intentionally small: it defines what may enter the action queue before a
+provider client or scanner ever sees it.  Credentials are resolved only from tenant-scoped
+integration settings at execution time; an action payload can never carry a secret.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from collections.abc import Mapping
+from typing import Any
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import Settings
+from app.core.errors import ConflictError, CynuxError, InvalidConfigurationError
+from app.core.logging_conf import redact_text
+from app.db.base import utcnow
+from app.db.enums import AuditOutcome, Permission, Role
+from app.db.models.agent import AgentAction, AgentSession
+from app.db.models.identity import Membership, Organization, User
+from app.db.repository import TenantRepository, tenant_select
+from app.schemas.canonical import CanonicalWorkIn
+from app.schemas.external_alert import ExternalAlertSourceActionIn
+from app.services import audit as audit_service
+from app.services import canonical_work as canonical_work_service
+from app.services import external_alert as external_alert_service
+from app.services import ticket as ticket_service
+from app.services.context import ACTOR_AGENT, Principal
+
+log = structlog.get_logger(__name__)
+
+# Each action is deliberate and narrow.  Adding an entry is a security review point.
+_ACTION_PERMISSIONS: dict[str, Permission] = {
+    "sync_github_alerts": Permission.INTEGRATION_MANAGE,
+    "sync_gitlab_alerts": Permission.INTEGRATION_MANAGE,
+    "sync_wazuh_alerts": Permission.INTEGRATION_MANAGE,
+    "sync_sonarqube_alerts": Permission.INTEGRATION_MANAGE,
+    "sync_snyk_issues": Permission.INTEGRATION_MANAGE,
+    "sync_tenable_vulnerabilities": Permission.INTEGRATION_MANAGE,
+    "update_github_alert": Permission.INTEGRATION_MANAGE,
+    "create_jira_ticket": Permission.TICKET_CREATE,
+    "update_canonical_work": Permission.FINDING_REMEDIATE,
+}
+_ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
+    "sync_github_alerts": frozenset(),
+    "sync_gitlab_alerts": frozenset(),
+    "sync_wazuh_alerts": frozenset(),
+    "sync_sonarqube_alerts": frozenset(),
+    "sync_snyk_issues": frozenset(),
+    "sync_tenable_vulnerabilities": frozenset(),
+    "update_github_alert": frozenset({"alert_id", "decision", "reason", "comment"}),
+    "create_jira_ticket": frozenset(
+        {"finding_id", "canonical_finding_id", "project_key", "issue_type", "assignee"}
+    ),
+    "update_canonical_work": frozenset(
+        {
+            "finding_id",
+            "expected_version",
+            "assignee_user_id",
+            "due_at",
+            "remediation_plan",
+        }
+    ),
+}
+_SECRET_KEY_PARTS = frozenset({"token", "secret", "password", "credential", "api_key"})
+
+
+def action_payload_digest(action: str, payload: Mapping[str, Any]) -> str:
+    """A stable hash binding consent to both the operation and exact payload."""
+    encoded = json.dumps(
+        {"action": action, "payload": dict(payload)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def validate_action_payload(action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Reject unsupported actions, secret fields, and payloads beyond the action contract."""
+    allowed = _ALLOWED_PAYLOAD_KEYS.get(action)
+    if allowed is None:
+        raise ValueError(f"Unsupported agent action: {action}")
+    normalized = dict(payload)
+    forbidden = [
+        key for key in normalized if any(part in key.lower() for part in _SECRET_KEY_PARTS)
+    ]
+    if forbidden:
+        raise ValueError("Action payloads must not contain credentials or secrets")
+    unexpected = sorted(set(normalized) - allowed)
+    if unexpected:
+        raise ValueError(f"Unsupported payload fields for {action}: {', '.join(unexpected)}")
+    if action == "update_github_alert":
+        try:
+            alert_id = normalized.get("alert_id")
+            if not isinstance(alert_id, str):
+                raise ValueError("A valid alert_id is required")
+            normalized["alert_id"] = str(uuid.UUID(alert_id))
+            source_action = ExternalAlertSourceActionIn.model_validate(
+                {key: value for key, value in normalized.items() if key != "alert_id"}
+            )
+            normalized = {
+                "alert_id": normalized["alert_id"],
+                **source_action.model_dump(exclude_none=True),
+            }
+        except ValueError as exc:
+            raise ValueError("A valid alert_id, decision and rationale are required") from exc
+    if action == "create_jira_ticket":
+        target_keys = {key for key in ("finding_id", "canonical_finding_id") if key in normalized}
+        if len(target_keys) != 1:
+            raise ValueError("Exactly one valid finding_id or canonical_finding_id is required")
+        target_key = target_keys.pop()
+        finding_id = normalized.get(target_key)
+        try:
+            if not isinstance(finding_id, str):
+                raise ValueError
+            normalized[target_key] = str(uuid.UUID(finding_id))
+        except ValueError as exc:
+            raise ValueError(f"A valid {target_key} is required") from exc
+        for field, limit in (("project_key", 40), ("issue_type", 60), ("assignee", 200)):
+            value = normalized.get(field)
+            if value is None:
+                continue
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > limit
+                or any(ord(ch) < 32 for ch in value)
+            ):
+                raise ValueError(f"Invalid {field}")
+            normalized[field] = value.strip()
+        if "project_key" in normalized and not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_]{0,39}", normalized["project_key"]
+        ):
+            raise ValueError("Invalid project_key")
+    if action == "update_canonical_work":
+        finding_id = normalized.get("finding_id")
+        if not isinstance(finding_id, str):
+            raise ValueError("A valid finding_id is required")
+        try:
+            normalized["finding_id"] = str(uuid.UUID(finding_id))
+            work = CanonicalWorkIn.model_validate(
+                {key: value for key, value in normalized.items() if key != "finding_id"}
+            )
+        except ValueError as exc:
+            raise ValueError("A valid versioned remediation change is required") from exc
+        normalized = {
+            "finding_id": normalized["finding_id"],
+            **work.model_dump(mode="json", exclude_unset=True),
+        }
+    return normalized
+
+
+def require_action_permission(principal: Principal, action: str) -> None:
+    """Authorize the proposed action with the same permission its executor requires."""
+    permission = _ACTION_PERMISSIONS.get(action)
+    if permission is None:
+        raise ValueError(f"Unsupported agent action: {action}")
+    principal.require(permission)
+    if action == "update_github_alert":
+        principal.require(Permission.FINDING_VALIDATE)
+
+
+def new_agent_action(
+    *,
+    organization_id: uuid.UUID,
+    session_id: uuid.UUID,
+    requested_by_user_id: uuid.UUID | None,
+    action: str,
+    label: str,
+    rationale: str | None,
+    payload: Mapping[str, Any],
+) -> AgentAction:
+    """Construct a pending action whose approval can only cover this exact payload."""
+    validated = validate_action_payload(action, payload)
+    return AgentAction(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        session_id=session_id,
+        requested_by_user_id=requested_by_user_id,
+        action=action,
+        label=label.strip()[:300] or action.replace("_", " ").title(),
+        rationale=rationale.strip()[:2000] if rationale and rationale.strip() else None,
+        payload=validated,
+        payload_digest=action_payload_digest(action, validated),
+        status="pending",
+    )
+
+
+async def propose_action(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    session_id: uuid.UUID,
+    action: str,
+    label: str,
+    rationale: str | None,
+    payload: Mapping[str, Any],
+) -> AgentAction:
+    """Persist one separately approved action after tenant and permission checks."""
+    principal.require(Permission.AGENT_CHAT)
+    require_action_permission(principal, action)
+    await TenantRepository(session, AgentSession, principal.organization_id).get_or_404(session_id)
+    try:
+        proposed = new_agent_action(
+            organization_id=principal.organization_id,
+            session_id=session_id,
+            requested_by_user_id=principal.user_id,
+            action=action,
+            label=label,
+            rationale=rationale,
+            payload=payload,
+        )
+    except ValueError as exc:
+        raise InvalidConfigurationError(str(exc), user_message=str(exc)) from exc
+    session.add(proposed)
+    await session.flush()
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.AGENT_ACTION_PROPOSED,
+        principal=principal,
+        resource_type="agent_action",
+        resource_id=proposed.id,
+        detail={"action": action, "payload_digest": proposed.payload_digest},
+    )
+    return proposed
+
+
+async def execute_approved_action(
+    session: AsyncSession,
+    principal: Principal,
+    proposed: AgentAction,
+    *,
+    settings: Settings,
+    redis: Any | None,
+) -> AgentAction:
+    """Execute one locked, tenant-scoped approval through existing provider services."""
+    require_action_permission(principal, proposed.action)
+    if proposed.organization_id != principal.organization_id:
+        raise ConflictError("agent action organization mismatch")
+    if (
+        proposed.status != "approved"
+        or proposed.approved_by_user_id is None
+        or proposed.resolved_at is None
+    ):
+        raise ConflictError(
+            "agent action is not approved", user_message="Approve this action before running it."
+        )
+    if proposed.payload_digest != action_payload_digest(proposed.action, proposed.payload):
+        raise ConflictError(
+            "agent action payload changed",
+            user_message="This action request changed. Create a new request.",
+        )
+    try:
+        payload = validate_action_payload(proposed.action, proposed.payload)
+    except ValueError as exc:
+        raise ConflictError(
+            "agent action payload invalid", user_message="This action request is no longer valid."
+        ) from exc
+
+    if proposed.action == "sync_github_alerts":
+        result = await external_alert_service.sync_github_alerts(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} alerts synced"
+    elif proposed.action == "sync_gitlab_alerts":
+        result = await external_alert_service.sync_gitlab_alerts(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} alerts synced"
+    elif proposed.action == "sync_wazuh_alerts":
+        result = await external_alert_service.sync_wazuh_alerts(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} alerts synced"
+    elif proposed.action == "sync_sonarqube_alerts":
+        result = await external_alert_service.sync_sonarqube_alerts(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} alerts synced"
+    elif proposed.action == "sync_snyk_issues":
+        result = await external_alert_service.sync_snyk_issues(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} issues synced"
+    elif proposed.action == "sync_tenable_vulnerabilities":
+        result = await external_alert_service.sync_tenable_vulnerabilities(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} vulnerabilities synced"
+    elif proposed.action == "update_github_alert":
+        alert = await external_alert_service.set_github_alert_state(
+            session,
+            principal,
+            uuid.UUID(payload["alert_id"]),
+            decision=payload["decision"],
+            reason=payload.get("reason"),
+            comment=payload.get("comment"),
+            settings=settings,
+            redis=redis,
+        )
+        summary = f"GitHub alert {alert.status}"
+    elif proposed.action == "create_jira_ticket":
+        ticket_target = payload.get("canonical_finding_id") or payload["finding_id"]
+        if "canonical_finding_id" in payload:
+            ticket = await ticket_service.create_canonical_ticket(
+                session, principal, uuid.UUID(ticket_target), settings=settings,
+                redis=redis, project_key=payload.get("project_key"),
+                issue_type=payload.get("issue_type"), assignee=payload.get("assignee"),
+                by_agent=True,
+            )
+        else:
+            ticket = await ticket_service.create_ticket(
+                session, principal, uuid.UUID(ticket_target), settings=settings,
+                redis=redis, project_key=payload.get("project_key"),
+                issue_type=payload.get("issue_type"), assignee=payload.get("assignee"),
+                by_agent=True,
+            )
+        summary = f"Jira ticket {ticket.external_key} linked"
+    elif proposed.action == "update_canonical_work":
+        finding = await canonical_work_service.update_work(
+            session,
+            principal,
+            uuid.UUID(payload["finding_id"]),
+            CanonicalWorkIn.model_validate(
+                {key: value for key, value in payload.items() if key != "finding_id"}
+            ),
+        )
+        summary = f"Remediation work updated to version {finding.status_version}"
+    else:  # pragma: no cover - the allowlist above rejects this first
+        raise ConflictError("unsupported agent action")
+
+    proposed.status = "executed"
+    proposed.executed_at = utcnow()
+    proposed.result_summary = summary
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.AGENT_ACTION_EXECUTED,
+        principal=principal,
+        resource_type="agent_action",
+        resource_id=proposed.id,
+        detail={"action": proposed.action, "payload_digest": proposed.payload_digest},
+    )
+    return proposed
+
+
+async def execute_approved_batch(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    redis: Any | None,
+    limit: int = 5,
+) -> int:
+    """Recover approved work when a browser did not finish the execute request.
+
+    The database row is the durable queue. SKIP LOCKED coordinates worker replicas
+    and the API's immediate execute route; a crash before commit leaves the row
+    approved for another sweep. Provider operations must therefore be idempotent.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(AgentAction)
+                .where(AgentAction.status == "approved")
+                .order_by(AgentAction.resolved_at, AgentAction.id)
+                .limit(max(1, min(limit, 20)))
+                .with_for_update(skip_locked=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for action in rows:
+        membership = None
+        if action.approved_by_user_id is not None:
+            membership = (
+                await session.execute(
+                    select(Membership.role)
+                    .join(User, User.id == Membership.user_id)
+                    .join(Organization, Organization.id == Membership.organization_id)
+                    .where(
+                        Membership.organization_id == action.organization_id,
+                        Membership.user_id == action.approved_by_user_id,
+                        Membership.accepted_at.is_not(None),
+                        User.is_active.is_(True),
+                        Organization.is_active.is_(True),
+                    )
+                )
+            ).one_or_none()
+        try:
+            role = Role(membership[0]) if membership is not None else None
+        except ValueError:
+            role = None
+        if role is None:
+            await _fail_approved_action(
+                session, action, "Approver is no longer an active organization member."
+            )
+            continue
+        principal = Principal(
+            user_id=action.approved_by_user_id,
+            organization_id=action.organization_id,
+            role=role,
+            actor_type=ACTOR_AGENT,
+        )
+        await execute_and_settle_action(
+            session, principal, action, settings=settings, redis=redis
+        )
+    return len(rows)
+
+
+async def execute_and_settle_action(
+    session: AsyncSession,
+    principal: Principal,
+    action: AgentAction,
+    *,
+    settings: Settings,
+    redis: Any | None,
+) -> AgentAction:
+    """Run an approved action and persist a terminal result even on provider failure."""
+    require_action_permission(principal, action.action)
+    if action.status != "approved":
+        raise ConflictError(
+            "agent action is not approved", user_message="Approve this action before running it."
+        )
+    try:
+        async with session.begin_nested():
+            await execute_approved_action(
+                session, principal, action, settings=settings, redis=redis
+            )
+    except CynuxError as exc:
+        await _fail_approved_action(session, action, redact_text(exc.user_message)[:500])
+    except Exception as exc:
+        # Do not persist exception text: provider responses may echo credentials.
+        log.error(
+            "agent_action.unexpected_failure",
+            action_id=str(action.id),
+            action=action.action,
+            error_type=type(exc).__name__,
+        )
+        await _fail_approved_action(
+            session, action,
+            "Action failed unexpectedly; review worker logs and retry with a new approval.",
+        )
+    return action
+
+
+async def _fail_approved_action(session: AsyncSession, action: AgentAction, reason: str) -> None:
+    action.status = "failed"
+    action.result_summary = reason
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.AGENT_ACTION_FAILED,
+        resource_type="agent_action",
+        resource_id=action.id,
+        organization_id=action.organization_id,
+        outcome=AuditOutcome.FAILURE,
+        reason=reason,
+        detail={"action": action.action, "payload_digest": action.payload_digest},
+    )
+
+
+async def resolve_action(
+    session: AsyncSession,
+    principal: Principal,
+    action_id: uuid.UUID,
+    *,
+    approve: bool,
+    note: str | None,
+) -> AgentAction:
+    """Resolve exactly one pending action; a later executor must recheck its hash."""
+    proposed = (
+        await session.execute(
+            tenant_select(AgentAction, principal.organization_id)
+            .where(AgentAction.id == action_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if proposed is None:
+        # Preserve the repository convention: do not disclose cross-tenant records.
+        return await TenantRepository(session, AgentAction, principal.organization_id).get_or_404(
+            action_id
+        )
+    require_action_permission(principal, proposed.action)
+    if proposed.status != "pending":
+        raise ConflictError(
+            "agent action already resolved",
+            user_message="Someone already responded to this action request.",
+        )
+    if proposed.payload_digest != action_payload_digest(proposed.action, proposed.payload):
+        raise ConflictError(
+            "agent action payload changed",
+            user_message="This action request is no longer valid. Create a new request.",
+        )
+    proposed.status = "approved" if approve else "rejected"
+    proposed.approved_by_user_id = principal.user_id
+    proposed.resolved_at = utcnow()
+    proposed.resolution_note = note.strip()[:2000] if note and note.strip() else None
+    await audit_service.record(
+        session,
+        action=(
+            audit_service.AuditAction.AGENT_ACTION_APPROVED
+            if approve
+            else audit_service.AuditAction.AGENT_ACTION_REJECTED
+        ),
+        principal=principal,
+        resource_type="agent_action",
+        resource_id=proposed.id,
+        detail={"action": proposed.action, "payload_digest": proposed.payload_digest},
+        reason=proposed.resolution_note,
+    )
+    return proposed
+
+
+__all__ = [
+    "action_payload_digest",
+    "execute_and_settle_action",
+    "execute_approved_action",
+    "execute_approved_batch",
+    "new_agent_action",
+    "propose_action",
+    "require_action_permission",
+    "resolve_action",
+    "validate_action_payload",
+]

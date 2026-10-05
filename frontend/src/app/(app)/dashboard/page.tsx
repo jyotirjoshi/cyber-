@@ -179,6 +179,15 @@ function DashboardBody({ data }: { data: DashboardOut }) {
         />
       </div>
 
+      <Link href="/findings?view=external" className="block">
+        <div className="grid grid-cols-2 gap-4">
+          <StatCard label="Actionable external alerts" value={formatNumber(data.external_alerts_actionable)}
+            note="open at source, not locally closed or accepted" urgent={data.external_alerts_actionable > 0} />
+          <StatCard label="Awaiting alert triage" value={formatNumber(data.external_alerts_awaiting_triage)}
+            note="new alerts from connected tools" urgent={data.external_alerts_awaiting_triage > 0} />
+        </div>
+      </Link>
+
       {/* ── SSVC urgency strip ─────────────────────────────────────────── */}
       {Object.values(ssvcSummary).some((v) => v > 0) && (
         <Card>

@@ -30,7 +30,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.core.errors import ConfigurationError
 
 Environment = Literal["development", "staging", "production"]
-LLMProvider = Literal["anthropic", "openai", "google"]
+LLMProvider = Literal["anthropic", "openai", "google", "openrouter"]
 
 #: Roles the gateway routes independently (PRD section 55).
 LLMRole = Literal["planning", "reasoning", "classification", "code_remediation", "report"]
@@ -157,17 +157,12 @@ class SecuritySettings(BaseSettings):
 
 
 class ScannerSettings(BaseSettings):
-    """FR-012 / FR-014 scanner execution parameters (native subprocess mode).
-
-    Scanners run as local processes rather than Docker containers. Install the
-    required binaries and point these settings at them (or ensure they are on PATH).
-    """
+    """FR-012 / FR-014 isolated scanner container parameters."""
 
     model_config = _cfg("CYNUX_SCANNER__")
 
-    #: Retained for the hardened container sandbox used by scanner adapters. The
-    #: application network must never be used here, or scanner containers could reach
-    #: Postgres, Redis, or internal service credentials.
+    docker_host: str | None = None
+    #: Egress-only network, separate from application databases and internal services.
     network: str = "cynux_scanner_net"
     cpu_quota_cores: float = 1.0
     memory_limit_mb: int = 2048
@@ -184,35 +179,14 @@ class ScannerSettings(BaseSettings):
     #: Host directory used as the working directory per scanner job. Cleared after upload.
     artifact_workdir: str = "/var/lib/cynux/artifacts"
 
-    # -- binary paths --------------------------------------------------------
-    #: Path (or bare name for PATH lookup) of each scanner binary.
-    bin_nmap: str = "nmap"
-    bin_nuclei: str = "nuclei"
-    bin_zap: str = "zap.sh"
-    bin_reconftw: str = "reconftw.sh"
-
-    # Keep image_* attributes so existing adapter code (adapter.image_setting,
-    # adapter.image()) compiles without changes. They now return the binary name/path
-    # instead of a Docker image reference.
-    image_reconftw: str = "reconftw.sh"
-    image_nmap: str = "nmap"
-    image_nuclei: str = "nuclei"
-    image_zap: str = "zap.sh"
-
-    @property
-    def scanner_bins(self) -> dict[str, str]:
-        """Map from short scanner name to binary path, for SubprocessRunner.preflight."""
-        return {
-            "nmap": self.bin_nmap,
-            "nuclei": self.bin_nuclei,
-            "zap": self.bin_zap,
-            "reconftw": self.bin_reconftw,
-        }
+    image_reconftw: str = "six2dez/reconftw:main"
+    image_nmap: str = "instrumentisto/nmap:7.95"
+    image_nuclei: str = "projectdiscovery/nuclei:v3.3.7"
+    image_zap: str = "zaproxy/zap-stable:2.15.0"
 
     @property
     def allowed_images(self) -> frozenset[str]:
-        """Kept for backward compatibility with sandbox.validate_image calls.
-        Returns the set of configured binary paths."""
+        """Only configured scanner images may be started by the worker."""
         return frozenset({self.image_reconftw, self.image_nmap, self.image_nuclei, self.image_zap})
 
 
@@ -251,6 +225,8 @@ class LLMSettings(BaseSettings):
     anthropic_base_url: str | None = None
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = None
+    openrouter_api_key: SecretStr | None = None
+    openrouter_base_url: str | None = None
     google_api_key: SecretStr | None = None
 
     #: Model used for roles without an explicit override. Still requires ``provider``.
@@ -275,6 +251,7 @@ class LLMSettings(BaseSettings):
         return {
             "anthropic": self.anthropic_api_key,
             "openai": self.openai_api_key,
+            "openrouter": self.openrouter_api_key,
             "google": self.google_api_key,
         }.get(provider)
 
@@ -409,6 +386,12 @@ class WazuhSettings(BaseSettings):
     base_url: str | None = None
     api_username: str | None = None
     api_password: SecretStr | None = None
+    #: Wazuh alerts are stored in the OpenSearch-compatible Indexer, not the
+    #: Manager API. Keep this separate so manager credentials are never sent to
+    #: a different host or protocol.
+    indexer_base_url: str | None = None
+    indexer_username: str | None = None
+    indexer_password: SecretStr | None = None
     verify_tls: bool = True
     timeout_seconds: int = 30
 
@@ -416,9 +399,13 @@ class WazuhSettings(BaseSettings):
     def configured(self) -> bool:
         return bool(self.base_url and self.api_username and self.api_password)
 
+    @property
+    def indexer_configured(self) -> bool:
+        return bool(self.indexer_base_url and self.indexer_username and self.indexer_password)
+
 
 class GitHubSettings(BaseSettings):
-    """Read-only GitHub security-alert ingestion settings."""
+    """GitHub security-alert ingestion and source-action settings."""
 
     model_config = _cfg("CYNUX_GITHUB__")
 
@@ -443,6 +430,49 @@ class GitLabSettings(BaseSettings):
     @property
     def configured(self) -> bool:
         return bool(self.api_token)
+
+
+class SonarQubeSettings(BaseSettings):
+    """Read-only SonarQube Server vulnerability ingestion settings."""
+
+    model_config = _cfg("CYNUX_SONARQUBE__")
+
+    base_url: str | None = None
+    api_token: SecretStr | None = None
+    project_keys: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_token)
+
+
+class SnykSettings(BaseSettings):
+    """Read-only Snyk organization issue ingestion."""
+
+    model_config = _cfg("CYNUX_SNYK__")
+
+    base_url: str = "https://api.snyk.io"
+    api_token: SecretStr | None = None
+    organization_id: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token and self.organization_id)
+
+
+class TenableSettings(BaseSettings):
+    """Read-only Tenable VM scan ingestion."""
+
+    model_config = _cfg("CYNUX_TENABLE__")
+
+    base_url: str = "https://cloud.tenable.com"
+    access_key: SecretStr | None = None
+    secret_key: SecretStr | None = None
+    scan_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.access_key and self.secret_key and self.scan_ids)
 
 
 class NotificationSettings(BaseSettings):
@@ -484,6 +514,8 @@ class ObservabilitySettings(BaseSettings):
 
 class AgentSettings(BaseSettings):
     model_config = _cfg("CYNUX_AGENT__")
+
+    max_concurrent_runs_per_org: int = Field(default=1, ge=1, le=32)
 
     #: FR-010: how many assets the agent may recommend for deep scanning by default.
     default_scope_budget: int = 50
@@ -568,6 +600,9 @@ class Settings(BaseSettings):
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     gitlab: GitLabSettings = Field(default_factory=GitLabSettings)
+    sonarqube: SonarQubeSettings = Field(default_factory=SonarQubeSettings)
+    snyk: SnykSettings = Field(default_factory=SnykSettings)
+    tenable: TenableSettings = Field(default_factory=TenableSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
@@ -645,9 +680,9 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
         warnings.append("No platform LLM is configured; organizations must provide their own key.")
     else:
         for provider in configured_providers:
-            if provider not in ("anthropic", "openai", "google"):
+            if provider not in ("anthropic", "openai", "google", "openrouter"):
                 fatal.append(
-                    f"Unknown LLM provider '{provider}'. Supported: anthropic, openai, google."
+                    f"Unknown LLM provider '{provider}'. Supported: anthropic, openai, google, openrouter."
                 )
             elif not settings.llm.key_for(provider):
                 fatal.append(
@@ -744,6 +779,9 @@ __all__ = [
     "ScannerSettings",
     "SecuritySettings",
     "Settings",
+    "SonarQubeSettings",
+    "SnykSettings",
+    "TenableSettings",
     "StorageSettings",
     "TargetPolicySettings",
     "get_settings",

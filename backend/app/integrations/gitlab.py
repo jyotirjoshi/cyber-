@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from app.core.config import Settings
-from app.core.errors import IntegrationNotConfiguredError
+from app.core.errors import IntegrationError, IntegrationNotConfiguredError
 from app.integrations.circuit import BreakerConfig
 from app.integrations.http import ResilientClient, RetryPolicy, build_client, reveal
 
@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 
 PROVIDER = "GitLab"
+_PAGE_SIZE = 100
+_MAX_PAGES = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,10 +58,21 @@ class GitLabClient:
         headers = self._headers()
         feeds = []
         for project in self._cfg.project_ids:
-            payload = await client.get_json(f"/projects/{quote(project, safe='')}/vulnerability_findings", headers=headers, params={"scope": "all", "per_page": 100})
-            if not isinstance(payload, list):
-                payload = []
-            feeds.append(GitLabAlertFeed(project=project, alerts=[item for item in payload if isinstance(item, dict)]))
+            path = f"/projects/{quote(project, safe='')}/vulnerability_findings"
+            alerts: list[dict[str, Any]] = []
+            for page in range(1, _MAX_PAGES + 1):
+                payload = await client.get_json(
+                    path, headers=headers,
+                    params={"scope": "all", "per_page": _PAGE_SIZE, "page": page},
+                )
+                if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+                    raise IntegrationError("GitLab returned an invalid finding page", provider=PROVIDER)
+                alerts.extend(payload)
+                if len(payload) < _PAGE_SIZE:
+                    break
+            else:
+                raise IntegrationError("GitLab finding page limit exceeded", provider=PROVIDER)
+            feeds.append(GitLabAlertFeed(project=project, alerts=alerts))
         return feeds
 
 

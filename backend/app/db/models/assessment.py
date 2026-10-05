@@ -354,4 +354,62 @@ class Approval(Base, TenantMixin, TimestampMixin):
         )
 
 
-__all__ = ["Approval", "Assessment", "AssessmentTarget", "AuthorizationRecord"]
+class ScanProfile(Base, TenantMixin, TimestampMixin):
+    """Reusable, tenant-owned defaults for a bounded assessment."""
+
+    __tablename__ = "scan_profiles"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="unique_scan_profile_name"),
+    )
+
+
+class RecurringScan(Base, TenantMixin, TimestampMixin):
+    """Cron trigger with expiring human authorization and explicit target scope."""
+
+    __tablename__ = "recurring_scans"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("scan_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    targets: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    cron_expression: Mapped[str] = mapped_column(String(120), nullable=False)
+    timezone: Mapped[str] = mapped_column(String(100), nullable=False, default="UTC")
+    authorization_text: Mapped[str] = mapped_column(Text, nullable=False)
+    authorization_evidence: Mapped[str | None] = mapped_column(String(1024))
+    authorization_expires_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    next_run_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_run_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="SET NULL")
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+
+    profile: Mapped[ScanProfile] = relationship(lazy=LAZY)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="unique_recurring_scan_name"),
+        Index("ix_recurring_scans_due", "enabled", "next_run_at"),
+    )
+
+
+__all__ = [
+    "Approval", "Assessment", "AssessmentTarget", "AuthorizationRecord",
+    "RecurringScan", "ScanProfile",
+]

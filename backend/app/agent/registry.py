@@ -30,7 +30,7 @@ from redis.asyncio.client import Redis
 from app.core.config import Settings
 from app.integrations.storage import ObjectStorage
 from app.llm.gateway import LLMGateway, get_gateway
-from app.scanners.runner import SubprocessRunner as DockerRunner
+from app.scanners.runner import DockerRunner
 from app.services.events import EventBus, EventEmitter
 
 log = structlog.get_logger(__name__)

@@ -80,7 +80,7 @@ from app.scanners.registry import get_adapter
 from app.services import audit as audit_service
 from app.services.assessment import record_degradation, transition
 from app.services.asset import upsert_assets
-from app.services.job import claim_slot, enqueue_job, release_slot
+from app.services.job import claim_slot, enqueue_job, organization_scanner_limit, release_slot
 
 log = structlog.get_logger(__name__)
 
@@ -212,7 +212,8 @@ async def _plan_recon(deps: AgentDeps, state: AssessmentState) -> _ReconPlan:
         timeout = 0
         if hosts:
             job = await enqueue_job(
-                session, assessment, scanner=ScannerName.RECONFTW, targets=hosts
+                session, assessment, scanner=ScannerName.RECONFTW, targets=hosts,
+                idempotency_key=f"agent:{state_uuid(state, 'run_id')}:reconftw",
             )
             job_id = job.id
             timeout = job.timeout_seconds
@@ -352,6 +353,19 @@ async def _execute_recon(
     assessment_id = state_uuid(state, "assessment_id")
     job_id = plan.job_id
     assert job_id is not None  # noqa: S101 - the caller only enters here with a job
+    async with session_scope(settings) as session:
+        previous = await session.get(ScannerJob, job_id)
+        if previous is None or previous.organization_id != org_id:
+            raise ScannerError(
+                "recon scanner job disappeared before execution",
+                context={"job_id": str(job_id)},
+            )
+        if previous.status != JobStatus.QUEUED.value:
+            log.warning(
+                "agent.recon.replayed_job_not_executed",
+                job_id=str(job_id), status=previous.status,
+            )
+            return _ReconOutcome(assets=[], degradation=_PARTIAL_NOTE)
     workdir = _workdir_for(settings, org_id, job_id)
     adapter = get_adapter(ScannerName.RECONFTW)
 
@@ -535,7 +549,13 @@ async def _acquire_slot(deps: AgentDeps, org_id: uuid.UUID) -> bool:
     """
     attempts = max(1, int(_SLOT_WAIT_SECONDS / _SLOT_POLL_SECONDS))
     for attempt in range(attempts):
-        if await claim_slot(deps.redis, deps.settings, org_id):
+        async with session_scope(deps.settings) as session:
+            org_limit = await organization_scanner_limit(session, org_id, deps.settings)
+        if org_limit < 1:
+            return False
+        if await claim_slot(
+            deps.redis, deps.settings, org_id, organization_limit=org_limit
+        ):
             return True
         if attempt + 1 < attempts:
             await asyncio.sleep(_SLOT_POLL_SECONDS)
