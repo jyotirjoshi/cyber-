@@ -69,22 +69,28 @@ router = APIRouter(prefix="/assessments", tags=["assessments"])
 async def worker_metrics(principal: PrincipalDep, session: DbSession) -> WorkerMetricsOut:
     principal.require(Permission.ASSESSMENT_READ)
     org_id = principal.organization_id
-    run_rows = (await session.execute(
-        tenant_select(AgentRun, org_id)
-        .with_only_columns(AgentRun.status, func.count())
-        .where(AgentRun.graph == "assessment")
-        .group_by(AgentRun.status)
-    )).all()
-    dispatch_rows = (await session.execute(
-        tenant_select(RunDispatch, org_id)
-        .with_only_columns(RunDispatch.status, func.count())
-        .group_by(RunDispatch.status)
-    )).all()
-    scanner_rows = (await session.execute(
-        tenant_select(ScannerJob, org_id)
-        .with_only_columns(ScannerJob.status, func.count())
-        .group_by(ScannerJob.status)
-    )).all()
+    run_rows = (
+        await session.execute(
+            tenant_select(AgentRun, org_id)
+            .with_only_columns(AgentRun.status, func.count())
+            .where(AgentRun.graph == "assessment")
+            .group_by(AgentRun.status)
+        )
+    ).all()
+    dispatch_rows = (
+        await session.execute(
+            tenant_select(RunDispatch, org_id)
+            .with_only_columns(RunDispatch.status, func.count())
+            .group_by(RunDispatch.status)
+        )
+    ).all()
+    scanner_rows = (
+        await session.execute(
+            tenant_select(ScannerJob, org_id)
+            .with_only_columns(ScannerJob.status, func.count())
+            .group_by(ScannerJob.status)
+        )
+    ).all()
     return WorkerMetricsOut(
         runs={row[0]: row[1] for row in run_rows},
         pending_dispatches=next((row[1] for row in dispatch_rows if row[0] == "pending"), 0),
@@ -95,9 +101,15 @@ async def worker_metrics(principal: PrincipalDep, session: DbSession) -> WorkerM
 @router.get("/profiles", response_model=list[ScanProfileOut])
 async def list_scan_profiles(principal: PrincipalDep, session: DbSession) -> list[ScanProfile]:
     principal.require(Permission.ASSESSMENT_READ)
-    return list((await session.scalars(
-        tenant_select(ScanProfile, principal.organization_id).order_by(ScanProfile.name).limit(200)
-    )).all())
+    return list(
+        (
+            await session.scalars(
+                tenant_select(ScanProfile, principal.organization_id)
+                .order_by(ScanProfile.name)
+                .limit(200)
+            )
+        ).all()
+    )
 
 
 @router.post("/profiles", response_model=ScanProfileOut, status_code=status.HTTP_201_CREATED)
@@ -112,15 +124,22 @@ async def create_scan_profile(
 @router.get("/schedules", response_model=list[RecurringScanOut])
 async def list_recurring_scans(principal: PrincipalDep, session: DbSession) -> list[RecurringScan]:
     principal.require(Permission.ASSESSMENT_READ)
-    return list((await session.scalars(
-        tenant_select(RecurringScan, principal.organization_id)
-        .order_by(RecurringScan.created_at.desc()).limit(200)
-    )).all())
+    return list(
+        (
+            await session.scalars(
+                tenant_select(RecurringScan, principal.organization_id)
+                .order_by(RecurringScan.created_at.desc())
+                .limit(200)
+            )
+        ).all()
+    )
 
 
 @router.post("/schedules", response_model=RecurringScanOut, status_code=status.HTTP_201_CREATED)
 async def create_recurring_scan(
-    payload: RecurringScanCreateIn, principal: PrincipalDep, session: DbSession,
+    payload: RecurringScanCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
     settings: SettingsDep,
 ) -> RecurringScan:
     schedule = await recurring_scan_service.create_recurring_scan(
@@ -135,10 +154,13 @@ async def pause_recurring_scan(
     schedule_id: uuid.UUID, principal: PrincipalDep, session: DbSession
 ) -> RecurringScan:
     principal.require(Permission.ASSESSMENT_CREATE)
-    schedule = (await session.execute(
-        tenant_select(RecurringScan, principal.organization_id)
-        .where(RecurringScan.id == schedule_id).with_for_update()
-    )).scalar_one_or_none()
+    schedule = (
+        await session.execute(
+            tenant_select(RecurringScan, principal.organization_id)
+            .where(RecurringScan.id == schedule_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
     if schedule is None:
         raise ResourceNotFoundError("Recurring scan not found")
     schedule.enabled = False
@@ -203,8 +225,11 @@ async def create_assessment(
     await session.commit()
 
     await deliver_run_dispatch(
-        session, organization_id=principal.organization_id, dispatch_id=dispatch_id,
-        redis=redis, settings=settings,
+        session,
+        organization_id=principal.organization_id,
+        dispatch_id=dispatch_id,
+        redis=redis,
+        settings=settings,
     )
     await session.commit()
     detail = await assessment_service.get_assessment(session, principal, assessment.id, detail=True)

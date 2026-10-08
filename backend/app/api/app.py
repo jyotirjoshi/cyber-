@@ -80,7 +80,11 @@ class TrustedHostWithHealthProbe(TrustedHostMiddleware):
     """Keep host-header protection while accepting Railway's hostless health probe."""
 
     async def __call__(self, scope: object, receive: object, send: object) -> None:
-        if isinstance(scope, dict) and scope.get("type") == "http" and scope.get("path") == "/healthz":
+        if (
+            isinstance(scope, dict)
+            and scope.get("type") == "http"
+            and scope.get("path") == "/healthz"
+        ):
             await self.app(scope, receive, send)  # type: ignore[arg-type]
             return
         await super().__call__(scope, receive, send)  # type: ignore[arg-type]

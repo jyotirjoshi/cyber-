@@ -78,10 +78,12 @@ async def list_tickets(
     )
     stmt = (
         tenant_select(TicketLink, principal.organization_id)
-        .where(or_(
-            TicketLink.finding_id == finding_id,
-            TicketLink.canonical_finding_id.in_(canonical_ids),
-        ))
+        .where(
+            or_(
+                TicketLink.finding_id == finding_id,
+                TicketLink.canonical_finding_id.in_(canonical_ids),
+            )
+        )
         .order_by(TicketLink.created_at.desc())
     )
     return (await session.execute(stmt)).scalars().all()
@@ -290,18 +292,26 @@ def build_canonical_description(
         lines.append(f"- {item.provider}: {item.external_id} ({item.source_status})")
     if include_remediation and finding.remediation_plan:
         lines.extend(
-            ("", "h3. Suggested remediation (AI-generated, review before applying)",
-             finding.remediation_plan.strip())
+            (
+                "",
+                "h3. Suggested remediation (AI-generated, review before applying)",
+                finding.remediation_plan.strip(),
+            )
         )
     lines.extend(
         (
-            "", "----",
+            "",
+            "----",
             f"Cynux canonical finding: {settings.public_base_url.rstrip('/')}/findings/canonical/{finding.id}",
             "Filed automatically by Cynux. Do not edit the cynux-finding label; it prevents duplicate tickets.",
         )
     )
     body = "\n".join(lines)
-    return body if len(body) <= _MAX_DESCRIPTION_CHARS else body[:_MAX_DESCRIPTION_CHARS] + "\n\n_(truncated -- see Cynux)_"
+    return (
+        body
+        if len(body) <= _MAX_DESCRIPTION_CHARS
+        else body[:_MAX_DESCRIPTION_CHARS] + "\n\n_(truncated -- see Cynux)_"
+    )
 
 
 def _labels(finding: Finding) -> list[str]:
@@ -367,8 +377,11 @@ async def create_canonical_ticket(
         return existing
     # Any native observation may already have filed Jira, not only the newest one.
     existing = next(
-        (link for link in await list_canonical_tickets(session, principal, canonical_finding_id)
-         if link.provider == "jira"),
+        (
+            link
+            for link in await list_canonical_tickets(session, principal, canonical_finding_id)
+            if link.provider == "jira"
+        ),
         None,
     )
     if existing is not None:
@@ -398,9 +411,16 @@ async def create_canonical_ticket(
     ).scalar_one_or_none()
     if native_id is not None:
         return await create_ticket(
-            session, principal, native_id, settings=settings, redis=redis,
-            project_key=project_key, issue_type=issue_type, assignee=assignee,
-            include_remediation=include_remediation, by_agent=by_agent,
+            session,
+            principal,
+            native_id,
+            settings=settings,
+            redis=redis,
+            project_key=project_key,
+            issue_type=issue_type,
+            assignee=assignee,
+            include_remediation=include_remediation,
+            by_agent=by_agent,
         )
 
     asset_name = (
@@ -414,20 +434,27 @@ async def create_canonical_ticket(
     if asset_name is None:
         raise ResourceNotFoundError("Canonical finding asset is unavailable in this organization")
     observations = (
-        await session.execute(
-            tenant_select(FindingObservation, principal.organization_id)
-            .where(FindingObservation.canonical_finding_id == canonical_finding_id)
-            .order_by(FindingObservation.provider, FindingObservation.external_id)
-            .limit(20)
+        (
+            await session.execute(
+                tenant_select(FindingObservation, principal.organization_id)
+                .where(FindingObservation.canonical_finding_id == canonical_finding_id)
+                .order_by(FindingObservation.provider, FindingObservation.external_id)
+                .limit(20)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     scoped = await resolve_settings(session, principal, IntegrationKind.JIRA, settings=settings)
     client = JiraClient(scoped, redis)
     try:
         issue = await client.create_issue(
             summary=f"[{finding.severity.upper()}] {finding.title}",
             description=build_canonical_description(
-                finding, asset_name=asset_name, observations=observations, settings=scoped,
+                finding,
+                asset_name=asset_name,
+                observations=observations,
+                settings=scoped,
                 include_remediation=include_remediation,
             ),
             finding_id=str(canonical_finding_id),
@@ -439,10 +466,14 @@ async def create_canonical_ticket(
         )
     except IntegrationError as exc:
         await audit_service.record(
-            session, action=audit_service.AuditAction.TICKET_CREATE,
-            principal=principal, resource_type="canonical_finding",
-            resource_id=canonical_finding_id, outcome=AuditOutcome.FAILURE,
-            reason=exc.user_message, detail={"provider": "jira", "by_agent": by_agent},
+            session,
+            action=audit_service.AuditAction.TICKET_CREATE,
+            principal=principal,
+            resource_type="canonical_finding",
+            resource_id=canonical_finding_id,
+            outcome=AuditOutcome.FAILURE,
+            reason=exc.user_message,
+            detail={"provider": "jira", "by_agent": by_agent},
         )
         raise
     finally:
@@ -466,8 +497,10 @@ async def create_canonical_ticket(
     session.add(link)
     await session.flush()
     await audit_service.record(
-        session, action=audit_service.AuditAction.TICKET_CREATE,
-        principal=principal, resource_type="canonical_finding",
+        session,
+        action=audit_service.AuditAction.TICKET_CREATE,
+        principal=principal,
+        resource_type="canonical_finding",
         resource_id=canonical_finding_id,
         detail={"provider": "jira", "issue_key": issue.key, "by_agent": by_agent},
     )

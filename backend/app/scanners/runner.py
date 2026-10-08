@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +160,7 @@ class DockerRunner:
         *,
         on_log: Callable[[str], Awaitable[None]] | None = None,
         cancel: Callable[[], Awaitable[bool]] | None = None,
+        credential_environment: Mapping[str, str] | None = None,
     ) -> ScannerResult:
         """Execute one scanner and return everything observed.
 
@@ -170,12 +171,23 @@ class DockerRunner:
         image, :class:`~app.core.errors.DockerUnavailableError` for an unreachable daemon, and
         :class:`~app.core.errors.ScannerContainerError` when the container could not be created.
         """
+        credentials = dict(credential_environment or {})
+        capture_logs = adapter.capture_logs and request.option("api_auth_token") is None
+        if credentials and (
+            capture_logs or not credentials.keys() <= adapter.credential_environment_names
+        ):
+            raise UnsafeScannerInvocationError(
+                "Scanner is not authorized to receive these credentials.",
+                context={"scanner": str(adapter.name), "names": sorted(credentials)},
+            )
         adapter.validate(request)
 
         workdir = Path(request.workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         request.out_dir.mkdir(parents=True, exist_ok=True)
-        adapter.prepare(request)
+        # Source snapshot staging may perform bounded network I/O. Keep the worker's
+        # event loop responsive to progress events and cancellation while it runs.
+        await asyncio.to_thread(adapter.prepare, request)
         _grant_container_access(workdir)
 
         image = adapter.image(self._cfg)
@@ -188,8 +200,13 @@ class DockerRunner:
             work_mount=adapter.work_mount,
             run_as_user=adapter.run_as_user,
             environment=adapter.container_env,
+            credential_environment=credentials,
         )
         evidence = sandbox_evidence(sandbox)
+
+        # Credential checks can make network calls (for example STS); keep them off the
+        # event loop and complete them before even connecting to the Docker daemon.
+        await asyncio.to_thread(adapter.verify_credential_scope, request, credentials)
 
         timeout = max(1, min(request.timeout_seconds, self._cfg.max_timeout_seconds))
         if timeout < request.timeout_seconds:
@@ -207,8 +224,8 @@ class DockerRunner:
             image=image,
             target_count=len(request.targets),
             timeout_seconds=timeout,
-            #: The argv is logged in full. It contains targets and flags, never a credential --
-            #: scanner containers receive no secrets at all (SEC-002/SEC-004).
+            #: Credentials, when explicitly authorized, travel only through the container
+            #: environment and are never included in argv or persisted evidence.
             argv=list(argv),
         )
 
@@ -222,14 +239,29 @@ class DockerRunner:
         stderr_text = ""
 
         try:
+            container_error: ScannerContainerError | DockerUnavailableError | None = None
             try:
                 container = await asyncio.to_thread(
                     client.containers.run, command=list(argv), **sandbox
                 )
-            except UnsafeScannerInvocationError:
-                raise
             except Exception as exc:
-                raise self._container_error(exc, adapter=adapter, image=image) from exc
+                if credentials:
+                    # Docker may echo the serialized environment in an API error. Construct
+                    # the safe exception here, but raise outside the handler so Python does
+                    # not retain the secret-bearing original as __context__.
+                    container_error = self._container_error(
+                        exc,
+                        adapter=adapter,
+                        image=image,
+                        retain_cause=False,
+                    )
+                elif isinstance(exc, UnsafeScannerInvocationError):
+                    raise
+                else:
+                    raise self._container_error(exc, adapter=adapter, image=image) from exc
+
+            if container_error is not None:
+                raise container_error
 
             container_id = getattr(container, "id", None)
             if on_log is not None:
@@ -242,7 +274,8 @@ class DockerRunner:
                 scanner=str(adapter.name),
             )
 
-            stdout_text, stderr_text = await self._read_logs(container)
+            if capture_logs:
+                stdout_text, stderr_text = await self._read_logs(container)
         finally:
             if container is not None:
                 #: Shielded: a cancelled outer task must not skip the cleanup. Leaving the
@@ -383,7 +416,10 @@ class DockerRunner:
             def _decode(stream: bool) -> str:
                 try:
                     raw = container.logs(
-                        stdout=stream, stderr=not stream, tail="all", timestamps=False,
+                        stdout=stream,
+                        stderr=not stream,
+                        tail="all",
+                        timestamps=False,
                         stream=True,
                     )
                 except Exception as exc:
@@ -422,7 +458,12 @@ class DockerRunner:
         await asyncio.to_thread(_op)
 
     def _container_error(
-        self, exc: Exception, *, adapter: ScannerAdapter, image: str
+        self,
+        exc: Exception,
+        *,
+        adapter: ScannerAdapter,
+        image: str,
+        retain_cause: bool = True,
     ) -> ScannerContainerError | DockerUnavailableError:
         """Distinguish "the daemon is gone" from "this container would not start"."""
         text = str(exc)
@@ -431,7 +472,7 @@ class DockerRunner:
             return DockerUnavailableError(
                 "Lost the connection to the Docker daemon while starting a scanner.",
                 context={"scanner": str(adapter.name)},
-                cause=exc,
+                cause=exc if retain_cause else None,
             )
         if "no such image" in lowered or ("not found" in lowered and "image" in lowered):
             return ScannerContainerError(
@@ -441,7 +482,7 @@ class DockerRunner:
                     "scanner was skipped."
                 ),
                 context={"scanner": str(adapter.name), "image": image},
-                cause=exc,
+                cause=exc if retain_cause else None,
             )
         return ScannerContainerError(
             "The scanner container could not be created.",
@@ -452,7 +493,7 @@ class DockerRunner:
                 #: useful part for triage and the full text is in the log above.
                 "error": type(exc).__name__,
             },
-            cause=exc,
+            cause=exc if retain_cause else None,
         )
 
 

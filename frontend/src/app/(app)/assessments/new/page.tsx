@@ -52,6 +52,9 @@ function NewAssessmentForm() {
     React.useState<EngagementType>("web_application");
   const [executionMode, setExecutionMode] = React.useState<ExecutionMode>("supervised");
   const [objective, setObjective] = React.useState("");
+  const [apiSpecRaw, setApiSpecRaw] = React.useState("");
+  const [apiTarget, setApiTarget] = React.useState("");
+  const [apiAuthToken, setApiAuthToken] = React.useState("");
   const [notifyRaw, setNotifyRaw] = React.useState("");
   const [attestationText, setAttestationText] = React.useState("");
   const [evidenceReference, setEvidenceReference] = React.useState("");
@@ -59,6 +62,17 @@ function NewAssessmentForm() {
 
   const targets = React.useMemo(() => parseList(targetsRaw, /[\n,]/), [targetsRaw]);
   const notify = React.useMemo(() => parseList(notifyRaw, /[\s,]+/), [notifyRaw]);
+  const parsedApiSpec = React.useMemo(() => {
+    if (!apiSpecRaw.trim()) return null;
+    try {
+      const parsed: unknown = JSON.parse(apiSpecRaw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }, [apiSpecRaw]);
 
   const targetCount = targets.length;
   const targetsOverLimit = targetCount > MAX_TARGETS;
@@ -74,7 +88,11 @@ function NewAssessmentForm() {
     },
   });
 
-  const canSubmit = targetsValid && attestationValid && confirmed && !m.loading;
+  const apiInputValid =
+    engagementType !== "api_security" ||
+    (!apiSpecRaw.trim() && !apiAuthToken.trim()) ||
+    (parsedApiSpec !== null && targets.includes(apiTarget));
+  const canSubmit = targetsValid && attestationValid && confirmed && apiInputValid && !m.loading;
 
   const onSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -95,6 +113,11 @@ function NewAssessmentForm() {
       },
     };
     if (notify.length > 0) body.notify = notify;
+    if (engagementType === "api_security" && parsedApiSpec !== null && apiTarget) {
+      body.api_spec = parsedApiSpec;
+      body.api_target = apiTarget;
+      if (apiAuthToken.trim()) body.api_auth_token = apiAuthToken.trim();
+    }
 
     void m.run(body);
   };
@@ -226,6 +249,45 @@ function NewAssessmentForm() {
                 </Select>
               </Field>
             </div>
+
+            {engagementType === "api_security" && (
+              <div className="space-y-4">
+                <Field label="OpenAPI 3 contract" htmlFor="api-spec" hint="Optional JSON contract for ZAP and Nuclei API scanning. Servers must match an authorized target exactly.">
+                  <Textarea
+                    id="api-spec"
+                    className="min-h-36 font-mono"
+                    value={apiSpecRaw}
+                    onChange={(event) => setApiSpecRaw(event.target.value)}
+                    placeholder='{"openapi":"3.0.3","servers":[{"url":"https://api.example.com"}],"paths":{}}'
+                  />
+                </Field>
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  aria-label="Import OpenAPI JSON file"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file && file.size <= 512_000) void file.text().then(setApiSpecRaw);
+                  }}
+                />
+                {apiSpecRaw.trim() && parsedApiSpec === null && (
+                  <p className="text-xs text-danger">Provide a valid OpenAPI JSON object.</p>
+                )}
+                {parsedApiSpec !== null && (
+                  <>
+                    <Field label="Approved API target" htmlFor="api-target">
+                      <Select id="api-target" value={apiTarget} onChange={(event) => setApiTarget(event.target.value)}>
+                        <option value="">Select a target</option>
+                        {targets.map((target) => <option key={target} value={target}>{target}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="Bearer token" htmlFor="api-auth-token" hint="Optional. Encrypted at rest and used only for the scoped Nuclei API scan.">
+                      <Input id="api-auth-token" type="password" autoComplete="off" value={apiAuthToken} onChange={(event) => setApiAuthToken(event.target.value)} />
+                    </Field>
+                  </>
+                )}
+              </div>
+            )}
 
             <Field
               label="Objective"

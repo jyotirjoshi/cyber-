@@ -33,7 +33,14 @@ class SnykClient:
                 PROVIDER, hint="Set a Snyk organization ID and API token."
             )
         parsed = urlsplit(self._cfg.base_url)
-        if parsed.scheme != "https" or parsed.hostname not in _HOSTS or parsed.path not in {"", "/"} or parsed.username or parsed.password or parsed.port:
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in _HOSTS
+            or parsed.path not in {"", "/"}
+            or parsed.username
+            or parsed.password
+            or parsed.port
+        ):
             raise IntegrationError("Unsupported Snyk API host", provider=PROVIDER)
         try:
             organization_id = str(uuid.UUID(self._cfg.organization_id or ""))
@@ -86,8 +93,15 @@ class SnykClient:
             if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
                 raise IntegrationError("Invalid Snyk issues page", provider=PROVIDER)
             page = payload["data"]
-            if any(not isinstance(item, dict) or not item.get("id") or not isinstance(item.get("attributes"), dict) for item in page):
-                raise IntegrationError("Snyk issue lacks stable identity or attributes", provider=PROVIDER)
+            if any(
+                not isinstance(item, dict)
+                or not item.get("id")
+                or not isinstance(item.get("attributes"), dict)
+                for item in page
+            ):
+                raise IntegrationError(
+                    "Snyk issue lacks stable identity or attributes", provider=PROVIDER
+                )
             for item in page:
                 issue_id = str(item["id"])
                 if issue_id in seen_ids:

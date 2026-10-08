@@ -22,7 +22,9 @@ _PAGE_SIZE = 100
 _MAX_PAGES = 100
 _REPOSITORY_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
 _DISMISS_REASONS = {
-    "dependabot": frozenset({"fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"}),
+    "dependabot": frozenset(
+        {"fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"}
+    ),
     "code_scanning": frozenset({"false positive", "won't fix", "used in tests", "mitigated"}),
     "secret_scanning": frozenset({"false_positive", "wont_fix", "revoked", "used_in_tests"}),
 }
@@ -49,9 +51,7 @@ class GitHubClient:
 
     def _require(self) -> ResilientClient:
         if not self.configured:
-            raise IntegrationNotConfiguredError(
-                PROVIDER, hint="Set CYNUX_GITHUB__API_TOKEN."
-            )
+            raise IntegrationNotConfiguredError(PROVIDER, hint="Set CYNUX_GITHUB__API_TOKEN.")
         if self._client is None:
             self._client = build_client(
                 provider=PROVIDER,
@@ -102,8 +102,12 @@ class GitHubClient:
                     headers=headers,
                     params={"per_page": _PAGE_SIZE, "page": page},
                 )
-                if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
-                    raise IntegrationError("GitHub returned an invalid alert page", provider=PROVIDER)
+                if not isinstance(payload, list) or any(
+                    not isinstance(item, dict) for item in payload
+                ):
+                    raise IntegrationError(
+                        "GitHub returned an invalid alert page", provider=PROVIDER
+                    )
                 alerts.extend(payload)
                 if len(payload) < _PAGE_SIZE:
                     break
@@ -113,33 +117,58 @@ class GitHubClient:
         return feeds
 
     async def set_alert_state(
-        self, category: str, repository: str, number: int, *,
-        decision: str, reason: str | None = None, comment: str | None = None,
+        self,
+        category: str,
+        repository: str,
+        number: int,
+        *,
+        decision: str,
+        reason: str | None = None,
+        comment: str | None = None,
     ) -> str:
         """Update one alert using the feed-specific GitHub state and reason contract."""
         organization = self._organization()
         parts = repository.split("/")
-        if (len(parts) != 2 or parts[0].lower() != organization.lower()
-                or any(part in {".", ".."} or not _REPOSITORY_SEGMENT.fullmatch(part) for part in parts)
-                or not isinstance(number, int) or isinstance(number, bool) or number <= 0):
+        if (
+            len(parts) != 2
+            or parts[0].lower() != organization.lower()
+            or any(part in {".", ".."} or not _REPOSITORY_SEGMENT.fullmatch(part) for part in parts)
+            or not isinstance(number, int)
+            or isinstance(number, bool)
+            or number <= 0
+        ):
             raise IntegrationError("Invalid or foreign GitHub alert identity", provider=PROVIDER)
         if category not in _DISMISS_REASONS or decision not in {"dismiss", "reopen"}:
             raise IntegrationError("Unsupported GitHub alert action", provider=PROVIDER)
         if decision == "reopen":
             if reason is not None or comment is not None:
-                raise IntegrationError("Reopening does not accept a dismissal reason", provider=PROVIDER)
+                raise IntegrationError(
+                    "Reopening does not accept a dismissal reason", provider=PROVIDER
+                )
             expected_state = "open"
             body = {"state": expected_state}
         else:
-            if reason not in _DISMISS_REASONS[category] or not isinstance(comment, str) or not 1 <= len(comment.strip()) <= 2000:
-                raise IntegrationError("Invalid GitHub alert dismissal reason or comment", provider=PROVIDER)
+            if (
+                reason not in _DISMISS_REASONS[category]
+                or not isinstance(comment, str)
+                or not 1 <= len(comment.strip()) <= 2000
+            ):
+                raise IntegrationError(
+                    "Invalid GitHub alert dismissal reason or comment", provider=PROVIDER
+                )
             expected_state = "resolved" if category == "secret_scanning" else "dismissed"
             reason_key = "resolution" if category == "secret_scanning" else "dismissed_reason"
-            comment_key = "resolution_comment" if category == "secret_scanning" else "dismissed_comment"
+            comment_key = (
+                "resolution_comment" if category == "secret_scanning" else "dismissed_comment"
+            )
             body = {"state": expected_state, reason_key: reason, comment_key: comment.strip()}
         path = f"/repos/{parts[0]}/{parts[1]}/{category.replace('_', '-')}/alerts/{number}"
         payload = await self._require().patch_json(path, json=body, headers=self._headers())
-        if not isinstance(payload, dict) or payload.get("number") != number or payload.get("state") != expected_state:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("number") != number
+            or payload.get("state") != expected_state
+        ):
             raise IntegrationError("GitHub did not confirm alert status", provider=PROVIDER)
         return expected_state
 

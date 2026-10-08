@@ -102,6 +102,7 @@ class Assessment(Base, TenantMixin, TimestampMixin):
     #: Extended intelligence metadata: attack_paths, compound_risks, coverage_gaps.
     #: Written by the attack_path node; read by the report context and dashboard.
     extra_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    api_auth_ciphertext: Mapped[str | None] = mapped_column(Text)
 
     #: Denormalized counters. DefectDojo remains the source of truth (FR-016); these
     #: exist so the dashboard and list views do not fan out to it on every render.
@@ -176,6 +177,8 @@ class Assessment(Base, TenantMixin, TimestampMixin):
             "current_stage IN ('queued','understanding_request','validating_target',"
             "'checking_authorization','planning','reconnaissance','asset_analysis',"
             "'awaiting_approval','scanning_nmap','scanning_nuclei','scanning_zap',"
+            "'scanning_trivy_repo','scanning_semgrep_repo','scanning_gitleaks_repo',"
+            "'scanning_trivy_image','scanning_syft_image','scanning_prowler_aws','scanning_prowler_azure','scanning_prowler_gcp',"
             "'importing_findings','threat_intelligence','ai_analysis','risk_prioritization',"
             "'remediation','creating_actions','report','done')",
             name="valid_assessment_stage",
@@ -367,9 +370,7 @@ class ScanProfile(Base, TenantMixin, TimestampMixin):
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    __table_args__ = (
-        UniqueConstraint("organization_id", "name", name="unique_scan_profile_name"),
-    )
+    __table_args__ = (UniqueConstraint("organization_id", "name", name="unique_scan_profile_name"),)
 
 
 class RecurringScan(Base, TenantMixin, TimestampMixin):
@@ -410,6 +411,10 @@ class RecurringScan(Base, TenantMixin, TimestampMixin):
 
 
 __all__ = [
-    "Approval", "Assessment", "AssessmentTarget", "AuthorizationRecord",
-    "RecurringScan", "ScanProfile",
+    "Approval",
+    "Assessment",
+    "AssessmentTarget",
+    "AuthorizationRecord",
+    "RecurringScan",
+    "ScanProfile",
 ]

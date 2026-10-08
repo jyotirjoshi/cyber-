@@ -24,14 +24,19 @@ does not read it (PRD section 8: no custom scanner parsers).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import MappingProxyType
+from urllib.parse import urlsplit
 
 import structlog
 
+from app.core.crypto import Secret
+from app.core.errors import UnsafeScannerInvocationError
 from app.db.enums import ArtifactKind, AssessmentDepth, ScannerName
 from app.scanners.artifacts import describe
 from app.scanners.base import ArtifactFile, ScannerAdapter, ScannerRequest
+from app.scanners.openapi_scope import SPEC_FILENAME, prepare_openapi_spec
 
 logger = structlog.get_logger(__name__)
 
@@ -71,8 +76,22 @@ class NucleiAdapter(ScannerAdapter):
 
     REPORT_NAME = "nuclei.jsonl"
     TARGETS_NAME = "nuclei-targets.txt"
+    AUTH_NAME = "api-auth.yaml"
 
     def prepare(self, request: ScannerRequest) -> None:
+        if prepare_openapi_spec(request):
+            token = request.option("api_auth_token")
+            if token is not None:
+                if not isinstance(token, Secret) or len(request.targets) != 1:
+                    raise UnsafeScannerInvocationError("API scan credential is not target-scoped")
+                domain = urlsplit(request.targets[0]).netloc
+                if not domain:
+                    raise UnsafeScannerInvocationError("API scan credential has no domain")
+                secret = {"static": [{"type": "bearertoken", "domains": [domain], "token": token.reveal()}]}
+                auth_file = Path(request.workdir) / self.AUTH_NAME
+                auth_file.write_text(json.dumps(secret, separators=(",", ":")), encoding="utf-8")
+                auth_file.chmod(0o644)
+            return
         if len(request.targets) > 1:
             (Path(request.workdir) / self.TARGETS_NAME).write_text(
                 "\n".join(request.targets) + "\n", encoding="utf-8"
@@ -83,7 +102,11 @@ class NucleiAdapter(ScannerAdapter):
         rate_limit = self._rate_limit(request)
 
         argv: list[str] = []
-        if len(request.targets) == 1:
+        if request.option("api_spec") is not None:
+            argv += ["-list", self.container_path(SPEC_FILENAME), "-im", "openapi", "-sfv"]
+            if request.option("api_auth_token") is not None:
+                argv += ["-sf", self.container_path(self.AUTH_NAME), "-or"]
+        elif len(request.targets) == 1:
             argv += ["-target", request.targets[0]]
         else:
             argv += ["-list", self.container_path(self.TARGETS_NAME)]

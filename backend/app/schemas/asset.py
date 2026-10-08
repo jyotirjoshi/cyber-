@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.db.enums import AssetEnvironment, AssetStatus, Criticality, CriticalitySource
+from app.schemas.custom_fields import validate_custom_fields
 
 
 class AssetTagOut(BaseModel):
@@ -63,6 +64,7 @@ class AssetOut(BaseModel):
     owner_team: str | None = None
     environment: AssetEnvironment = AssetEnvironment.UNKNOWN
     groups: list[str] = Field(default_factory=list)
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
     #: 0.0-1.0. Drives the risk-based scope selection of FR-010.
     risk_score: float = Field(ge=0.0, le=1.0)
     selected_for_scanning: bool
@@ -104,6 +106,14 @@ class AssetContextIn(BaseModel):
     owner_team: str | None = Field(default=None, max_length=120)
     environment: AssetEnvironment | None = None
     groups: list[str] | None = Field(default=None, max_length=30)
+    custom_fields: dict[str, Any] | None = None
+
+    @field_validator("custom_fields")
+    @classmethod
+    def clean_custom_fields(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            raise ValueError("custom_fields cannot be null")
+        return validate_custom_fields(value)
 
     @field_validator("owner_team")
     @classmethod
@@ -151,6 +161,13 @@ class AssetFilter(BaseModel):
     q: str | None = Field(default=None, max_length=200)
 
 
+class CmdbImportOut(BaseModel):
+    dry_run: bool
+    matched: int = Field(ge=0)
+    updated: int = Field(ge=0)
+    unmatched: list[str]
+
+
 class DiscoveredAssetOut(BaseModel):
     """A recon result before it becomes an inventory row.
 
@@ -180,5 +197,6 @@ __all__ = [
     "AssetOut",
     "AssetTagIn",
     "AssetTagOut",
+    "CmdbImportOut",
     "DiscoveredAssetOut",
 ]

@@ -103,7 +103,7 @@ _NODES: tuple[tuple[str, _NodeFn], ...] = (
     (_SCANNER_NODE, execute_scanners),
     ("import_findings", import_findings),
     ("enrich_intelligence", enrich_intelligence),
-    ("attack_path", attack_path),          # NEW: kill-chain + SSVC + correlation
+    ("attack_path", attack_path),  # NEW: kill-chain + SSVC + correlation
     (_ANALYSIS_NODE, analyze_findings),
     ("prioritize_findings", prioritize_findings),
     ("remediate_findings", remediate_findings),
@@ -180,7 +180,7 @@ def build_graph(
     builder.add_edge(_APPROVAL_NODE, _SCANNER_NODE)
     builder.add_edge(_SCANNER_NODE, "import_findings")
     builder.add_edge("import_findings", "enrich_intelligence")
-    builder.add_edge("enrich_intelligence", "attack_path")   # NEW: kill-chain analysis
+    builder.add_edge("enrich_intelligence", "attack_path")  # NEW: kill-chain analysis
     builder.add_edge("attack_path", _ANALYSIS_NODE)
 
     # Cognitive tail: always runs, whichever path reached it, and ends the graph.

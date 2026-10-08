@@ -54,11 +54,16 @@ async def test_dispatch_queues_email_without_sending_before_transaction_commit(m
 
     session = _Session()
     rows = await notifications.dispatch(
-        session, principal, event=NotificationEvent.CRITICAL_FINDING,
-        content=notifications.NotificationContent(subject="Critical risk", body="Please review",
-                                                  link="https://example.test/finding/1"),
-        settings=Settings(), channels=(NotificationChannel.EMAIL,),
-        extra_emails=("analyst@example.test",), severity=Severity.CRITICAL,
+        session,
+        principal,
+        event=NotificationEvent.CRITICAL_FINDING,
+        content=notifications.NotificationContent(
+            subject="Critical risk", body="Please review", link="https://example.test/finding/1"
+        ),
+        settings=Settings(),
+        channels=(NotificationChannel.EMAIL,),
+        extra_emails=("analyst@example.test",),
+        severity=Severity.CRITICAL,
         resource_id="finding-1",
     )
     assert len(rows) == 1
@@ -72,13 +77,17 @@ async def test_dispatch_queues_email_without_sending_before_transaction_commit(m
 async def test_outbox_worker_delivers_committed_rows_with_original_content(monkeypatch):
     org_id = uuid.uuid4()
     row = Notification(
-        id=uuid.uuid4(), organization_id=org_id,
+        id=uuid.uuid4(),
+        organization_id=org_id,
         event=NotificationEvent.CRITICAL_FINDING.value,
         channel=NotificationChannel.EMAIL.value,
         status=NotificationStatus.PENDING.value,
-        recipient="analyst@example.test", subject="Critical risk", body="Please review",
+        recipient="analyst@example.test",
+        subject="Critical risk",
+        body="Please review",
         payload={"link": "https://example.test/finding/1", "severity": "critical"},
-        dedupe_key="finding-1", attempts=0,
+        dedupe_key="finding-1",
+        attempts=0,
     )
 
     class _Result:
@@ -155,10 +164,14 @@ async def test_dispatch_dedupe_race_does_not_abort_caller_transaction(monkeypatc
     monkeypatch.setattr(notifications, "_already_recorded", recorded_after_race)
     session = _Session()
     rows = await notifications.dispatch(
-        session, principal, event=NotificationEvent.CRITICAL_FINDING,
+        session,
+        principal,
+        event=NotificationEvent.CRITICAL_FINDING,
         content=notifications.NotificationContent(subject="Risk", body="Review"),
-        settings=Settings(), channels=(NotificationChannel.EMAIL,),
-        extra_emails=("analyst@example.test",), severity=Severity.CRITICAL,
+        settings=Settings(),
+        channels=(NotificationChannel.EMAIL,),
+        extra_emails=("analyst@example.test",),
+        severity=Severity.CRITICAL,
         resource_id="finding-1",
     )
     assert rows == []
@@ -210,14 +223,21 @@ async def test_production_notification_never_uses_global_slack_credential_for_un
 ):
     org_id = uuid.uuid4()
     row = Notification(
-        id=uuid.uuid4(), organization_id=org_id,
+        id=uuid.uuid4(),
+        organization_id=org_id,
         event=NotificationEvent.CRITICAL_FINDING.value,
         channel=NotificationChannel.SLACK.value,
-        status=NotificationStatus.PENDING.value, recipient="#security",
-        subject="Critical risk", body="Review", payload={}, dedupe_key="risk", attempts=0,
+        status=NotificationStatus.PENDING.value,
+        recipient="#security",
+        subject="Critical risk",
+        body="Review",
+        payload={},
+        dedupe_key="risk",
+        attempts=0,
     )
-    actor = Principal(user_id=None, organization_id=org_id, role=Role.VIEWER,
-                      actor_type=ACTOR_WORKER)
+    actor = Principal(
+        user_id=None, organization_id=org_id, role=Role.VIEWER, actor_type=ACTOR_WORKER
+    )
     sends = []
 
     class _Slack:
@@ -238,8 +258,13 @@ async def test_production_notification_never_uses_global_slack_credential_for_un
     monkeypatch.setattr("app.services.integration.find_integration", no_connection)
     settings = Settings(environment="production", notify={"slack_bot_token": "global-token"})
     await notifications._deliver(
-        object(), actor, row, notifications.NotificationContent(subject="Critical risk", body="Review"),
-        severity=Severity.CRITICAL, settings=settings, redis=None,
+        object(),
+        actor,
+        row,
+        notifications.NotificationContent(subject="Critical risk", body="Review"),
+        severity=Severity.CRITICAL,
+        settings=settings,
+        redis=None,
     )
     assert sends == []
     assert row.status == NotificationStatus.FAILED.value

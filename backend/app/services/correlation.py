@@ -244,7 +244,12 @@ def _deterministic_duplicates(findings: list[Finding]) -> list[DuplicateGroup]:
         if len(group) < 2:
             continue
         # Pick the highest-severity finding as representative
-        rep = max(group, key=lambda f: Severity(f.severity).rank if f.severity in Severity._value2member_map_ else 0)
+        rep = max(
+            group,
+            key=lambda f: Severity(f.severity).rank
+            if f.severity in Severity._value2member_map_
+            else 0,
+        )
         result.append(
             DuplicateGroup(
                 finding_ids=[f.id for f in group],
@@ -320,9 +325,7 @@ def _merge(
     id_map = {str(f.id): f.id for f in all_findings}
 
     # Deduplicate: AI duplicates already captured by deterministic fingerprint → skip
-    det_keys = {
-        frozenset(str(fid) for fid in g.finding_ids) for g in det_duplicates
-    }
+    det_keys = {frozenset(str(fid) for fid in g.finding_ids) for g in det_duplicates}
     all_dups = list(det_duplicates)
     fp_candidates: list[FalsePositiveCandidate] = []
     compound_risks: list[CompoundRisk] = []
@@ -387,9 +390,7 @@ async def _load_findings(session: AsyncSession, assessment: Assessment) -> list[
         .where(
             Finding.assessment_id == assessment.id,
             Finding.organization_id == assessment.organization_id,
-            Finding.status.in_(
-                [FindingStatus.ACTIVE.value, FindingStatus.VERIFIED.value]
-            ),
+            Finding.status.in_([FindingStatus.ACTIVE.value, FindingStatus.VERIFIED.value]),
             Finding.is_duplicate.is_(False),
         )
         .order_by(Finding.risk_score.desc().nullslast())

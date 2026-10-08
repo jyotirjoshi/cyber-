@@ -42,7 +42,7 @@ import structlog
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
-from app.agent.nodes._common import load_assessment, record_step
+from app.agent.nodes._common import load_assessment, principal_from, record_step
 from app.agent.registry import AgentDeps
 from app.agent.state import AssessmentState, state_uuid
 from app.core.config import Settings
@@ -77,6 +77,7 @@ from app.scanners.recon_assets import (
     parse_recon_output,
 )
 from app.scanners.registry import get_adapter
+from app.services import asset_change as asset_change_service
 from app.services import audit as audit_service
 from app.services.assessment import record_degradation, transition
 from app.services.asset import upsert_assets
@@ -212,7 +213,10 @@ async def _plan_recon(deps: AgentDeps, state: AssessmentState) -> _ReconPlan:
         timeout = 0
         if hosts:
             job = await enqueue_job(
-                session, assessment, scanner=ScannerName.RECONFTW, targets=hosts,
+                session,
+                assessment,
+                scanner=ScannerName.RECONFTW,
+                targets=hosts,
                 idempotency_key=f"agent:{state_uuid(state, 'run_id')}:reconftw",
             )
             job_id = job.id
@@ -228,16 +232,29 @@ async def _plan_recon(deps: AgentDeps, state: AssessmentState) -> _ReconPlan:
 
 
 def _seed_from_target(target: AssessmentTarget) -> DiscoveredAsset | None:
-    """Turn one validated target into a seed asset, or ``None`` for a non-network target.
+    """Turn one validated target into a seed asset.
 
     Every domain, URL, IP and CIDR target the operator named becomes an asset, so the
     inventory always contains what they asked about even when passive recon is skipped or
-    fails.  Repository and container-image targets have no network identity and seed nothing.
+    fails. Repository and image assets retain their full canonical reference for scanning.
     Hostnames are normalized exactly as :func:`parse_recon_output` normalizes them --
     ``clean(host.lower(), MAX_NAME)`` -- so a seed and a recon-discovered asset for the same
     host share the ``(name, port, protocol)`` key and merge into a single row.
     """
     ttype = target.target_type
+    if ttype in {
+        TargetType.REPOSITORY.value,
+        TargetType.CONTAINER_IMAGE.value,
+        TargetType.CLOUD_ACCOUNT.value,
+    }:
+        canonical = target.canonical_value or ""
+        if canonical and len(canonical) <= MAX_NAME:
+            return DiscoveredAsset(
+                name=canonical,
+                asset_type=ttype,
+                internet_exposed=False,
+                evidence=dict(_SEED_EVIDENCE),
+            )
     if ttype == TargetType.DOMAIN.value:
         name = _norm_host(target.host)
         if name:
@@ -363,7 +380,8 @@ async def _execute_recon(
         if previous.status != JobStatus.QUEUED.value:
             log.warning(
                 "agent.recon.replayed_job_not_executed",
-                job_id=str(job_id), status=previous.status,
+                job_id=str(job_id),
+                status=previous.status,
             )
             return _ReconOutcome(assets=[], degradation=_PARTIAL_NOTE)
     workdir = _workdir_for(settings, org_id, job_id)
@@ -498,6 +516,13 @@ async def _record_inventory(
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
         await upsert_assets(session, assessment, [*seeds, *recon_assets])
+        await asset_change_service.stage_new_asset_alert(
+            session,
+            principal_from(state),
+            assessment_id=assessment.id,
+            seed_names={seed.name for seed in seeds},
+            settings=deps.settings,
+        )
         await transition(
             session, assessment, AssessmentStatus.DISCOVERY, stage=AssessmentStage.RECON
         )
@@ -553,9 +578,7 @@ async def _acquire_slot(deps: AgentDeps, org_id: uuid.UUID) -> bool:
             org_limit = await organization_scanner_limit(session, org_id, deps.settings)
         if org_limit < 1:
             return False
-        if await claim_slot(
-            deps.redis, deps.settings, org_id, organization_limit=org_limit
-        ):
+        if await claim_slot(deps.redis, deps.settings, org_id, organization_limit=org_limit):
             return True
         if attempt + 1 < attempts:
             await asyncio.sleep(_SLOT_POLL_SECONDS)

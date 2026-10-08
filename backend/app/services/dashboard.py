@@ -220,9 +220,7 @@ async def _external_alert_counts(
                 ),
             )
         ),
-        func.count().filter(
-            and_(source_open, ExternalSecurityAlert.triage_status == "new")
-        ),
+        func.count().filter(and_(source_open, ExternalSecurityAlert.triage_status == "new")),
     ).where(ExternalSecurityAlert.organization_id == organization_id)
     actionable, awaiting = (await session.execute(stmt)).one()
     return int(actionable or 0), int(awaiting or 0)

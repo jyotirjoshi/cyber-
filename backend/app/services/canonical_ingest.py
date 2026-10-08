@@ -2,24 +2,36 @@
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import uuid
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import exists, func, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
+from app.db.enums import Severity
 from app.db.models.asset import Asset
-from app.db.models.canonical import CanonicalFinding, FindingHistory, FindingObservation
+from app.db.models.canonical import (
+    AssessmentCanonicalFinding,
+    CanonicalFinding,
+    FindingHistory,
+    FindingObservation,
+)
+from app.db.models.finding import Finding
 from app.db.models.identity import Organization
 from app.services.canonical_identity import (
+    asset_storage_name,
     identity_for_observation,
     normalized_asset_identity,
     valid_cves,
+)
+from app.services.canonical_intel_refresh import (
+    verified_intel_evidence,
+    with_stale_intel_provenance,
 )
 from app.services.canonical_lifecycle import next_status
 from app.services.canonical_risk import score_canonical
@@ -29,13 +41,115 @@ from app.services.organization import load_policy
 _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
-def asset_storage_name(kind: str, value: str) -> str:
-    """Store long provider identifiers without truncation collisions."""
-    name = f"{kind}:{value}"
-    if len(name) <= 512:
-        return name
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
-    return f"{kind}:sha256:{digest}"
+async def assessment_finding_counts(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    assessment_id: uuid.UUID,
+) -> dict[str, int]:
+    """Merge non-duplicate native severity counts with assessment-linked exposures."""
+    counts = {severity.value: 0 for severity in Severity}
+    native_rows = await session.execute(
+        select(Finding.severity, func.count(Finding.id))
+        .where(
+            Finding.organization_id == organization_id,
+            Finding.assessment_id == assessment_id,
+            Finding.is_duplicate.is_(False),
+            Finding.is_false_positive.is_(False),
+        )
+        .group_by(Finding.severity)
+    )
+    for severity, total in native_rows.all():
+        counts[str(severity)] += int(total)
+    represented_by_native = exists(
+        select(FindingObservation.id)
+        .join(Finding, Finding.id == FindingObservation.source_record_id)
+        .where(
+            FindingObservation.organization_id == organization_id,
+            FindingObservation.canonical_finding_id
+            == AssessmentCanonicalFinding.canonical_finding_id,
+            FindingObservation.provider == "defectdojo",
+            Finding.organization_id == organization_id,
+            Finding.assessment_id == assessment_id,
+            Finding.is_duplicate.is_(False),
+            Finding.is_false_positive.is_(False),
+        )
+        .correlate(AssessmentCanonicalFinding)
+    )
+    linked_rows = await session.execute(
+        select(CanonicalFinding.severity, func.count(AssessmentCanonicalFinding.id))
+        .join(
+            CanonicalFinding, CanonicalFinding.id == AssessmentCanonicalFinding.canonical_finding_id
+        )
+        .where(
+            AssessmentCanonicalFinding.organization_id == organization_id,
+            AssessmentCanonicalFinding.assessment_id == assessment_id,
+            CanonicalFinding.organization_id == organization_id,
+            CanonicalFinding.status != "false_positive",
+            ~represented_by_native,
+        )
+        .group_by(CanonicalFinding.severity)
+    )
+    for severity, total in linked_rows.all():
+        counts[str(severity)] += int(total)
+    return counts
+
+
+async def link_scan_observations(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    assessment_id: uuid.UUID,
+    job_id: uuid.UUID,
+    provider: str,
+    external_ids: list[str],
+) -> int:
+    """Pin a scan's canonical identities to its assessment without cross-tenant reads."""
+    if not external_ids:
+        return 0
+    result = await session.execute(
+        select(FindingObservation.canonical_finding_id).where(
+            FindingObservation.organization_id == organization_id,
+            FindingObservation.provider == provider,
+            FindingObservation.external_id.in_(set(external_ids)),
+        )
+    )
+    finding_ids = set(result.scalars().all())
+    if not finding_ids:
+        return 0
+    statement = (
+        pg_insert(AssessmentCanonicalFinding)
+        .values(
+            [
+                {
+                    "id": uuid.uuid4(),
+                    "organization_id": organization_id,
+                    "assessment_id": assessment_id,
+                    "canonical_finding_id": finding_id,
+                    "scanner_job_id": job_id,
+                    "created_at": utcnow(),
+                }
+                for finding_id in sorted(finding_ids)
+            ]
+        )
+        .on_conflict_do_nothing(constraint="unique_assessment_canonical_finding")
+    )
+    inserted = await session.execute(statement)
+    return inserted.rowcount or 0
+
+
+def _asset_candidate_names(kind: str, value: str) -> frozenset[str]:
+    names = {asset_storage_name(kind, value)}
+    if kind == "repo":
+        first_segment = value.split("/", 1)[0]
+        if "." in first_segment or ":" in first_segment:
+            names.add(f"https://{value}")
+        else:
+            names.update(
+                f"https://{host}/{value}" for host in ("github.com", "gitlab.com", "bitbucket.org")
+            )
+    elif kind in {"container_image", "domain", "ip", "url"}:
+        names.add(value)
+    return frozenset(names)
 
 
 def alert_asset_identity(alert: Any) -> tuple[str, str] | None:
@@ -69,12 +183,22 @@ def alert_asset_identity(alert: Any) -> tuple[str, str] | None:
         kind = str(evidence.get("asset_type") or "").strip()
         value = str(evidence.get("asset_value") or "").strip()
         return normalized_asset_identity(kind, value) if kind and value else None
+    kind = str(evidence.get("asset_type") or "").strip()
+    value = str(evidence.get("asset_value") or "").strip()
+    if kind and value:
+        try:
+            return normalized_asset_identity(kind, value)
+        except ValueError:
+            return None
     return None
 
 
 async def ingest_external_alerts(
-    session: AsyncSession, organization_id: uuid.UUID, alerts: list[Any],
-    *, asset_overrides: dict[tuple[str, str], Asset] | None = None,
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    alerts: list[Any],
+    *,
+    asset_overrides: dict[tuple[str, str], Asset] | None = None,
 ) -> int:
     """Merge alert evidence into canonical findings in the caller's transaction.
 
@@ -93,33 +217,61 @@ async def ingest_external_alerts(
     if any(alert.organization_id != organization_id for alert, _ in prepared):
         raise ValueError("cross-tenant alert passed to canonical ingestion")
 
+    overrides = asset_overrides or {}
+    if any(asset.organization_id != organization_id for asset in overrides.values()):
+        raise ValueError("cross-tenant asset override passed to canonical ingestion")
+
     organization = (
         await session.execute(
             select(Organization).where(Organization.id == organization_id).with_for_update()
         )
     ).scalar_one()
-    overrides = asset_overrides or {}
-    names = {
-        asset_storage_name(kind, value)
-        for _, (kind, value) in prepared
-        if (kind, value) not in overrides
-    }
+    keys = {(kind, value) for _, (kind, value) in prepared if (kind, value) not in overrides}
+    storage_keys = {asset_storage_name(*key): key for key in keys}
+    names = {name for kind, value in keys for name in _asset_candidate_names(kind, value)}
     existing_assets = (
-        await session.execute(
-            select(Asset).where(
-                Asset.organization_id == organization_id,
-                Asset.name.in_(names),
-                Asset.port.is_(None),
-                Asset.protocol.is_(None),
+        (
+            await session.execute(
+                select(Asset).where(
+                    Asset.organization_id == organization_id,
+                    Asset.name.in_(names),
+                    Asset.port.is_(None),
+                    Asset.protocol.is_(None),
+                )
             )
         )
-    ).scalars().all()
-    assets = {asset.name: asset for asset in existing_assets}
-    new_asset_names = names - set(assets)
+        .scalars()
+        .all()
+    )
+    synthetic: dict[tuple[str, str], Asset] = {}
+    native: dict[tuple[str, str], list[Asset]] = {}
+    for asset in existing_assets:
+        if (
+            asset.organization_id != organization_id
+            or asset.port is not None
+            or asset.protocol is not None
+        ):
+            continue
+        stored_key = storage_keys.get(asset.name)
+        if stored_key is not None:
+            synthetic[stored_key] = asset
+            continue
+        try:
+            key = normalized_asset_identity(asset.asset_type, asset.name)
+        except ValueError:
+            continue
+        if key in keys and asset.name in _asset_candidate_names(*key):
+            native.setdefault(key, []).append(asset)
+    resolved = {key: matches[0] for key, matches in native.items() if len(matches) == 1}
+    resolved.update({key: asset for key, asset in synthetic.items() if key not in resolved})
+    new_asset_keys = {asset_storage_name(*key): key for key in keys if key not in resolved}
+    new_asset_names = set(new_asset_keys)
     if new_asset_names:
         current_count = (
             await session.execute(
-                select(func.count()).select_from(Asset).where(Asset.organization_id == organization_id)
+                select(func.count())
+                .select_from(Asset)
+                .where(Asset.organization_id == organization_id)
             )
         ).scalar_one()
         assert_asset_capacity(
@@ -131,17 +283,25 @@ async def ingest_external_alerts(
     for name in sorted(new_asset_names):
         kind, _, _ = name.partition(":")
         asset = Asset(
-            id=uuid.uuid4(), organization_id=organization_id, name=name,
-            asset_type=kind, status="active", first_seen_at=now, last_seen_at=now,
-            criticality="unknown", criticality_source="default", risk_score=0.0,
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            name=name,
+            asset_type=kind,
+            status="active",
+            first_seen_at=now,
+            last_seen_at=now,
+            criticality="unknown",
+            criticality_source="default",
+            risk_score=0.0,
             evidence={"identity_source": "external_security_alert"},
-            seen_in_assessments=[], technology=[],
+            seen_in_assessments=[],
+            technology=[],
         )
         session.add(asset)
-        assets[name] = asset
+        resolved[new_asset_keys[name]] = asset
 
     asset_for_key = {
-        (kind, value): overrides.get((kind, value)) or assets[asset_storage_name(kind, value)]
+        (kind, value): overrides.get((kind, value)) or resolved[(kind, value)]
         for _, (kind, value) in prepared
     }
 
@@ -159,25 +319,51 @@ async def ingest_external_alerts(
     ]
     fingerprints = {fingerprint for _, _, _, fingerprint in fingerprinted}
     found = (
-        await session.execute(
-            select(CanonicalFinding).where(
-                CanonicalFinding.organization_id == organization_id,
-                CanonicalFinding.fingerprint.in_(fingerprints),
+        (
+            await session.execute(
+                select(CanonicalFinding).where(
+                    CanonicalFinding.organization_id == organization_id,
+                    CanonicalFinding.fingerprint.in_(fingerprints),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     findings = {finding.fingerprint: finding for finding in found}
+    linked_asset_ids = {finding.asset_id for finding in found}
+    linked_assets = (
+        (
+            await session.execute(
+                select(Asset).where(
+                    Asset.organization_id == organization_id,
+                    Asset.id.in_(linked_asset_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if linked_asset_ids
+        else []
+    )
+    original_assets_by_id = {
+        row.id: row for row in linked_assets if row.organization_id == organization_id
+    }
     source_keys = {(alert.provider, alert.external_id, cve) for alert, _, cve, _ in fingerprinted}
     found_observations = (
-        await session.execute(
-            select(FindingObservation).where(
-                FindingObservation.organization_id == organization_id,
-                tuple_(FindingObservation.provider, FindingObservation.external_id).in_(
-                    {(provider, external_id) for provider, external_id, _ in source_keys}
-                ),
+        (
+            await session.execute(
+                select(FindingObservation).where(
+                    FindingObservation.organization_id == organization_id,
+                    tuple_(FindingObservation.provider, FindingObservation.external_id).in_(
+                        {(provider, external_id) for provider, external_id, _ in source_keys}
+                    ),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     observations = {(row.provider, row.external_id, row.cve_id): row for row in found_observations}
     moved_from_ids: set[uuid.UUID] = set()
     current_cves: dict[tuple[str, str], set[str]] = {}
@@ -197,21 +383,45 @@ async def ingest_external_alerts(
         finding = findings.get(fingerprint)
         if finding is None:
             finding = CanonicalFinding(
-                id=uuid.uuid4(), organization_id=organization_id, asset_id=asset.id,
-                fingerprint=fingerprint, title=alert.title[:1000], severity=alert.severity,
-                status="new", cve_ids=[cve] if cve else [],
-                first_seen_at=now, last_seen_at=now, absence_count=0, status_version=0,
+                id=uuid.uuid4(),
+                organization_id=organization_id,
+                asset_id=asset.id,
+                fingerprint=fingerprint,
+                title=alert.title[:1000],
+                severity=alert.severity,
+                status="new",
+                cve_ids=[cve] if cve else [],
+                first_seen_at=now,
+                last_seen_at=now,
+                absence_count=0,
+                status_version=0,
             )
             session.add(finding)
             findings[fingerprint] = finding
-            session.add(FindingHistory(
-                id=uuid.uuid4(), organization_id=organization_id,
-                canonical_finding_id=finding.id, previous_status=None,
-                new_status="new", reason="First source observation", occurred_at=now,
-            ))
+            session.add(
+                FindingHistory(
+                    id=uuid.uuid4(),
+                    organization_id=organization_id,
+                    canonical_finding_id=finding.id,
+                    previous_status=None,
+                    new_status="new",
+                    reason="First source observation",
+                    occurred_at=now,
+                )
+            )
         elif _SEVERITY_RANK.get(alert.severity, 0) > _SEVERITY_RANK.get(finding.severity, 0):
             finding.severity = alert.severity
             finding.title = alert.title[:1000]
+        if finding.asset_id != asset.id:
+            old_asset = original_assets_by_id.get(finding.asset_id)
+            identity = alert_asset_identity(alert)
+            if (
+                old_asset is not None
+                and identity is not None
+                and old_asset.name == asset_storage_name(*identity)
+                and asset.name != old_asset.name
+            ):
+                finding.asset_id = asset.id
         finding.last_seen_at = now
         finding.absence_count = 0
         finding.cve_ids = [cve] if cve else []
@@ -220,13 +430,21 @@ async def ingest_external_alerts(
         source_observation = observations.get(key)
         if source_observation is None:
             source_observation = FindingObservation(
-                id=uuid.uuid4(), organization_id=organization_id,
-                canonical_finding_id=finding.id, provider=alert.provider,
-                external_id=alert.external_id, cve_id=cve, first_seen_at=now,
-                title=alert.title[:1000], severity=alert.severity,
-                source_status=alert.status, last_seen_at=now,
-                missing_sync_count=0, evidence=dict(alert.evidence or {}),
-                source_url=alert.source_url, source_record_id=alert.id,
+                id=uuid.uuid4(),
+                organization_id=organization_id,
+                canonical_finding_id=finding.id,
+                provider=alert.provider,
+                external_id=alert.external_id,
+                cve_id=cve,
+                first_seen_at=now,
+                title=alert.title[:1000],
+                severity=alert.severity,
+                source_status=alert.status,
+                last_seen_at=now,
+                missing_sync_count=0,
+                evidence=dict(alert.evidence or {}),
+                source_url=alert.source_url,
+                source_record_id=alert.id,
             )
             session.add(source_observation)
             observations[key] = source_observation
@@ -246,23 +464,34 @@ async def ingest_external_alerts(
     await session.flush()
     affected_ids = {item.id for item in findings.values()} | moved_from_ids
     old_findings = (
-        (await session.execute(
-            select(CanonicalFinding).where(
-                CanonicalFinding.organization_id == organization_id,
-                CanonicalFinding.id.in_(moved_from_ids),
-            ).with_for_update()
-        )).scalars().all()
-        if moved_from_ids else []
+        (
+            await session.execute(
+                select(CanonicalFinding)
+                .where(
+                    CanonicalFinding.organization_id == organization_id,
+                    CanonicalFinding.id.in_(moved_from_ids),
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+        if moved_from_ids
+        else []
     )
     affected_findings = {item.id: item for item in [*findings.values(), *old_findings]}
     all_observations = (
-        await session.execute(
-            select(FindingObservation).where(
-                FindingObservation.organization_id == organization_id,
-                FindingObservation.canonical_finding_id.in_(affected_ids),
+        (
+            await session.execute(
+                select(FindingObservation).where(
+                    FindingObservation.organization_id == organization_id,
+                    FindingObservation.canonical_finding_id.in_(affected_ids),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     states: dict[uuid.UUID, list[str]] = {}
     evidence_by_finding: dict[uuid.UUID, list[dict[str, Any]]] = {}
     for observation in all_observations:
@@ -273,10 +502,16 @@ async def ingest_external_alerts(
             )
     asset_ids = {item.asset_id for item in affected_findings.values()}
     scored_assets = (
-        await session.execute(
-            select(Asset).where(Asset.organization_id == organization_id, Asset.id.in_(asset_ids))
+        (
+            await session.execute(
+                select(Asset).where(
+                    Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                )
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     asset_by_id = {item.id: item for item in scored_assets}
     weights = load_policy(organization).risk_weights
     for finding in affected_findings.values():
@@ -290,28 +525,41 @@ async def ingest_external_alerts(
         # complete scans before closure.
         orphaned_by_move = finding.id in moved_from_ids and not active_source_states
         proposed = next_status(
-            finding.status, source_states,
-            complete=True, consecutive_absences=2 if orphaned_by_move else 0,
+            finding.status,
+            source_states,
+            complete=True,
+            consecutive_absences=2 if orphaned_by_move else 0,
         )
         if proposed != finding.status:
             prior = finding.status
             finding.status = proposed
             finding.status_version += 1
             finding.closed_at = now if proposed == "closed" else None
-            session.add(FindingHistory(
-                id=uuid.uuid4(), organization_id=organization_id,
-                canonical_finding_id=finding.id, previous_status=prior,
-                new_status=proposed,
-                reason="Source identity or CVE mapping changed" if orphaned_by_move
-                else "Source observation changed",
-                occurred_at=now,
-            ))
+            session.add(
+                FindingHistory(
+                    id=uuid.uuid4(),
+                    organization_id=organization_id,
+                    canonical_finding_id=finding.id,
+                    previous_status=prior,
+                    new_status=proposed,
+                    reason="Source identity or CVE mapping changed"
+                    if orphaned_by_move
+                    else "Source observation changed",
+                    occurred_at=now,
+                )
+            )
         if finding.status != "closed" and finding.asset_id in asset_by_id:
             finding.risk_score, finding.risk_factors = score_canonical(
                 finding.severity,
                 asset_by_id[finding.asset_id],
-                evidence_by_finding.get(finding.id, []),
+                [
+                    *evidence_by_finding.get(finding.id, []),
+                    *verified_intel_evidence(finding.intel_evidence or {}),
+                ],
                 weights,
+            )
+            finding.risk_factors = with_stale_intel_provenance(
+                finding.risk_factors, finding.intel_evidence or {}
             )
             finding.risk_policy_version = organization.risk_policy_version or 0
     return len(fingerprinted)
@@ -323,10 +571,17 @@ async def ingest_native_findings(
     """Project DefectDojo imports onto the same tenant-owned canonical model."""
     asset_ids = {finding.asset_id for finding in findings if finding.asset_id is not None}
     assets = (
-        (await session.execute(
-            select(Asset).where(Asset.organization_id == organization_id, Asset.id.in_(asset_ids))
-        )).scalars().all()
-        if asset_ids else []
+        (
+            await session.execute(
+                select(Asset).where(
+                    Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if asset_ids
+        else []
     )
     by_id = {asset.id: asset for asset in assets}
     projections: list[Any] = []
@@ -344,9 +599,13 @@ async def ingest_native_findings(
                 continue
             kind, value = identity
         state = {
-            "active": "open", "verified": "open", "mitigated": "fixed",
-            "false_positive": "false_positive", "risk_accepted": "accepted_risk",
-            "out_of_scope": "dismissed", "duplicate": "dismissed",
+            "active": "open",
+            "verified": "open",
+            "mitigated": "fixed",
+            "false_positive": "false_positive",
+            "risk_accepted": "accepted_risk",
+            "out_of_scope": "dismissed",
+            "duplicate": "dismissed",
         }.get(finding.status, finding.status)
         native_inputs = (getattr(finding, "risk_factors", None) or {}).get("inputs", {})
         if not isinstance(native_inputs, dict):
@@ -359,14 +618,21 @@ async def ingest_native_findings(
             "epss_score": native_inputs.get("epss_score"),
             "ransomware_use": native_inputs.get("ransomware_campaign_use"),
         }
-        projections.append(SimpleNamespace(
-            id=finding.id, organization_id=organization_id,
-            provider="defectdojo", external_id=str(finding.defectdojo_finding_id),
-            resource=asset.name if asset is not None else finding.endpoint,
-            evidence=evidence,
-            cve_ids=finding.cve_ids or [], title=finding.title,
-            severity=finding.severity, status=state, source_url=None,
-        ))
+        projections.append(
+            SimpleNamespace(
+                id=finding.id,
+                organization_id=organization_id,
+                provider="defectdojo",
+                external_id=str(finding.defectdojo_finding_id),
+                resource=asset.name if asset is not None else finding.endpoint,
+                evidence=evidence,
+                cve_ids=finding.cve_ids or [],
+                title=finding.title,
+                severity=finding.severity,
+                status=state,
+                source_url=None,
+            )
+        )
     return await ingest_external_alerts(
         session, organization_id, projections, asset_overrides=overrides
     )
@@ -428,56 +694,86 @@ async def reconcile_absent_observations(
             observation.source_status = "absent"
             newly_absent.add(observation.canonical_finding_id)
     await session.flush()
-    all_observations = (await session.execute(
-        select(FindingObservation).where(
-            FindingObservation.organization_id == organization_id,
-            FindingObservation.canonical_finding_id.in_(affected),
+    all_observations = (
+        (
+            await session.execute(
+                select(FindingObservation).where(
+                    FindingObservation.organization_id == organization_id,
+                    FindingObservation.canonical_finding_id.in_(affected),
+                )
+            )
         )
-    )).scalars().all()
+        .scalars()
+        .all()
+    )
     by_finding: dict[uuid.UUID, list[FindingObservation]] = {}
     for observation in all_observations:
         by_finding.setdefault(observation.canonical_finding_id, []).append(observation)
-    findings = (await session.execute(
-        select(CanonicalFinding).where(
-            CanonicalFinding.organization_id == organization_id,
-            CanonicalFinding.id.in_(affected),
-        ).with_for_update()
-    )).scalars().all()
+    findings = (
+        (
+            await session.execute(
+                select(CanonicalFinding)
+                .where(
+                    CanonicalFinding.organization_id == organization_id,
+                    CanonicalFinding.id.in_(affected),
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
     now = utcnow()
     for finding in findings:
         sources = by_finding.get(finding.id, [])
-        absence_count = min(
-            (item.missing_sync_count for item in sources), default=0
-        ) if sources and all(item.source_status == "absent" for item in sources) else 0
+        absence_count = (
+            min((item.missing_sync_count for item in sources), default=0)
+            if sources and all(item.source_status == "absent" for item in sources)
+            else 0
+        )
         finding.absence_count = absence_count
         proposed = next_status(
-            finding.status, [item.source_status for item in sources],
-            complete=True, consecutive_absences=absence_count,
+            finding.status,
+            [item.source_status for item in sources],
+            complete=True,
+            consecutive_absences=absence_count,
         )
         if proposed != finding.status:
             previous = finding.status
             finding.status = proposed
             finding.status_version += 1
             finding.closed_at = now if proposed == "closed" else None
-            session.add(FindingHistory(
-                id=uuid.uuid4(), organization_id=organization_id,
-                canonical_finding_id=finding.id, previous_status=previous,
-                new_status=proposed, reason="Absent from two complete scoped scans",
-                occurred_at=now,
-            ))
+            session.add(
+                FindingHistory(
+                    id=uuid.uuid4(),
+                    organization_id=organization_id,
+                    canonical_finding_id=finding.id,
+                    previous_status=previous,
+                    new_status=proposed,
+                    reason="Absent from two complete scoped scans",
+                    occurred_at=now,
+                )
+            )
     to_rescore = [
-        finding for finding in findings
-        if finding.id in newly_absent and finding.status != "closed"
+        finding for finding in findings if finding.id in newly_absent and finding.status != "closed"
     ]
     if to_rescore:
         asset_ids = {finding.asset_id for finding in to_rescore}
-        assets = (await session.execute(
-            select(Asset).where(Asset.organization_id == organization_id, Asset.id.in_(asset_ids))
-        )).scalars().all()
+        assets = (
+            (
+                await session.execute(
+                    select(Asset).where(
+                        Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         asset_by_id = {asset.id: asset for asset in assets}
-        organization = (await session.execute(
-            select(Organization).where(Organization.id == organization_id)
-        )).scalar_one()
+        organization = (
+            await session.execute(select(Organization).where(Organization.id == organization_id))
+        ).scalar_one()
         weights = load_policy(organization).risk_weights
         for finding in to_rescore:
             asset = asset_by_id.get(finding.asset_id)
@@ -489,7 +785,13 @@ async def reconcile_absent_observations(
                 if observation.source_status not in {"absent", "superseded"}
             ]
             finding.risk_score, finding.risk_factors = score_canonical(
-                finding.severity, asset, evidences, weights,
+                finding.severity,
+                asset,
+                [*evidences, *verified_intel_evidence(finding.intel_evidence or {})],
+                weights,
+            )
+            finding.risk_factors = with_stale_intel_provenance(
+                finding.risk_factors, finding.intel_evidence or {}
             )
             finding.risk_policy_version = organization.risk_policy_version
     return len(missing)

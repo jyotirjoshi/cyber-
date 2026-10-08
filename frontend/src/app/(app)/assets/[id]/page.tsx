@@ -7,13 +7,14 @@ import { Badge, CriticalityBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Field, Input, Select } from "@/components/ui/Input";
+import { Field, Input, Select, Textarea } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
 import { useApiResource, useMutation } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { parseCustomFields } from "@/lib/custom-fields";
 import { fieldError, getErrorMessage } from "@/lib/errors";
 import { formatDateTime, humanize } from "@/lib/format";
 import type { AssetEnvironment, AssetOut, Criticality } from "@/lib/types";
@@ -59,6 +60,7 @@ export default function AssetDetailPage() {
   const [ownerTeam, setOwnerTeam] = React.useState("");
   const [environment, setEnvironment] = React.useState<AssetEnvironment>("unknown");
   const [groups, setGroups] = React.useState("");
+  const [customFieldsText, setCustomFieldsText] = React.useState("{}");
 
   // Keep the criticality selector in sync with whatever the server currently reports.
   React.useEffect(() => {
@@ -67,6 +69,7 @@ export default function AssetDetailPage() {
       setOwnerTeam(data.owner_team ?? "");
       setEnvironment(data.environment);
       setGroups(data.groups.join(", "));
+      setCustomFieldsText(JSON.stringify(data.custom_fields ?? {}, null, 2));
     }
   }, [data]);
 
@@ -75,6 +78,7 @@ export default function AssetDetailPage() {
       owner_team: ownerTeam.trim() || null,
       environment,
       groups: groups.split(",").map((value) => value.trim()).filter(Boolean),
+      custom_fields: parseCustomFields(customFieldsText),
     }),
     {
       onSuccess: (result) => {
@@ -290,6 +294,7 @@ export default function AssetDetailPage() {
                 <Detail label="Owner team" value={asset.owner_team} />
                 <Detail label="Owner user ID" value={asset.owner_user_id} />
                 <Detail label="Groups" value={asset.groups.join(", ") || null} />
+                <div className="col-span-2"><dt className="text-xs font-medium text-muted">Custom fields</dt><dd className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-fg">{JSON.stringify(asset.custom_fields ?? {}, null, 2)}</dd></div>
               </dl>
               {canTag && (
                 <form className="space-y-3 border-t border-line pt-4" onSubmit={(e) => {
@@ -306,6 +311,9 @@ export default function AssetDetailPage() {
                   </Field>
                   <Field label="Groups (comma-separated)" htmlFor="asset-groups" error={fieldError(contextMut.error, "groups")}>
                     <Input id="asset-groups" value={groups} onChange={(e) => setGroups(e.target.value)} />
+                  </Field>
+                  <Field label="Custom fields (JSON, non-sensitive metadata only)" htmlFor="asset-custom-fields" error={fieldError(contextMut.error, "custom_fields")}>
+                    <Textarea id="asset-custom-fields" value={customFieldsText} onChange={(e) => setCustomFieldsText(e.target.value)} rows={4} />
                   </Field>
                   <InlineError message={contextMut.errorMessage} />
                   <Button type="submit" size="sm" loading={contextMut.loading}>Save context</Button>

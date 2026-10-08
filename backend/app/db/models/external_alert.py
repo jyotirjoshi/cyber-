@@ -73,7 +73,8 @@ class ExternalSecurityAlert(Base, TenantMixin, TimestampMixin):
             "organization_id", "provider", "external_id", name="unique_external_security_alert"
         ),
         CheckConstraint(
-            "severity IN ('critical','high','medium','low','info')", name="valid_external_alert_severity"
+            "severity IN ('critical','high','medium','low','info')",
+            name="valid_external_alert_severity",
         ),
         CheckConstraint(
             "status IN ('open','resolved','dismissed','fixed')", name="valid_external_alert_status"

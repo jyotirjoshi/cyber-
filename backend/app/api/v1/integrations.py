@@ -23,10 +23,14 @@ bodies are logged, never echoed (SEC-002).
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+import json
+from typing import Annotated
+
+from fastapi import APIRouter, File, Form, UploadFile
 
 from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
-from app.db.enums import IntegrationKind
+from app.core.errors import InvalidConfigurationError
+from app.db.enums import IntegrationKind, Permission
 from app.schemas.integration import (
     IntegrationHealthOut,
     IntegrationOut,
@@ -37,9 +41,55 @@ from app.schemas.integration import (
     TenableScanStatusOut,
 )
 from app.services import external_alert as external_alert_service
+from app.services import file_intake
 from app.services import integration as integration_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+@router.post("/imports/scan", response_model=dict[str, int])
+async def import_scan_export(
+    principal: PrincipalDep,
+    session: DbSession,
+    file: Annotated[UploadFile, File()],
+    format_name: Annotated[str, Form()],
+    provider: Annotated[str, Form()],
+    asset_type: Annotated[str, Form()],
+    asset_value: Annotated[str, Form()],
+    mapping_json: Annotated[str | None, Form()] = None,
+) -> dict[str, int]:
+    """Import bounded scanner and SBOM findings into the tenant's canonical model."""
+    principal.require(Permission.ASSESSMENT_CREATE)
+    data = await file.read(file_intake.MAX_IMPORT_BYTES + 1)
+    if len(data) > file_intake.MAX_IMPORT_BYTES:
+        raise InvalidConfigurationError(
+            "scanner export too large", user_message="Scanner export exceeds the 10 MB limit."
+        )
+    field_mapping = None
+    if mapping_json is not None:
+        if len(mapping_json) > 4096:
+            raise InvalidConfigurationError("generic field mapping is too large")
+        try:
+            field_mapping = json.loads(mapping_json)
+        except json.JSONDecodeError as exc:
+            raise InvalidConfigurationError("generic field mapping must be valid JSON") from exc
+        if not isinstance(field_mapping, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in field_mapping.items()
+        ):
+            raise InvalidConfigurationError("generic field mapping must be a string map")
+    count = await file_intake.stage_scan_export(
+        session,
+        principal,
+        data,
+        format_name=format_name,
+        provider=provider,
+        asset_type=asset_type,
+        asset_value=asset_value,
+        field_mapping=field_mapping,
+    )
+    await session.commit()
+    return {"findings_staged": count}
 
 
 @router.get("", response_model=list[IntegrationOut])
@@ -168,7 +218,10 @@ async def sync_snyk_issues(
 
 @router.post("/tenable/sync", response_model=IntegrationSyncOut)
 async def sync_tenable_vulnerabilities(
-    principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
 ) -> IntegrationSyncOut:
     """Ingest selected Tenable VM scan results into the private exposure ledger."""
     result = await external_alert_service.sync_tenable_vulnerabilities(
@@ -180,8 +233,11 @@ async def sync_tenable_vulnerabilities(
 
 @router.get("/tenable/scans/{scan_id}/status", response_model=TenableScanStatusOut)
 async def tenable_scan_status(
-    scan_id: str, principal: PrincipalDep, session: DbSession,
-    settings: SettingsDep, redis: RedisDep,
+    scan_id: str,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
 ) -> TenableScanStatusOut:
     status = await integration_service.tenable_scan_status(
         session, principal, scan_id, settings=settings, redis=redis
@@ -191,8 +247,11 @@ async def tenable_scan_status(
 
 @router.post("/tenable/scans/{scan_id}/launch", response_model=TenableScanLaunchOut)
 async def launch_tenable_scan(
-    scan_id: str, principal: PrincipalDep, session: DbSession,
-    settings: SettingsDep, redis: RedisDep,
+    scan_id: str,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
 ) -> TenableScanLaunchOut:
     """Launch a previously saved Tenable scan using its configured targets only."""
     run_uuid = await integration_service.launch_tenable_scan(

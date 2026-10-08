@@ -35,7 +35,7 @@ idempotent too: ``transition`` is a no-op when the assessment is already ``compl
 ``dispatch`` deduplicates the notification, so re-running this node changes nothing twice.
 
 **Completion and its announcement are one transaction.**  The ``remediating -> completed``
-transition, the final :func:`app.services.assessment.refresh_counters` recompute, and the
+transition, the final unified finding-count recompute, and the
 :func:`app.services.notification.notify_assessment_completed` alert all commit together, so
 "the assessment is complete" and "the operator was told" are atomic -- a completed assessment
 the owner was never notified about, or an alert for a completion that did not persist, are
@@ -68,6 +68,7 @@ from app.db.enums import AssessmentStage, AssessmentStatus, ReportFormat
 from app.db.models.assessment import Assessment
 from app.db.session import session_scope
 from app.reporting.generate import generate
+from app.services.agent_action import complete_assessment_action_receipt
 from app.services.assessment import refresh_counters, transition
 from app.services.context import Principal
 from app.services.notification import notify_assessment_completed
@@ -216,8 +217,8 @@ async def _complete(
 
     The transition, the final counter recompute and the completion notification share one
     transaction so the assessment cannot be marked complete without the alert being recorded,
-    nor an alert sent for a completion that did not persist.  ``refresh_counters`` is the one
-    authoritative writer of the denormalized finding counts, run here so the completed
+    nor an alert sent for a completion that did not persist. The unified counter is
+    run here so the completed
     assessment's dashboard tiles and the alert's "N critical, N high" line agree with the
     findings table.  The target is named in the alert (its subject) and is loaded eagerly for
     that; it is never logged.
@@ -231,6 +232,18 @@ async def _complete(
         counts = _severity_counts(assessment)
         degraded = bool(assessment.degradations)
         findings_total = assessment.findings_total
+        try:
+            async with session.begin_nested():
+                await complete_assessment_action_receipt(
+                    session, assessment, state_uuid(state, "run_id")
+                )
+        except Exception as exc:
+            # A transcript failure must not undo the verified assessment and report.
+            log.warning(
+                "agent.report.action_receipt_failed",
+                assessment_id=str(assessment.id),
+                error_type=type(exc).__name__,
+            )
         await notify_assessment_completed(
             session,
             principal,

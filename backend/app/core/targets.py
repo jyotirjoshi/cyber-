@@ -35,6 +35,7 @@ class TargetType(str, enum.Enum):
     CIDR = "cidr"
     REPOSITORY = "repository"
     CONTAINER_IMAGE = "container_image"
+    CLOUD_ACCOUNT = "cloud_account"
 
 
 # --- grammars ---------------------------------------------------------------
@@ -46,12 +47,24 @@ _REPO_RE = re.compile(
     r"(?P<host>github\.com|gitlab\.com|bitbucket\.org|[A-Za-z0-9.\-]+\.[A-Za-z]{2,})"
     r"[:/](?P<owner>[A-Za-z0-9_.\-]+)/(?P<repo>[A-Za-z0-9_.\-]+?)(?:\.git)?/?$"
 )
+_KNOWN_GIT_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
 _IMAGE_RE = re.compile(
     r"^(?:(?P<registry>[A-Za-z0-9.\-]+(?::\d+)?)/)?"
     r"(?P<path>[a-z0-9]+(?:[._\-/][a-z0-9]+)*)"
     r"(?::(?P<tag>[A-Za-z0-9_][A-Za-z0-9._\-]{0,127}))?"
     r"(?:@sha256:(?P<digest>[a-f0-9]{64}))?$"
 )
+_AWS_ACCOUNT_RE = re.compile(r"^aws:(?P<account>\d{12})$", re.I)
+_AZURE_ACCOUNT_RE = re.compile(
+    r"^azure:(?P<account>[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$",
+    re.I,
+)
+_GCP_ACCOUNT_RE = re.compile(r"^gcp:(?P<account>[a-z][a-z0-9-]{4,28}[a-z0-9])$", re.I)
+_CLOUD_ACCOUNT_RE = {
+    "aws": _AWS_ACCOUNT_RE,
+    "azure": _AZURE_ACCOUNT_RE,
+    "gcp": _GCP_ACCOUNT_RE,
+}
 
 #: Anything containing one of these is rejected outright, before classification.
 #: The canonical forms produced here are also passed to Docker as an argv list
@@ -111,9 +124,21 @@ def classify(raw: str) -> TargetType:
     if not value:
         raise InvalidTargetError(user_message="Enter a target to assess.")
 
+    if value.lower().startswith(("aws:", "azure:", "gcp:")):
+        provider = value.split(":", 1)[0].lower()
+        match = _CLOUD_ACCOUNT_RE[provider].fullmatch(value)
+        if match is None or (
+            provider == "gcp" and match.group("account") != match.group("account").lower()
+        ):
+            raise InvalidTargetError(user_message="Use a valid cloud account target.")
+        return TargetType.CLOUD_ACCOUNT
+
     if "://" in value and not value.startswith("git@"):
         scheme = value.split("://", 1)[0].lower()
         if scheme in ("http", "https"):
+            repo_match = _REPO_RE.fullmatch(value)
+            if repo_match and repo_match.group("host").lower() in _KNOWN_GIT_HOSTS:
+                return TargetType.REPOSITORY
             return TargetType.URL
         if scheme in ("git", "ssh"):
             return TargetType.REPOSITORY
@@ -181,6 +206,8 @@ def validate_target(raw: str, policy: TargetPolicySettings) -> ValidatedTarget:
 
     ttype = classify(value)
     target = _build[ttype](value)
+    if ttype in {TargetType.REPOSITORY, TargetType.CONTAINER_IMAGE} and len(target.canonical) > 512:
+        raise InvalidTargetError(user_message="That repository or image reference is too long.")
     _enforce_policy(target, policy)
     return target
 
@@ -290,6 +317,14 @@ def _build_image(value: str) -> ValidatedTarget:
         )
     registry = (match.group("registry") or "docker.io").lower()
     path = match.group("path")
+    if (
+        registry != "docker.io"
+        and "." not in registry
+        and ":" not in registry
+        and registry != "localhost"
+    ):
+        path = f"{registry}/{path}"
+        registry = "docker.io"
     tag = match.group("tag") or ("" if match.group("digest") else "latest")
     digest = match.group("digest")
     canonical = f"{registry}/{path}"
@@ -306,6 +341,25 @@ def _build_image(value: str) -> ValidatedTarget:
     )
 
 
+def _build_cloud_account(value: str) -> ValidatedTarget:
+    provider = value.split(":", 1)[0].lower()
+    pattern = _CLOUD_ACCOUNT_RE.get(provider)
+    match = pattern.fullmatch(value) if pattern else None
+    if match is None or (
+        provider == "gcp" and match.group("account") != match.group("account").lower()
+    ):
+        raise InvalidTargetError(user_message="Use a valid cloud account target.")
+    account = match.group("account").lower()
+    canonical = f"{provider}:{account}"
+    return ValidatedTarget(
+        raw=value,
+        type=TargetType.CLOUD_ACCOUNT,
+        canonical=canonical,
+        host=canonical,
+        metadata={"provider": provider, "account_id": account},
+    )
+
+
 _build = {
     TargetType.URL: _build_url,
     TargetType.CIDR: _build_cidr,
@@ -313,6 +367,7 @@ _build = {
     TargetType.DOMAIN: _build_domain,
     TargetType.REPOSITORY: _build_repository,
     TargetType.CONTAINER_IMAGE: _build_image,
+    TargetType.CLOUD_ACCOUNT: _build_cloud_account,
 }
 
 

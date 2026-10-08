@@ -45,7 +45,9 @@ async def test_worker_graph_resolves_llm_settings_for_the_run_organization(
     async def fake_session_scope(_settings: Settings):
         yield object()
 
-    async def fake_resolve_settings(session: object, principal: object, kind: object, **kwargs: object) -> Settings:
+    async def fake_resolve_settings(
+        session: object, principal: object, kind: object, **kwargs: object
+    ) -> Settings:
         captured.update({"session": session, "principal": principal, "kind": kind})
         return settings
 
@@ -56,7 +58,9 @@ async def test_worker_graph_resolves_llm_settings_for_the_run_organization(
         return graph
 
     monkeypatch.setattr(runner_module, "session_scope", fake_session_scope)
-    monkeypatch.setattr(runner_module.integration_service, "resolve_settings", fake_resolve_settings)
+    monkeypatch.setattr(
+        runner_module.integration_service, "resolve_settings", fake_resolve_settings
+    )
     monkeypatch.setattr(runner_module, "build_graph", fake_build_graph)
 
     assert await runner._graph_for_organization(organization_id) is graph

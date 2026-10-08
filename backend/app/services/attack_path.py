@@ -56,6 +56,7 @@ _MIN_SEVERITY_RANK = 1  # LOW and above
 
 class AttackStep(BaseModel):
     """One step in an attack path."""
+
     technique_id: str = Field(default="", max_length=20)
     technique_name: str = Field(default="", max_length=200)
     description: str = Field(default="", max_length=1000)
@@ -150,9 +151,7 @@ async def generate_attack_paths(
         return []
 
 
-async def _load_candidate_findings(
-    session: AsyncSession, assessment: Assessment
-) -> list[Finding]:
+async def _load_candidate_findings(session: AsyncSession, assessment: Assessment) -> list[Finding]:
     """Load high-priority findings with enrichment eagerly loaded."""
     stmt = (
         select(Finding)

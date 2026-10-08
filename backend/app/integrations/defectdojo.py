@@ -55,6 +55,11 @@ SCAN_TYPES: dict[ScannerName, str] = {
     ScannerName.NMAP: "Nmap Scan",
     ScannerName.NUCLEI: "Nuclei Scan",
     ScannerName.ZAP: "ZAP Scan",
+    ScannerName.TRIVY_REPO: "Trivy Scan",
+    ScannerName.SEMGREP_REPO: "SARIF",
+    ScannerName.GITLEAKS_REPO: "Gitleaks Scan",
+    ScannerName.TRIVY_IMAGE: "Trivy Scan",
+    ScannerName.SYFT_IMAGE: "CycloneDX Scan",
 }
 
 #: DefectDojo's severity vocabulary, mapped onto ours. Anything unrecognised becomes

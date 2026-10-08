@@ -70,6 +70,14 @@ export type AssessmentStage =
   | "scanning_nmap"
   | "scanning_nuclei"
   | "scanning_zap"
+  | "scanning_trivy_repo"
+  | "scanning_semgrep_repo"
+  | "scanning_gitleaks_repo"
+  | "scanning_trivy_image"
+  | "scanning_syft_image"
+  | "scanning_prowler_aws"
+  | "scanning_prowler_azure"
+  | "scanning_prowler_gcp"
   | "importing_findings"
   | "threat_intelligence"
   | "ai_analysis"
@@ -91,6 +99,14 @@ export const STAGE_ORDER: readonly AssessmentStage[] = [
   "scanning_nmap",
   "scanning_nuclei",
   "scanning_zap",
+  "scanning_trivy_repo",
+  "scanning_semgrep_repo",
+  "scanning_gitleaks_repo",
+  "scanning_trivy_image",
+  "scanning_syft_image",
+  "scanning_prowler_aws",
+  "scanning_prowler_azure",
+  "scanning_prowler_gcp",
   "importing_findings",
   "threat_intelligence",
   "ai_analysis",
@@ -113,6 +129,14 @@ export const STAGE_LABELS: Record<AssessmentStage, string> = {
   scanning_nmap: "Scanning — Nmap",
   scanning_nuclei: "Scanning — Nuclei",
   scanning_zap: "Scanning — ZAP",
+  scanning_trivy_repo: "Scanning — Trivy repository",
+  scanning_semgrep_repo: "Scanning — Semgrep source code",
+  scanning_gitleaks_repo: "Scanning — Gitleaks secrets",
+  scanning_trivy_image: "Scanning — Trivy image",
+  scanning_syft_image: "Inventorying — Syft image SBOM",
+  scanning_prowler_aws: "Scanning — Prowler AWS",
+  scanning_prowler_azure: "Scanning — Prowler Azure",
+  scanning_prowler_gcp: "Scanning — Prowler GCP",
   importing_findings: "Importing findings",
   threat_intelligence: "Threat intelligence",
   ai_analysis: "AI analysis",
@@ -154,11 +178,12 @@ export type Criticality = "critical" | "high" | "normal" | "low" | "unknown";
 
 export type CriticalitySource =
   | "operator_tag"
+  | "cmdb"
   | "inferred_keyword"
   | "inferred_exposure"
   | "default";
 
-export type ScannerName = "reconftw" | "nmap" | "nuclei" | "zap";
+export type ScannerName = "reconftw" | "nmap" | "nuclei" | "zap" | "trivy_repo" | "semgrep_repo" | "gitleaks_repo" | "trivy_image" | "syft_image";
 
 export type JobStatus =
   | "QUEUED"
@@ -244,10 +269,14 @@ export type IntegrationKind =
   | "nvd"
   | "github"
   | "gitlab"
+  | "bitbucket"
   | "wazuh"
   | "sonarqube"
   | "snyk"
-  | "tenable";
+  | "tenable"
+  | "prowler_aws"
+  | "prowler_azure"
+  | "prowler_gcp";
 
 export type IntegrationStatus = "configured" | "unverified" | "error" | "disabled";
 
@@ -467,6 +496,9 @@ export interface AssessmentCreateIn {
   engagement_type?: EngagementType;
   execution_mode?: ExecutionMode;
   objective?: string | null;
+  api_spec?: Record<string, unknown>;
+  api_target?: string;
+  api_auth_token?: string;
   authorization: AuthorizationIn;
   notify?: string[];
 }
@@ -644,6 +676,7 @@ export interface AssetOut {
   owner_team: string | null;
   environment: AssetEnvironment;
   groups: string[];
+  custom_fields: Record<string, string | number | boolean>;
   risk_score: number;
   selected_for_scanning: boolean;
   selection_rationale: string | null;
@@ -655,6 +688,62 @@ export interface AssetOut {
   created_at: IsoDateTime;
 }
 
+export interface CmdbImportOut {
+  dry_run: boolean;
+  matched: number;
+  updated: number;
+  unmatched: string[];
+}
+
+export interface AssetChangeOut {
+  id: Uuid;
+  asset_id: Uuid;
+  assessment_id: Uuid | null;
+  asset_name: string;
+  change_type: "discovered" | "changed";
+  changes: Record<string, { old: unknown; new: unknown }>;
+  created_at: IsoDateTime;
+}
+
+export interface AssetChangePageOut {
+  items: AssetChangeOut[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ApplicationRiskOut {
+  application: string;
+  asset_count: number;
+  active_findings: number;
+  critical: number;
+  high: number;
+  max_risk_score: number;
+}
+
+export interface ApplicationRiskPageOut {
+  items: ApplicationRiskOut[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ApplicationPatternOut {
+  key: string;
+  confidence: "cve" | "rule";
+  repository_count: number;
+  repositories: string[];
+  finding_ids: Uuid[];
+  max_risk_score: number;
+}
+
+export interface ApplicationPatternsOut {
+  application: string;
+  patterns: ApplicationPatternOut[];
+  findings_sampled: number;
+  truncated: boolean;
+}
+
 export type AssetEnvironment = "unknown" | "production" | "staging" | "development" | "test";
 
 export interface AssetContextIn {
@@ -662,6 +751,7 @@ export interface AssetContextIn {
   owner_team?: string | null;
   environment?: AssetEnvironment;
   groups?: string[];
+  custom_fields?: Record<string, string | number | boolean>;
 }
 
 export interface AssetCriticalityIn {
@@ -792,6 +882,7 @@ export interface CanonicalFindingOut {
   assignee_user_id: Uuid | null;
   due_at: IsoDateTime | null;
   remediation_plan: string | null;
+  custom_fields: Record<string, string | number | boolean>;
 }
 
 export interface CanonicalObservationOut {
@@ -833,6 +924,7 @@ export interface CanonicalWorkIn {
   assignee_user_id?: Uuid | null;
   due_at?: IsoDateTime | null;
   remediation_plan?: string | null;
+  custom_fields?: Record<string, string | number | boolean>;
 }
 
 export interface ExposureFilter {
@@ -1249,12 +1341,29 @@ export type AgentActionName =
   | "sync_tenable_vulnerabilities"
   | "update_github_alert"
   | "create_jira_ticket"
-  | "update_canonical_work";
+  | "update_canonical_work"
+  | "start_assessment";
+
+export interface AssessmentWorkOut {
+  id: Uuid;
+  status: string;
+  current_stage: string;
+  progress_percent: number;
+  findings_total: number;
+  findings_critical: number;
+  findings_high: number;
+  assets_discovered: number;
+  coverage_gap_count: number;
+  failure_reason: string;
+}
 
 export interface AgentActionOut {
   id: Uuid;
   session_id: Uuid;
   run_id: Uuid | null;
+  depends_on_action_id: Uuid | null;
+  run_status: string | null;
+  assessment: AssessmentWorkOut | null;
   action: AgentActionName;
   label: string;
   rationale: string | null;

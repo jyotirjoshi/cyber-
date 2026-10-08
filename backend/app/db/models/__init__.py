@@ -23,9 +23,14 @@ from app.db.models.assessment import (
     RecurringScan,
     ScanProfile,
 )
-from app.db.models.asset import Asset, AssetTag
+from app.db.models.asset import Asset, AssetChange, AssetTag
 from app.db.models.audit import AuditEvent
-from app.db.models.canonical import CanonicalFinding, FindingHistory, FindingObservation
+from app.db.models.canonical import (
+    AssessmentCanonicalFinding,
+    CanonicalFinding,
+    FindingHistory,
+    FindingObservation,
+)
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment, Remediation, TicketLink
 from app.db.models.identity import Membership, Organization, PasswordResetToken, User
@@ -45,8 +50,10 @@ __all__ = [
     "Assessment",
     "AssessmentTarget",
     "Asset",
+    "AssetChange",
     "AssetTag",
     "CanonicalFinding",
+    "AssessmentCanonicalFinding",
     "AuditEvent",
     "ExternalSecurityAlert",
     "AuthorizationRecord",

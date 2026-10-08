@@ -26,5 +26,10 @@ def test_second_complete_missing_scan_closes() -> None:
 
 
 def test_analyst_disposition_is_not_overwritten_by_sync() -> None:
-    assert next_status("accepted_risk", ["open"], complete=True, consecutive_absences=0) == "accepted_risk"
-    assert next_status("false_positive", [], complete=True, consecutive_absences=2) == "false_positive"
+    assert (
+        next_status("accepted_risk", ["open"], complete=True, consecutive_absences=0)
+        == "accepted_risk"
+    )
+    assert (
+        next_status("false_positive", [], complete=True, consecutive_absences=2) == "false_positive"
+    )

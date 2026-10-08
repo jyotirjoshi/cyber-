@@ -49,12 +49,19 @@ async def test_configuration_preflight_does_not_mark_credential_used(monkeypatch
 
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
     credential = SimpleNamespace(
-        id=uuid.uuid4(), name="api_token", ciphertext=b"cipher", key_version=1,
+        id=uuid.uuid4(),
+        name="api_token",
+        ciphertext=b"cipher",
+        key_version=1,
         last_used_at=None,
     )
     integration = SimpleNamespace(
-        kind_enum=IntegrationKind.GITHUB, is_usable=True, name="GitHub",
-        credentials=[credential], base_url=None, config={"organization": "acme"},
+        kind_enum=IntegrationKind.GITHUB,
+        is_usable=True,
+        name="GitHub",
+        credentials=[credential],
+        base_url=None,
+        config={"organization": "acme"},
     )
 
     class _Session:
@@ -63,8 +70,12 @@ async def test_configuration_preflight_does_not_mark_credential_used(monkeypatch
 
     monkeypatch.setattr(service, "_decrypt", lambda *_args, **_kwargs: Secret("test-token"))
     scoped = await service.resolve_settings(
-        _Session(), principal, IntegrationKind.GITHUB,
-        settings=Settings(github={"api_token": None}), require=True, mark_used=False,
+        _Session(),
+        principal,
+        IntegrationKind.GITHUB,
+        settings=Settings(github={"api_token": None}),
+        require=True,
+        mark_used=False,
     )
     assert scoped.github.api_token.get_secret_value() == "test-token"
     assert scoped.github.organization == "acme"

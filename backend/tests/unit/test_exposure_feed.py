@@ -71,7 +71,9 @@ async def test_exposure_feed_filters_source_and_severity_after_union() -> None:
     session = _Session()
     await list_exposures(session, principal, source="sonarqube", severity="high")
     for statement in session.statements:
-        sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        sql = str(
+            statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
         assert "exposures.source = 'sonarqube'" in sql
         assert "exposures.severity = 'high'" in sql
 

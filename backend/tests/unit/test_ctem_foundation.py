@@ -9,7 +9,9 @@ from app.schemas.finding import ValidateFindingIn
 
 
 def test_assessments_default_to_authorized_supervised_web_engagements() -> None:
-    assert Assessment.__table__.c.engagement_type.default.arg == EngagementType.WEB_APPLICATION.value
+    assert (
+        Assessment.__table__.c.engagement_type.default.arg == EngagementType.WEB_APPLICATION.value
+    )
     assert Assessment.__table__.c.execution_mode.default.arg == ExecutionMode.SUPERVISED.value
 
 

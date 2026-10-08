@@ -32,9 +32,17 @@ async def test_work_assignment_sets_owner_due_plan_and_records_history() -> None
     org_id = uuid.uuid4()
     owner_id = uuid.uuid4()
     finding = CanonicalFinding(
-        id=uuid.uuid4(), organization_id=org_id, asset_id=uuid.uuid4(),
-        fingerprint="a" * 64, title="Risk", severity="high", status="open",
-        cve_ids=[], risk_score=40.0, risk_factors={}, status_version=2,
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        asset_id=uuid.uuid4(),
+        fingerprint="a" * 64,
+        title="Risk",
+        severity="high",
+        status="open",
+        cve_ids=[],
+        risk_score=40.0,
+        risk_factors={},
+        status_version=2,
     )
     due_at = dt.datetime.now(dt.UTC) + dt.timedelta(days=7)
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.SECURITY_ENGINEER)
@@ -48,9 +56,15 @@ async def test_work_assignment_sets_owner_due_plan_and_records_history() -> None
 
     with patch("app.services.canonical_work.audit_service.record", new_callable=AsyncMock):
         result = await update_work(
-            session, principal, finding.id,
-            CanonicalWorkIn(expected_version=2, assignee_user_id=owner_id,
-                            due_at=due_at, remediation_plan="Upgrade affected package"),
+            session,
+            principal,
+            finding.id,
+            CanonicalWorkIn(
+                expected_version=2,
+                assignee_user_id=owner_id,
+                due_at=due_at,
+                remediation_plan="Upgrade affected package",
+            ),
         )
 
     assert result is finding
@@ -65,8 +79,13 @@ async def test_work_assignment_sets_owner_due_plan_and_records_history() -> None
 async def test_assignment_rejects_nonmember_and_stale_edit() -> None:
     org_id = uuid.uuid4()
     finding = CanonicalFinding(
-        id=uuid.uuid4(), organization_id=org_id, asset_id=uuid.uuid4(),
-        fingerprint="b" * 64, title="Risk", severity="high", status="open",
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        asset_id=uuid.uuid4(),
+        fingerprint="b" * 64,
+        title="Risk",
+        severity="high",
+        status="open",
         status_version=4,
     )
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.SECURITY_ENGINEER)
@@ -77,11 +96,19 @@ async def test_assignment_rejects_nonmember_and_stale_edit() -> None:
     missing_member.scalar_one_or_none.return_value = None
     session.execute.side_effect = [finding_rows, missing_member]
     with pytest.raises(InvalidConfigurationError):
-        await update_work(session, principal, finding.id,
-                          CanonicalWorkIn(expected_version=4, assignee_user_id=uuid.uuid4()))
+        await update_work(
+            session,
+            principal,
+            finding.id,
+            CanonicalWorkIn(expected_version=4, assignee_user_id=uuid.uuid4()),
+        )
     assert finding.status_version == 4
 
     session.execute.side_effect = [finding_rows]
     with pytest.raises(ConflictError):
-        await update_work(session, principal, finding.id,
-                          CanonicalWorkIn(expected_version=3, remediation_plan="Patch"))
+        await update_work(
+            session,
+            principal,
+            finding.id,
+            CanonicalWorkIn(expected_version=3, remediation_plan="Patch"),
+        )

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import structlog
@@ -34,6 +34,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
 from app.core.errors import ConflictError, UserError
+from app.core.targets import TargetType, classify
 from app.db.enums import (
     AssetEnvironment,
     AssetStatus,
@@ -42,13 +43,14 @@ from app.db.enums import (
     Permission,
 )
 from app.db.models.assessment import Assessment
-from app.db.models.asset import Asset, AssetTag
+from app.db.models.asset import Asset, AssetChange, AssetTag
 from app.db.models.identity import Membership, Organization
 from app.db.repository import TenantRepository, tenant_select
 from app.scanners.recon_assets import DiscoveredAsset
 from app.schemas.asset import AssetContextIn, AssetCriticalityIn, AssetFilter, AssetTagIn
 from app.schemas.common import PaginationParams
 from app.services import audit as audit_service
+from app.services.canonical_identity import asset_storage_name, normalized_asset_identity
 from app.services.context import Principal
 from app.services.entitlements import assert_asset_capacity, load_entitlements
 
@@ -105,6 +107,24 @@ _NOTABLE_PORTS: dict[int, float] = {
 #: year; the recent ones answer "is this still live", which is what the column is for.
 _MAX_SEEN_HISTORY = 50
 _ASSET_LOOKUP_BATCH = 1_000
+_OBSERVED_FIELDS = (
+    "name",
+    "ip_address",
+    "service",
+    "technology",
+    "http_title",
+    "http_status_code",
+    "tls_subject",
+    "internet_exposed",
+    "status",
+)
+
+
+def _observed_snapshot(asset: Asset) -> dict[str, Any]:
+    return {
+        key: list(value) if isinstance(value := getattr(asset, key), list) else value
+        for key in _OBSERVED_FIELDS
+    }
 
 
 async def upsert_assets(
@@ -138,7 +158,12 @@ async def upsert_assets(
             .with_for_update()
         )
     ).scalar_one()
-    existing = await _load_by_keys(session, assessment.organization_id, keys)
+    existing = await _load_by_keys(
+        session,
+        assessment.organization_id,
+        keys,
+        asset_types={record.key: record.asset_type for record in merged},
+    )
     assert_asset_capacity(
         current_assets=await _count_organization_assets(session, assessment.organization_id),
         new_assets=_new_asset_count(merged, existing),
@@ -149,6 +174,7 @@ async def upsert_assets(
     assessment_id = str(assessment.id)
     touched: list[Asset] = []
     exposure_changed = False
+    changes: list[AssetChange] = []
 
     for record in merged:
         key = (record.name, record.port, record.protocol)
@@ -156,6 +182,7 @@ async def upsert_assets(
         is_existing = asset is not None
         if asset is None:
             asset = Asset(
+                id=uuid.uuid4(),
                 organization_id=assessment.organization_id,
                 assessment_id=assessment.id,
                 name=record.name[:512],
@@ -170,14 +197,37 @@ async def upsert_assets(
             )
             session.add(asset)
             existing[key] = asset
-
+        before = _observed_snapshot(asset) if is_existing else None
+        already_seen = is_existing and assessment_id in (asset.seen_in_assessments or [])
+        if is_existing and asset.name != record.name:
+            asset.name = record.name
         was_exposed = bool(asset.internet_exposed)
         _apply_record(asset, record, assessment_id=assessment_id, now=now)
         exposure_changed |= is_existing and was_exposed != bool(asset.internet_exposed)
+        if not already_seen:
+            after = _observed_snapshot(asset)
+            delta = {
+                key: {"old": before[key], "new": value}
+                for key, value in after.items()
+                if before is not None and before[key] != value
+            }
+            if not is_existing or delta:
+                changes.append(
+                    AssetChange(
+                        organization_id=assessment.organization_id,
+                        assessment_id=assessment.id,
+                        asset_id=asset.id,
+                        change_type="changed" if is_existing else "discovered",
+                        changes=delta,
+                    )
+                )
         touched.append(asset)
 
     if exposure_changed:
         organization.risk_policy_version += 1
+
+    for change in changes:
+        session.add(change)
 
     # Flushed so ``asset.id`` is available to the caller -- the approval payload is built
     # from these ids, and a pending row has none.
@@ -327,6 +377,13 @@ async def infer_criticality(
             criticality,
             CriticalitySource.OPERATOR_TAG,
             f"Operator tag {tag} marks this asset {criticality.value}.",
+        )
+
+    if asset.criticality_source == CriticalitySource.CMDB.value:
+        return (
+            asset.criticality_enum,
+            CriticalitySource.CMDB,
+            asset.criticality_rationale or "Imported from CMDB business tier.",
         )
 
     keyword = _matched_keyword(asset.name, settings.agent.criticality_keywords)
@@ -479,13 +536,21 @@ async def set_asset_context(
     for name in changes:
         value = getattr(payload, name)
         setattr(asset, name, value.value if name == "environment" else value)
+    audit_before = {
+        key: sorted(value) if key == "custom_fields" and isinstance(value, dict) else value
+        for key, value in previous.items()
+    }
+    audit_after = {
+        key: sorted(value) if key == "custom_fields" and isinstance(value, dict) else value
+        for key, value in changes.items()
+    }
     await audit_service.record(
         session,
         action=audit_service.AuditAction.ASSET_CONTEXT_SET,
         principal=principal,
         resource_type="asset",
         resource_id=asset.id,
-        detail={"before": previous, "after": changes},
+        detail={"before": audit_before, "after": audit_after},
     )
     return asset
 
@@ -674,6 +739,8 @@ async def _load_by_keys(
     session: AsyncSession,
     organization_id: uuid.UUID,
     keys: set[tuple[str, int | None, str | None]],
+    *,
+    asset_types: Mapping[tuple[str, int | None, str | None], str] | None = None,
 ) -> dict[tuple[str, int | None, str | None], Asset]:
     """Existing inventory rows for the discovered keys, indexed by key.
 
@@ -682,15 +749,48 @@ async def _load_by_keys(
     query would be one round trip per discovered host -- thousands, for a large recon run.
     """
     names = {name for name, _, _ in keys}
+    aliases: dict[str, list[tuple[str, int | None, str | None]]] = {}
+    for name, port, protocol in keys:
+        if port is not None or protocol is not None:
+            continue
+        try:
+            raw_type = (asset_types or {}).get((name, port, protocol))
+            kind = (
+                TargetType(raw_type)
+                if raw_type
+                in {
+                    TargetType.REPOSITORY.value,
+                    TargetType.CONTAINER_IMAGE.value,
+                }
+                else classify(name)
+            )
+            if kind not in {TargetType.REPOSITORY, TargetType.CONTAINER_IMAGE}:
+                continue
+            identity_kind, value = normalized_asset_identity(kind.value, name)
+        except ValueError:
+            continue
+        alias = asset_storage_name(identity_kind, value)
+        aliases.setdefault(alias, []).append((name, port, protocol))
+        names.add(alias)
     if not names:
         return {}
     found: dict[tuple[str, int | None, str | None], Asset] = {}
+    found_aliases: dict[str, Asset] = {}
     ordered_names = sorted(names)
     for offset in range(0, len(ordered_names), _ASSET_LOOKUP_BATCH):
         batch = ordered_names[offset : offset + _ASSET_LOOKUP_BATCH]
         stmt = tenant_select(Asset, organization_id).where(Asset.name.in_(batch))
         for row in (await session.execute(stmt)).scalars().all():
-            found[(row.name, row.port, row.protocol)] = row
+            if getattr(row, "organization_id", organization_id) != organization_id:
+                continue
+            exact = (row.name, row.port, row.protocol)
+            if exact in keys:
+                found[exact] = row
+            elif row.name in aliases and row.port is None and row.protocol is None:
+                found_aliases[row.name] = row
+    for alias, candidates in aliases.items():
+        if len(candidates) == 1 and candidates[0] not in found and alias in found_aliases:
+            found[candidates[0]] = found_aliases[alias]
     return found
 
 
@@ -719,7 +819,8 @@ def _apply_record(
     )
     asset.tls_subject = record.tls_subject or asset.tls_subject
     asset.internet_exposed = asset.internet_exposed or record.internet_exposed
-    asset.status = record.status or asset.status
+    if asset.status != AssetStatus.OUT_OF_SCOPE.value:
+        asset.status = record.status or asset.status
 
     if record.technology:
         # Ordered dedup: the display order is the order things were first detected.
@@ -873,7 +974,9 @@ async def _count_organization_assets(session: AsyncSession, organization_id: uui
     return int(
         (
             await session.execute(
-                select(func.count()).select_from(Asset).where(Asset.organization_id == organization_id)
+                select(func.count())
+                .select_from(Asset)
+                .where(Asset.organization_id == organization_id)
             )
         ).scalar_one()
     )

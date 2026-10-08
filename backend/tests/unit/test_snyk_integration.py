@@ -29,18 +29,25 @@ class _Transport:
 async def test_snyk_reads_all_pages_with_tenant_token_and_org_scope(monkeypatch) -> None:
     from app.integrations.snyk import SnykClient
 
-    transport = _Transport([
-        {"data": [{"id": "one", "attributes": {"title": "First"}}],
-         "links": {"next": f"/rest/orgs/{ORG_ID}/issues?version=2024-10-15&page[after]=next"}},
-        {"data": [{"id": "two", "attributes": {"title": "Second"}}],
-         "links": {"next": None}},
-    ])
+    transport = _Transport(
+        [
+            {
+                "data": [{"id": "one", "attributes": {"title": "First"}}],
+                "links": {
+                    "next": f"/rest/orgs/{ORG_ID}/issues?version=2024-10-15&page[after]=next"
+                },
+            },
+            {"data": [{"id": "two", "attributes": {"title": "Second"}}], "links": {"next": None}},
+        ]
+    )
     monkeypatch.setattr("app.integrations.snyk.build_client", lambda **kwargs: transport)
     client = SnykClient(Settings(snyk={"api_token": "tenant-token", "organization_id": ORG_ID}))
     issues = await client.list_issues()
     assert [issue["id"] for issue in issues] == ["one", "two"]
     assert all(f"/orgs/{ORG_ID}/issues" in path for path, _, _ in transport.requests)
-    assert all(headers["Authorization"] == "token tenant-token" for _, _, headers in transport.requests)
+    assert all(
+        headers["Authorization"] == "token tenant-token" for _, _, headers in transport.requests
+    )
     await client.aclose()
 
 
@@ -60,7 +67,9 @@ async def test_snyk_rejects_foreign_cursor_before_sending_token(monkeypatch) -> 
 async def test_snyk_rejects_malformed_page_instead_of_importing_partial_data(monkeypatch) -> None:
     from app.integrations.snyk import SnykClient
 
-    transport = _Transport([{"data": [{"attributes": {"title": "No ID"}}], "links": {"next": None}}])
+    transport = _Transport(
+        [{"data": [{"attributes": {"title": "No ID"}}], "links": {"next": None}}]
+    )
     monkeypatch.setattr("app.integrations.snyk.build_client", lambda **kwargs: transport)
     client = SnykClient(Settings(snyk={"api_token": "tenant-token", "organization_id": ORG_ID}))
     with pytest.raises(IntegrationError):
@@ -70,11 +79,19 @@ async def test_snyk_rejects_malformed_page_instead_of_importing_partial_data(mon
 def test_snyk_issue_normalization_preserves_provider_identity_and_state() -> None:
     from app.services.external_alert import normalize_snyk_issue
 
-    alert = normalize_snyk_issue(ORG_ID, {
-        "id": "issue-7", "type": "issue",
-        "attributes": {"title": "Vulnerable dependency", "effective_severity_level": "high", "status": "open"},
-        "relationships": {"scan_item": {"data": {"id": "project-9"}}},
-    })
+    alert = normalize_snyk_issue(
+        ORG_ID,
+        {
+            "id": "issue-7",
+            "type": "issue",
+            "attributes": {
+                "title": "Vulnerable dependency",
+                "effective_severity_level": "high",
+                "status": "open",
+            },
+            "relationships": {"scan_item": {"data": {"id": "project-9"}}},
+        },
+    )
     assert alert.external_id == f"{ORG_ID}:issue-7"
     assert alert.severity == "high"
     assert alert.status == "open"
@@ -85,10 +102,13 @@ def test_snyk_issue_normalization_preserves_provider_identity_and_state() -> Non
 def test_snyk_ignored_issue_is_not_presented_as_open() -> None:
     from app.services.external_alert import normalize_snyk_issue
 
-    alert = normalize_snyk_issue(ORG_ID, {
-        "id": "issue-ignored",
-        "attributes": {"title": "Accepted issue", "severity": "medium", "status": "ignored"},
-    })
+    alert = normalize_snyk_issue(
+        ORG_ID,
+        {
+            "id": "issue-ignored",
+            "attributes": {"title": "Accepted issue", "severity": "medium", "status": "ignored"},
+        },
+    )
     assert alert.status == "dismissed"
 
 
@@ -96,10 +116,13 @@ def test_snyk_rejects_identity_that_cannot_fit_unique_ledger_key() -> None:
     from app.services.external_alert import normalize_snyk_issue
 
     with pytest.raises(ValueError):
-        normalize_snyk_issue(ORG_ID, {
-            "id": "x" * 264,
-            "attributes": {"title": "A vulnerability", "status": "open"},
-        })
+        normalize_snyk_issue(
+            ORG_ID,
+            {
+                "id": "x" * 264,
+                "attributes": {"title": "A vulnerability", "status": "open"},
+            },
+        )
 
 
 def test_snyk_kind_is_available_to_tenant_integration_settings() -> None:
@@ -129,7 +152,10 @@ async def test_snyk_sync_stages_tenant_scoped_issue() -> None:
     session = _Session()
     tenant_id = uuid.uuid4()
     result = await stage_snyk_issues(
-        session, organization_id=tenant_id, integration_id=None, snyk_organization_id=ORG_ID,
+        session,
+        organization_id=tenant_id,
+        integration_id=None,
+        snyk_organization_id=ORG_ID,
         issues=[{"id": "issue-7", "attributes": {"title": "A vulnerability", "severity": "high"}}],
     )
     assert result.total == 1

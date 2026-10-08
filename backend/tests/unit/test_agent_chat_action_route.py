@@ -8,11 +8,77 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.core.config import Settings
 from app.db.enums import Role
 from app.schemas.agent import AgentMessageIn
 from app.services.context import Principal
+
+
+@pytest.mark.asyncio
+async def test_action_list_shows_actual_assessment_run_and_result() -> None:
+    from app.api.v1 import agent as route
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    now = dt.datetime.now(dt.UTC)
+    run_id, assessment_id = uuid.uuid4(), uuid.uuid4()
+    action = SimpleNamespace(
+        id=uuid.uuid4(),
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        run_id=run_id,
+        action="start_assessment",
+        label="Assess example.org",
+        rationale=None,
+        payload={"target": "https://example.org", "authorization_reference": "AUTH-123"},
+        payload_digest="0" * 64,
+        status="executed",
+        resolution_note=None,
+        resolved_at=now,
+        executed_at=now,
+        result_summary="Assessment queued",
+        created_at=now,
+    )
+
+    class _Session:
+        def __init__(self):
+            self.calls = 0
+            self.statements = []
+
+        async def execute(self, statement):
+            self.calls += 1
+            self.statements.append(statement)
+            if self.calls == 1:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [action]))
+            return SimpleNamespace(
+                all=lambda: [
+                    (
+                        run_id,
+                        "completed",
+                        assessment_id,
+                        "COMPLETED",
+                        "completed",
+                        100,
+                        5,
+                        1,
+                        2,
+                        3,
+                        None,
+                        [],
+                    )
+                ]
+            )
+
+    session = _Session()
+    result = await route.list_agent_actions(principal, session)
+
+    assert session.calls == 2
+    assert result[0].run_status == "completed"
+    assert result[0].assessment.id == assessment_id
+    assert result[0].assessment.findings_total == 5
+    worker_query = session.statements[1].compile(dialect=postgresql.dialect())
+    assert principal.organization_id in worker_query.params.values()
 
 
 @pytest.mark.asyncio
@@ -165,12 +231,23 @@ async def test_execute_route_persists_provider_failure_instead_of_leaving_action
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
     now = dt.datetime.now(dt.UTC)
     action = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=principal.organization_id,
-        session_id=uuid.uuid4(), run_id=None, action="sync_github_alerts",
-        label="Sync GitHub", rationale=None, payload={}, payload_digest="0" * 64,
-        status="approved", approved_by_user_id=principal.user_id,
-        resolution_note=None, resolved_at=now, executed_at=None,
-        result_summary=None, created_at=now,
+        id=uuid.uuid4(),
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        run_id=None,
+        action="sync_github_alerts",
+        label="Sync GitHub",
+        rationale=None,
+        payload={},
+        payload_digest="0" * 64,
+        depends_on_action_id=None,
+        status="approved",
+        approved_by_user_id=principal.user_id,
+        resolution_note=None,
+        resolved_at=now,
+        executed_at=None,
+        result_summary=None,
+        created_at=now,
     )
 
     class _Session:
@@ -188,7 +265,9 @@ async def test_execute_route_persists_provider_failure_instead_of_leaving_action
             self.commits += 1
 
     async def unavailable(*args, **kwargs):
-        raise IntegrationError("remote detail", provider="GitHub", user_message="GitHub unavailable")
+        raise IntegrationError(
+            "remote detail", provider="GitHub", user_message="GitHub unavailable"
+        )
 
     async def no_audit(*args, **kwargs):
         return None
@@ -197,7 +276,11 @@ async def test_execute_route_persists_provider_failure_instead_of_leaving_action
     monkeypatch.setattr(route.agent_action_service.audit_service, "record", no_audit)
     session = _Session()
     result = await route.execute_agent_action(
-        action.id, principal, session, object(), None,
+        action.id,
+        principal,
+        session,
+        object(),
+        None,
     )
     assert result.status == "failed"
     assert result.result_summary == "GitHub unavailable"

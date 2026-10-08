@@ -16,29 +16,47 @@ from app.services.context import Principal
 
 
 async def list_canonical_findings(
-    session: AsyncSession, principal: Principal, pagination: PaginationParams,
-    *, mine: bool = False, overdue: bool = False,
+    session: AsyncSession,
+    principal: Principal,
+    pagination: PaginationParams,
+    *,
+    mine: bool = False,
+    overdue: bool = False,
 ) -> tuple[list[CanonicalFinding], int]:
     principal.require(Permission.FINDING_READ)
     conditions = [CanonicalFinding.organization_id == principal.organization_id]
     if mine:
         conditions.append(CanonicalFinding.assignee_user_id == principal.user_id)
     if overdue:
-        conditions.extend((
-            CanonicalFinding.due_at < utcnow(),
-            CanonicalFinding.status.not_in(("closed", "false_positive", "accepted_risk")),
-        ))
-    statement = select(CanonicalFinding).where(*conditions)
-    total = int((await session.execute(
-        select(func.count()).select_from(CanonicalFinding).where(*conditions)
-    )).scalar_one())
-    rows = (await session.execute(
-        statement.order_by(
-            CanonicalFinding.risk_score.desc(),
-            CanonicalFinding.last_seen_at.desc(), CanonicalFinding.id,
+        conditions.extend(
+            (
+                CanonicalFinding.due_at < utcnow(),
+                CanonicalFinding.status.not_in(("closed", "false_positive", "accepted_risk")),
+            )
         )
-        .limit(pagination.limit).offset(pagination.offset)
-    )).scalars().all()
+    statement = select(CanonicalFinding).where(*conditions)
+    total = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(CanonicalFinding).where(*conditions)
+            )
+        ).scalar_one()
+    )
+    rows = (
+        (
+            await session.execute(
+                statement.order_by(
+                    CanonicalFinding.risk_score.desc(),
+                    CanonicalFinding.last_seen_at.desc(),
+                    CanonicalFinding.id,
+                )
+                .limit(pagination.limit)
+                .offset(pagination.offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return list(rows), total
 
 
@@ -49,15 +67,31 @@ async def get_canonical_finding(
     finding = await TenantRepository(
         session, CanonicalFinding, principal.organization_id
     ).get_or_404(finding_id)
-    observations = (await session.execute(
-        tenant_select(FindingObservation, principal.organization_id)
-        .where(FindingObservation.canonical_finding_id == finding.id)
-        .order_by(FindingObservation.provider, FindingObservation.external_id, FindingObservation.cve_id)
-    )).scalars().all()
-    history = (await session.execute(
-        tenant_select(FindingHistory, principal.organization_id)
-        .where(FindingHistory.canonical_finding_id == finding.id)
-        .order_by(FindingHistory.occurred_at.desc(), FindingHistory.id.desc())
-        .limit(200)
-    )).scalars().all()
+    observations = (
+        (
+            await session.execute(
+                tenant_select(FindingObservation, principal.organization_id)
+                .where(FindingObservation.canonical_finding_id == finding.id)
+                .order_by(
+                    FindingObservation.provider,
+                    FindingObservation.external_id,
+                    FindingObservation.cve_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    history = (
+        (
+            await session.execute(
+                tenant_select(FindingHistory, principal.organization_id)
+                .where(FindingHistory.canonical_finding_id == finding.id)
+                .order_by(FindingHistory.occurred_at.desc(), FindingHistory.id.desc())
+                .limit(200)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return finding, list(observations), list(history)

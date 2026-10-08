@@ -47,6 +47,14 @@ STAGE_LABELS: dict[AssessmentStage, str] = {
     AssessmentStage.SCAN_NMAP: "Port and service scan",
     AssessmentStage.SCAN_NUCLEI: "Vulnerability scan",
     AssessmentStage.SCAN_ZAP: "Web application scan",
+    AssessmentStage.SCAN_TRIVY_REPO: "Repository security scan",
+    AssessmentStage.SCAN_SEMGREP_REPO: "Repository source-code scan",
+    AssessmentStage.SCAN_GITLEAKS_REPO: "Repository secret scan",
+    AssessmentStage.SCAN_TRIVY_IMAGE: "Container image security scan",
+    AssessmentStage.SCAN_SYFT_IMAGE: "Container image SBOM",
+    AssessmentStage.SCAN_PROWLER_AWS: "AWS configuration scan",
+    AssessmentStage.SCAN_PROWLER_AZURE: "Azure configuration scan",
+    AssessmentStage.SCAN_PROWLER_GCP: "GCP configuration scan",
     AssessmentStage.IMPORT: "Importing findings",
     AssessmentStage.ENRICH: "Threat intelligence",
     AssessmentStage.AI_ANALYSIS: "AI analysis",
@@ -61,7 +69,19 @@ STAGE_LABELS: dict[AssessmentStage, str] = {
 #: scans, and rendering three permanently-pending scan rows would read as "stuck" rather
 #: than "not applicable" -- so :func:`stage_checklist` marks them ``SKIPPED``.
 _ACTIVE_SCAN_STAGES: frozenset[AssessmentStage] = frozenset(
-    {AssessmentStage.SCAN_NMAP, AssessmentStage.SCAN_NUCLEI, AssessmentStage.SCAN_ZAP}
+    {
+        AssessmentStage.SCAN_NMAP,
+        AssessmentStage.SCAN_NUCLEI,
+        AssessmentStage.SCAN_ZAP,
+        AssessmentStage.SCAN_TRIVY_REPO,
+        AssessmentStage.SCAN_SEMGREP_REPO,
+        AssessmentStage.SCAN_GITLEAKS_REPO,
+        AssessmentStage.SCAN_TRIVY_IMAGE,
+        AssessmentStage.SCAN_SYFT_IMAGE,
+        AssessmentStage.SCAN_PROWLER_AWS,
+        AssessmentStage.SCAN_PROWLER_AZURE,
+        AssessmentStage.SCAN_PROWLER_GCP,
+    }
 )
 
 

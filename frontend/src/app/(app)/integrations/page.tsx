@@ -177,6 +177,124 @@ function AddIntegrationCard({ existing, onChanged }: { existing: IntegrationOut[
   );
 }
 
+const SCAN_IMPORT_FORMATS = [
+  ["sarif", "SARIF"], ["nuclei_jsonl", "Nuclei JSONL"],
+  ["nessus_xml", "Nessus XML"], ["burp_xml", "Burp XML"],
+  ["qualys_host_detection_xml", "Qualys VM host-detection XML"],
+  ["rapid7_csv", "Rapid7 InsightVM CSV"],
+  ["aws_inspector_csv", "AWS Inspector CSV (account:resource cloud asset)"],
+  ["azure_defender_json", "Azure Defender API JSON (full ARM resource ID)"],
+  ["gcp_scc_json", "Google SCC API JSON (full cloud resource)"],
+  ["prowler_ocsf", "Prowler JSON-OCSF (AWS, Azure, GCP account)"],
+  ["hackerone_json", "HackerOne report detail JSON (structured scope required)"],
+  ["bugcrowd_json", "Bugcrowd submissions API JSON (include=target)"],
+  ["trivy", "Trivy JSON"], ["gitleaks", "Gitleaks JSON"],
+  ["cyclonedx", "CycloneDX JSON"], ["spdx", "SPDX JSON"],
+  ["generic_csv", "Mapped CSV"], ["generic_json", "Mapped JSON"],
+] as const;
+
+type ScanImportFormat = (typeof SCAN_IMPORT_FORMATS)[number][0];
+
+function ScanImportCard() {
+  const { toast } = useToast();
+  const [file, setFile] = React.useState<File | null>(null);
+  const [formatName, setFormatName] = React.useState<ScanImportFormat>("sarif");
+  const [provider, setProvider] = React.useState("manual");
+  const [assetType, setAssetType] = React.useState("repo");
+  const [assetValue, setAssetValue] = React.useState("");
+  const [mappingText, setMappingText] = React.useState(
+    '{"id":"id","title":"title","severity":"severity","cve":"cve"}',
+  );
+  const [formError, setFormError] = React.useState<string | null>(null);
+  const upload = useMutation(api.integrations.importScanExport, {
+    onSuccess: (result) => toast({
+      title: "Scanner findings imported",
+      description: `${result.findings_staged} records staged in the canonical findings flow.`,
+      tone: "ok",
+    }),
+  });
+  const isGeneric = formatName === "generic_csv" || formatName === "generic_json";
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!file || file.size === 0 || file.size > 10 * 1024 * 1024) {
+      setFormError("Choose a non-empty scanner export no larger than 10 MB.");
+      return;
+    }
+    if (!/^[a-z][a-z0-9_-]{1,39}$/.test(provider.trim())) {
+      setFormError("Provider must be 2–40 lowercase letters, digits, hyphens or underscores.");
+      return;
+    }
+    if (!assetValue.trim()) {
+      setFormError("Enter the asset this export belongs to.");
+      return;
+    }
+    let fieldMapping: Record<string, string> | undefined;
+    if (isGeneric) {
+      try {
+        const parsed: unknown = JSON.parse(mappingText);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" ||
+            Object.values(parsed).some((value) => typeof value !== "string")) {
+          throw new Error("invalid mapping");
+        }
+        fieldMapping = parsed as Record<string, string>;
+      } catch {
+        setFormError("Field mapping must be a JSON object of destination fields to source column names.");
+        return;
+      }
+    }
+    setFormError(null);
+    void upload.run({
+      file, formatName, provider: provider.trim(), assetType,
+      assetValue: assetValue.trim(), fieldMapping,
+    });
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <div>
+          <CardTitle>Import scanner findings or SBOM</CardTitle>
+          <p className="mt-0.5 text-xs text-muted">SARIF, Nuclei, Nessus XML, Burp XML, Qualys VM XML, Rapid7 CSV, AWS Inspector CSV, Azure Defender JSON, Google SCC JSON, Prowler JSON-OCSF, HackerOne JSON, Bugcrowd JSON, Trivy, Gitleaks, CycloneDX, SPDX, or mapped CSV/JSON. Findings join the unified exposure model.</p>
+        </div>
+      </CardHeader>
+      <CardBody>
+        <form className="grid gap-4 sm:grid-cols-2" onSubmit={submit}>
+          <div className="sm:col-span-2"><InlineError message={formError ?? upload.errorMessage} /></div>
+          <Field label="Format" htmlFor="scan-import-format">
+            <Select id="scan-import-format" value={formatName} onChange={(event) => setFormatName(event.target.value as ScanImportFormat)}>
+              {SCAN_IMPORT_FORMATS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </Select>
+          </Field>
+          <Field label="Source name" htmlFor="scan-import-provider" hint="Lowercase identifier used to attribute findings to this scanner.">
+            <Input id="scan-import-provider" value={provider} onChange={(event) => setProvider(event.target.value)} maxLength={40} />
+          </Field>
+          <Field label="Asset type" htmlFor="scan-import-asset-type">
+            <Select id="scan-import-asset-type" value={assetType} onChange={(event) => setAssetType(event.target.value)}>
+              <option value="repo">Repository</option><option value="container">Container</option>
+              <option value="domain">Domain</option><option value="ip">IP address</option>
+              <option value="url">URL</option><option value="cloud">Cloud resource</option>
+              <option value="cloud_account">Cloud account (Prowler)</option>
+            </Select>
+          </Field>
+          <Field label="Asset identity" htmlFor="scan-import-asset" hint={formatName === "prowler_ocsf" ? "Use aws:123456789012, azure:subscription-id, or gcp:project-id. Only findings from that account are imported." : "Select the exact asset in the export: host, URL, repository owner/name, full cloud resource ID, or HackerOne structured-scope identifier."}>
+            <Input id="scan-import-asset" value={assetValue} onChange={(event) => setAssetValue(event.target.value)} maxLength={900} placeholder="acme/api" />
+          </Field>
+          {isGeneric && (
+            <Field className="sm:col-span-2" label="Field mapping (JSON)" htmlFor="scan-import-mapping" hint="Required: id and title. Optional: severity, status, cve, package, location.">
+              <Textarea id="scan-import-mapping" value={mappingText} onChange={(event) => setMappingText(event.target.value)} rows={3} maxLength={4096} />
+            </Field>
+          )}
+          <Field className="sm:col-span-2" label="Export file" htmlFor="scan-import-file" hint="Maximum 10 MB. Matched secrets and unmapped fields are not retained.">
+            <Input id="scan-import-file" type="file" accept=".json,.jsonl,.sarif,.csv,.nessus,.xml,application/json,text/csv,application/xml,text/xml" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+          </Field>
+          <Button className="sm:col-span-2" type="submit" loading={upload.loading}>Import findings</Button>
+        </form>
+      </CardBody>
+    </Card>
+  );
+}
+
 function IntegrationCard({
   integration,
   canManage,
@@ -247,7 +365,7 @@ function IntegrationCard({
   const idBase = integration.kind;
   const tenableScans = integration.kind === "tenable" ? configuredTenableScanIds(integration.config) : [];
   const selectedScan = tenableScans.includes(scanChoice) ? scanChoice : (tenableScans[0] ?? "");
-  const setupHint = integration.kind === "sonarqube" || integration.kind === "snyk" || integration.kind === "tenable"
+  const setupHint = integration.kind === "sonarqube" || integration.kind === "snyk" || integration.kind === "tenable" || integration.kind === "prowler_aws" || integration.kind === "prowler_azure" || integration.kind === "prowler_gcp"
     ? INTEGRATION_SETUP_HINTS[integration.kind] : null;
   const syncKind =
     integration.kind === "github" ||
@@ -467,7 +585,7 @@ function IntegrationCard({
           <Field
             label="Config (JSON)"
             htmlFor={`${idBase}-config`}
-            hint={integration.kind === "sonarqube" ? "Enter the SonarQube project keys to sync; no secrets here." : integration.kind === "snyk" ? "Enter your Snyk organization UUID; no secrets here." : integration.kind === "tenable" ? "Enter up to 20 Tenable scan UUIDs; access and secret keys go in credentials." : "A JSON object of non-secret settings."}
+            hint={integration.kind === "sonarqube" ? "Enter the SonarQube project keys to sync; no secrets here." : integration.kind === "snyk" ? "Enter your Snyk organization UUID; no secrets here." : integration.kind === "tenable" ? "Enter up to 20 Tenable scan UUIDs; access and secret keys go in credentials." : integration.kind === "prowler_aws" ? "Enter the 12-digit AWS account ID; add read-only access_key_id and secret_access_key below." : integration.kind === "prowler_azure" ? "Enter the Azure subscription UUID; add the service-principal client_id, tenant_id, and client_secret below." : integration.kind === "prowler_gcp" ? "Enter the GCP project ID; add its service_account_json below as an encrypted credential." : "A JSON object of non-secret settings."}
             error={fieldError(upsert.error, "config")}
           >
             <Textarea
@@ -602,6 +720,7 @@ export default function IntegrationsPage() {
       />
       {canManage && !hasByok && <ByokSetupCard onChanged={refetch} />}
       {canManage && data && <AddIntegrationCard existing={data} onChanged={refetch} />}
+      {can("assessment:create") && <ScanImportCard />}
       {body}
     </div>
   );

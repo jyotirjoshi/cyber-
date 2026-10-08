@@ -121,8 +121,7 @@ class SonarQubeClient:
                     is_security = (
                         isinstance(impacts, list)
                         and any(
-                            isinstance(impact, dict)
-                            and impact.get("softwareQuality") == "SECURITY"
+                            isinstance(impact, dict) and impact.get("softwareQuality") == "SECURITY"
                             for impact in impacts
                         )
                     ) or issue.get("type") == "VULNERABILITY"

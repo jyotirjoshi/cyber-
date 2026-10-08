@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import re
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -45,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings
+from app.core.crypto import Secret, get_cipher
 from app.core.errors import (
     ConflictError,
     CynuxError,
@@ -54,20 +56,24 @@ from app.core.errors import (
     UnsafeScannerInvocationError,
     UserError,
 )
-from app.db.enums import AuditOutcome, JobStatus, Permission, ScannerName
+from app.db.enums import AuditOutcome, IntegrationKind, JobStatus, Permission, ScannerName
 from app.db.models.assessment import Assessment
 from app.db.models.identity import Organization
+from app.db.models.integration import Integration
 from app.db.models.scanner import ScannerArtifact, ScannerJob
 from app.db.repository import TenantRepository, tenant_select
 from app.integrations.storage import ObjectStorage
 from app.scanners.artifacts import StoredArtifact, upload_artifacts, write_stream_artifacts
 from app.scanners.base import ScannerRequest, ScannerResult
 from app.scanners.registry import get_adapter
+from app.scanners.repo_snapshot import repository_coordinates
 from app.scanners.runner import DockerRunner
 from app.schemas.common import PaginationParams
 from app.schemas.job import JobFilter
 from app.services import audit as audit_service
 from app.services.context import Principal
+from app.services.gcp_credentials import mint_gcp_access_token
+from app.services.integration import credentials_for
 
 log = structlog.get_logger(__name__)
 
@@ -86,6 +92,181 @@ _HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 #: Cap on ``failure_detail``. The full stream is an artifact; this is the operator-facing tail.
 _MAX_FAILURE_DETAIL = 4000
+
+
+async def cloud_credentials_for_job(
+    session: AsyncSession,
+    job: ScannerJob,
+    settings: Settings,
+) -> dict[str, str]:
+    """Decrypt only an enabled credential set for this tenant and cloud account."""
+    cloud_scanners = {
+        ScannerName.PROWLER_AWS.value: ("aws", IntegrationKind.PROWLER_AWS),
+        ScannerName.PROWLER_AZURE.value: ("azure", IntegrationKind.PROWLER_AZURE),
+        ScannerName.PROWLER_GCP.value: ("gcp", IntegrationKind.PROWLER_GCP),
+    }
+    if job.scanner not in cloud_scanners:
+        return {}
+    provider, kind = cloud_scanners[job.scanner]
+    pattern = (
+        r"aws:\d{12}"
+        if provider == "aws"
+        else (
+            r"azure:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
+            if provider == "azure"
+            else r"gcp:[a-z][a-z0-9-]{4,28}[a-z0-9]"
+        )
+    )
+    if len(job.targets) != 1 or not re.fullmatch(pattern, job.targets[0]):
+        raise UnsafeScannerInvocationError("Cloud scanner job has no approved account target.")
+    account = job.targets[0].split(":", 1)[1]
+    result = await session.execute(
+        select(Integration)
+        .options(selectinload(Integration.credentials))
+        .where(
+            Integration.organization_id == job.organization_id,
+            Integration.kind == kind.value,
+            Integration.config["account_id"].astext == account,
+        )
+    )
+    for integration in result.scalars().all():
+        if (
+            integration.organization_id != job.organization_id
+            or integration.kind != kind.value
+            or integration.config.get("account_id") != account
+            or not integration.is_usable
+        ):
+            continue
+        stored = credentials_for(integration, settings=settings)
+        if provider == "gcp":
+            service_account = stored.get("service_account_json")
+            if service_account is None:
+                continue
+            token = await asyncio.to_thread(
+                mint_gcp_access_token,
+                service_account.reveal(),
+                account,
+            )
+            return {
+                "CLOUDSDK_AUTH_ACCESS_TOKEN": token,
+                "GOOGLE_CLOUD_PROJECT": account,
+            }
+        if provider == "azure":
+            client_id = stored.get("client_id")
+            tenant_id = stored.get("tenant_id")
+            secret = stored.get("client_secret")
+            if all((client_id, tenant_id, secret)):
+                return {
+                    "AZURE_CLIENT_ID": client_id.reveal(),
+                    "AZURE_TENANT_ID": tenant_id.reveal(),
+                    "AZURE_CLIENT_SECRET": secret.reveal(),
+                }
+            continue
+        access = stored.get("access_key_id")
+        secret = stored.get("secret_access_key")
+        if access and secret:
+            values = {
+                "AWS_ACCESS_KEY_ID": access.reveal(),
+                "AWS_SECRET_ACCESS_KEY": secret.reveal(),
+            }
+            token = stored.get("session_token")
+            if token:
+                values["AWS_SESSION_TOKEN"] = token.reveal()
+            return values
+    raise UnsafeScannerInvocationError(
+        f"{provider.upper()} credentials are not configured for this account."
+    )
+
+
+async def repository_token_for_job(
+    session: AsyncSession,
+    job: ScannerJob,
+    settings: Settings,
+) -> Secret | None:
+    """Use only a usable repository connection belonging to this job's tenant."""
+    if job.scanner not in {
+        ScannerName.SEMGREP_REPO.value,
+        ScannerName.GITLEAKS_REPO.value,
+        ScannerName.TRIVY_REPO.value,
+    } or len(job.targets) != 1:
+        return None
+    try:
+        provider, owner, _ = repository_coordinates(job.targets[0])
+    except UnsafeScannerInvocationError:
+        return None
+    kind = {
+        "github": IntegrationKind.GITHUB,
+        "gitlab": IntegrationKind.GITLAB,
+    }.get(provider)
+    if kind is None:
+        return None
+    result = await session.execute(
+        select(Integration)
+        .options(selectinload(Integration.credentials))
+        .where(
+            Integration.organization_id == job.organization_id,
+            Integration.kind == kind.value,
+        )
+    )
+    for integration in result.scalars().all():
+        if (
+            integration.organization_id != job.organization_id
+            or integration.kind != kind.value
+            or not integration.is_usable
+        ):
+            continue
+        configured_owner = integration.config.get("organization") if provider == "github" else None
+        if configured_owner and configured_owner.casefold() != owner.casefold():
+            continue
+        token = credentials_for(integration, settings=settings).get("api_token")
+        if isinstance(token, Secret) and token:
+            return token
+    return None
+
+
+async def bitbucket_credentials_for_job(
+    session: AsyncSession,
+    job: ScannerJob,
+    settings: Settings,
+) -> tuple[Secret, str] | None:
+    """Resolve the exact Bitbucket repository's credential from its own tenant."""
+    if job.scanner not in {
+        ScannerName.SEMGREP_REPO.value,
+        ScannerName.GITLEAKS_REPO.value,
+        ScannerName.TRIVY_REPO.value,
+    } or len(job.targets) != 1:
+        return None
+    try:
+        provider, owner, repo = repository_coordinates(job.targets[0])
+    except UnsafeScannerInvocationError:
+        return None
+    if provider != "bitbucket":
+        return None
+    result = await session.execute(
+        select(Integration)
+        .options(selectinload(Integration.credentials))
+        .where(
+            Integration.organization_id == job.organization_id,
+            Integration.kind == IntegrationKind.BITBUCKET.value,
+        )
+    )
+    for integration in result.scalars().all():
+        config = integration.config or {}
+        if (
+            integration.organization_id != job.organization_id
+            or integration.kind != IntegrationKind.BITBUCKET.value
+            or not integration.is_usable
+            or str(config.get("workspace", "")).casefold() != owner.casefold()
+            or str(config.get("repository", "")).casefold() != repo.casefold()
+        ):
+            continue
+        email = config.get("account_email")
+        token = credentials_for(integration, settings=settings).get("api_token")
+        if isinstance(email, str) and isinstance(token, Secret) and token:
+            return token, email
+    raise UnsafeScannerInvocationError(
+        "Bitbucket credentials are not configured for this approved repository."
+    )
 
 
 async def enqueue_job(
@@ -117,6 +298,8 @@ async def enqueue_job(
         )
 
     cfg = _scanner_settings_or_default(timeout_seconds)
+    if adapter.name is ScannerName.PROWLER_GCP:
+        cfg = min(cfg, 2400)
     if idempotency_key is not None:
         if not idempotency_key or len(idempotency_key) > 160:
             raise ValueError("idempotency_key must contain 1 to 160 characters")
@@ -134,9 +317,7 @@ async def enqueue_job(
                 sandbox={},
                 timeout_seconds=cfg,
             )
-            .on_conflict_do_nothing(
-                constraint="uq_scanner_jobs_unique_scanner_job_idempotency_key"
-            )
+            .on_conflict_do_nothing(constraint="uq_scanner_jobs_unique_scanner_job_idempotency_key")
             .returning(ScannerJob.id)
         )
         inserted_id = (await session.execute(insert)).scalar_one_or_none()
@@ -331,6 +512,21 @@ async def execute_job(
     adapter = get_adapter(job.scanner)
     workdir = _workdir_for(settings, job)
     now = _now()
+    assessment = await session.scalar(
+        select(Assessment).where(
+            Assessment.id == job.assessment_id,
+            Assessment.organization_id == job.organization_id,
+        )
+    )
+    if assessment is None:
+        raise UnsafeScannerInvocationError("Scanner job has no tenant-owned assessment")
+    options = _options_for(job, settings, assessment)
+    repo_token = await repository_token_for_job(session, job, settings)
+    if repo_token is not None:
+        options["repo_token"] = repo_token
+    bitbucket_credentials = await bitbucket_credentials_for_job(session, job, settings)
+    if bitbucket_credentials is not None:
+        options["repo_token"], options["repo_account_email"] = bitbucket_credentials
 
     job.status = JobStatus.RUNNING.value
     job.started_at = now
@@ -355,18 +551,24 @@ async def execute_job(
         targets=tuple(job.targets),
         workdir=workdir,
         timeout_seconds=job.timeout_seconds,
-        options=_options_for(job, settings),
+        options=options,
     )
     heartbeat = asyncio.create_task(_heartbeat(session, job.id))
     result: ScannerResult | None = None
     fatal: CynuxError | None = None
 
     try:
+        credential_environment = await cloud_credentials_for_job(session, job, settings)
+        if adapter.name is ScannerName.ZAP:
+            api_token = request.option("api_auth_token")
+            if isinstance(api_token, Secret):
+                credential_environment["CYNUX_ZAP_API_TOKEN"] = api_token.reveal()
         result = await runner.run(
             adapter,
             request,
             on_log=on_log,
             cancel=lambda: _cancel_requested(session, job.id),
+            credential_environment=credential_environment,
         )
     except (UnsafeScannerInvocationError, DockerUnavailableError) as exc:
         # Not a scanner failure -- a refusal to run, or an environment that cannot. Recorded
@@ -398,7 +600,12 @@ async def execute_job(
     else:
         job.artifacts_archived = bool(stored)
 
-    _apply_result(job, result, adapter_success_codes=adapter.success_exit_codes)
+    _apply_result(
+        job,
+        result,
+        adapter_success_codes=adapter.success_exit_codes,
+        requires_output=adapter.requires_output,
+    )
     for row in stored:
         session.add(
             ScannerArtifact(
@@ -700,17 +907,27 @@ def _workdir_for(settings: Settings, job: ScannerJob) -> Path:
     return Path(settings.scanner.artifact_workdir) / f"org-{job.organization_id}" / f"job-{job.id}"
 
 
-def _options_for(job: ScannerJob, settings: Settings) -> dict[str, Any]:
+def _options_for(job: ScannerJob, settings: Settings, assessment: Assessment) -> dict[str, Any]:
     """Adapter options derived from the job row and settings.
 
     Only ever carries scalars the adapters declare. Notably *not* a passthrough of anything
     model-supplied: an option dict wide enough to hold a flag is a way to smuggle one past
     the argv allow-list.
     """
-    return {
+    options: dict[str, Any] = {
         "rate_limit": settings.scanner.max_concurrent_jobs_per_org * 25,
         "out_dir": "out",
     }
+    if job.scanner in {ScannerName.NUCLEI.value, ScannerName.ZAP.value}:
+        api_scan = (assessment.extra_data or {}).get("api_scan")
+        if isinstance(api_scan, dict) and api_scan.get("target") in job.targets:
+            options["api_target"] = api_scan["target"]
+            options["api_spec"] = api_scan.get("spec")
+            if getattr(assessment, "api_auth_ciphertext", None):
+                options["api_auth_token"] = get_cipher(settings).decrypt(
+                    assessment.api_auth_ciphertext
+                )
+    return options
 
 
 async def _heartbeat(session: AsyncSession, job_id: uuid.UUID) -> None:
@@ -758,6 +975,7 @@ def _apply_result(
     result: ScannerResult,
     *,
     adapter_success_codes: frozenset[int],
+    requires_output: bool = False,
 ) -> None:
     """Fold a :class:`ScannerResult` onto the job row.
 
@@ -787,6 +1005,11 @@ def _apply_result(
         )
         return
     if result.exit_code in adapter_success_codes:
+        if requires_output and not result.produced_output:
+            job.status = JobStatus.FAILED.value
+            job.failure_code = "scanner_no_report"
+            job.failure_detail = "The scanner exited successfully but produced no usable report."
+            return
         job.status = JobStatus.COMPLETED.value
         job.failure_code = None
         job.failure_detail = None

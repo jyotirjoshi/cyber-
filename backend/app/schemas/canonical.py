@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.custom_fields import validate_custom_fields
 from app.schemas.finding import TicketLinkOut
 
 
@@ -29,6 +30,7 @@ class CanonicalFindingOut(BaseModel):
     assignee_user_id: uuid.UUID | None = None
     due_at: dt.datetime | None = None
     remediation_plan: str | None = None
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class FindingObservationOut(BaseModel):
@@ -80,6 +82,14 @@ class CanonicalWorkIn(BaseModel):
     assignee_user_id: uuid.UUID | None = None
     due_at: dt.datetime | None = None
     remediation_plan: str | None = Field(default=None, max_length=4000)
+    custom_fields: dict[str, Any] | None = None
+
+    @field_validator("custom_fields")
+    @classmethod
+    def clean_custom_fields(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            raise ValueError("custom_fields cannot be null")
+        return validate_custom_fields(value)
 
     @field_validator("remediation_plan")
     @classmethod

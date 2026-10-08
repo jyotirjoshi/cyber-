@@ -44,10 +44,18 @@ async def test_related_alerts_require_same_repo_and_cve_within_tenant() -> None:
     org_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.VIEWER)
     alert = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=org_id, provider="github",
-        external_id="dependabot:acme/api:1", category="dependabot", title="Vulnerable library",
-        severity="high", status="open", resource="acme/api",
-        cve_ids=["CVE-2026-1234"], evidence={}, raw_payload={},
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        provider="github",
+        external_id="dependabot:acme/api:1",
+        category="dependabot",
+        title="Vulnerable library",
+        severity="high",
+        status="open",
+        resource="acme/api",
+        cve_ids=["CVE-2026-1234"],
+        evidence={},
+        raw_payload={},
     )
     session = _Session(alert)
 
@@ -73,10 +81,18 @@ async def test_related_alerts_do_not_guess_repository_from_wazuh_or_missing_cve(
     org_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.VIEWER)
     alert = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=org_id, provider="wazuh",
-        external_id="event:1", category="rule", title="Server event",
-        severity="medium", status="open", resource="acme/api",
-        cve_ids=["CVE-2026-1234"], evidence={}, raw_payload={},
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        provider="wazuh",
+        external_id="event:1",
+        category="rule",
+        title="Server event",
+        severity="medium",
+        status="open",
+        resource="acme/api",
+        cve_ids=["CVE-2026-1234"],
+        evidence={},
+        raw_payload={},
     )
     session = _Session(alert)
     assert await related_external_alerts_for_alert(session, principal, alert.id) == []

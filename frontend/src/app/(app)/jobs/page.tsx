@@ -21,7 +21,7 @@ import type { JobStatus, ScannerName } from "@/lib/types";
 
 const PAGE_SIZE = 25;
 
-const SCANNERS: readonly ScannerName[] = ["reconftw", "nmap", "nuclei", "zap"];
+const SCANNERS: readonly ScannerName[] = ["reconftw", "nmap", "nuclei", "zap", "trivy_repo", "semgrep_repo", "gitleaks_repo", "trivy_image", "syft_image"];
 
 const STATUSES: readonly JobStatus[] = [
   "QUEUED",

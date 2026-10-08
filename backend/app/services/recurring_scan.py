@@ -198,10 +198,12 @@ async def run_due_scans(
     ranked = (
         select(
             RecurringScan.id.label("schedule_id"),
-            func.row_number().over(
+            func.row_number()
+            .over(
                 partition_by=RecurringScan.organization_id,
                 order_by=(RecurringScan.next_run_at, RecurringScan.id),
-            ).label("tenant_rank"),
+            )
+            .label("tenant_rank"),
         )
         .where(RecurringScan.enabled.is_(True), RecurringScan.next_run_at <= now)
         .subquery()
@@ -261,6 +263,9 @@ async def run_due_scans(
 
 
 __all__ = [
-    "create_recurring_scan", "create_scan_profile", "execute_due_scan",
-    "next_scan_time", "run_due_scans",
+    "create_recurring_scan",
+    "create_scan_profile",
+    "execute_due_scan",
+    "next_scan_time",
+    "run_due_scans",
 ]

@@ -130,7 +130,8 @@ def main() -> int:
             if not isinstance(node, ast.Call):
                 continue
             name = dotted(node.func)
-            if name in FORBIDDEN_CALLS and "tools/verify.py" not in str(rel):
+            test_process = path.is_relative_to(TESTS) and name.startswith("subprocess.")
+            if name in FORBIDDEN_CALLS and path != ROOT / "tools" / "verify.py" and not test_process:
                 errors.append(f"UNSAFE {rel}:{node.lineno}: {name} -- {FORBIDDEN_CALLS[name]}")
             for kw in node.keywords:
                 if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value:

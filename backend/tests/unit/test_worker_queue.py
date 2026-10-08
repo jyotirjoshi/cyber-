@@ -138,9 +138,14 @@ async def test_poison_message_is_dead_lettered_before_acknowledgement() -> None:
     await worker._dispatch("1-0", {"invalid": "potential secret"}, reclaimed=False)
 
     assert redis.calls == [
-        ("dead_letter", "runs:dead", {
-            "source_message_id": "1-0", "reason": "invalid_request",
-        }),
+        (
+            "dead_letter",
+            "runs:dead",
+            {
+                "source_message_id": "1-0",
+                "reason": "invalid_request",
+            },
+        ),
         ("ack", "1-0"),
         ("delete", "1-0"),
     ]
@@ -301,6 +306,7 @@ async def test_unprocessable_run_is_dead_lettered_before_ack(monkeypatch) -> Non
     class _Runner:
         async def advance(self, run_id, *, principal):
             from app.core.errors import InvalidConfigurationError
+
             raise InvalidConfigurationError("not runnable")
 
     async def dead_letter(self, message_id, reason):
@@ -325,8 +331,161 @@ async def test_unprocessable_run_is_dead_lettered_before_ack(monkeypatch) -> Non
     worker._stopping = False
     await worker._run("1-0", run_id, context, None)
     assert events == [
-        ("dead", "1-0", "unprocessable_run"), ("settled", run_id), ("ack", "1-0"),
+        ("dead", "1-0", "unprocessable_run"),
+        ("settled", run_id),
+        ("ack", "1-0"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_failed_graph_run_updates_action_receipt_before_ack(monkeypatch) -> None:
+    from app.agent.runner import RunOutcome
+    from app.db.enums import AgentRunStatus
+    from app.worker.worker import AgentWorker, _RunContext
+
+    events = []
+    run_id, tenant = uuid.uuid4(), uuid.uuid4()
+    context = _RunContext(
+        run_status=AgentRunStatus.RUNNING, organization_id=tenant,
+        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
+        heartbeat_at=None, assessment_status=None,
+    )
+
+    class Runner:
+        async def advance(self, current_run_id, *, principal):
+            return RunOutcome(run_id=current_run_id, status=AgentRunStatus.FAILED)
+
+    async def monitor(self, *args):
+        await args[-1].stop.wait()
+
+    async def receipt(self, current_context, current_run_id, outcome):
+        events.append(("receipt", current_context.organization_id, current_run_id, outcome))
+
+    async def ack(self, message_id):
+        events.append(("ack", message_id))
+
+    monkeypatch.setattr(AgentWorker, "_monitor", monitor)
+    monkeypatch.setattr(AgentWorker, "_record_terminal_action_receipt", receipt, raising=False)
+    monkeypatch.setattr(AgentWorker, "_ack", ack)
+    worker = object.__new__(AgentWorker)
+    worker._runner = Runner()
+    worker._stopping = False
+    await worker._run("1-0", run_id, context, None)
+    assert events == [
+        ("receipt", tenant, run_id, "failed"),
+        ("ack", "1-0"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_operator_cancellation_updates_action_receipt_before_completion_event(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from app.db.enums import AgentRunStatus, AssessmentStatus
+    from app.worker import worker as module
+
+    events = []
+    run_id, tenant, assessment_id, conversation_id = (uuid.uuid4() for _ in range(4))
+    run = SimpleNamespace(
+        organization_id=tenant, status_enum=AgentRunStatus.RUNNING,
+        status=AgentRunStatus.RUNNING.value, completed_at=None, heartbeat_at=None,
+    )
+    assessment = SimpleNamespace(
+        organization_id=tenant, id=assessment_id,
+        status_enum=AssessmentStatus.CANCELLING, status=AssessmentStatus.CANCELLING.value,
+    )
+    context = module._RunContext(
+        run_status=AgentRunStatus.RUNNING, organization_id=tenant,
+        assessment_id=assessment_id, session_id=conversation_id,
+        heartbeat_at=None, assessment_status=AssessmentStatus.CANCELLING,
+    )
+
+    class Session:
+        async def get(self, model, key):
+            assert key == run_id
+            return run
+
+    @asynccontextmanager
+    async def scope(settings):
+        yield Session()
+
+    async def load(self, session, organization_id, current_assessment_id):
+        assert (organization_id, current_assessment_id) == (tenant, assessment_id)
+        return assessment
+
+    async def cancel_jobs(session, row, *, principal):
+        events.append("jobs_cancelled")
+
+    async def transition(session, row, status, *, reason):
+        row.status = status.value
+        row.status_enum = status
+
+    async def receipt(self, current_context, current_run_id, outcome):
+        events.append(("receipt", current_context.organization_id, current_run_id, outcome))
+
+    class Emitter:
+        async def complete(self, *, assessment_id, status):
+            events.append(("event", assessment_id, status))
+
+    monkeypatch.setattr(module, "session_scope", scope)
+    monkeypatch.setattr(module, "cancel_jobs_for_assessment", cancel_jobs)
+    monkeypatch.setattr(module, "transition", transition)
+    monkeypatch.setattr(module.AgentWorker, "_load_assessment", load)
+    monkeypatch.setattr(module.AgentWorker, "_record_terminal_action_receipt", receipt)
+    worker = object.__new__(module.AgentWorker)
+    worker._settings = object()
+    worker._deps = SimpleNamespace(emitter=lambda **kwargs: Emitter())
+    await worker._cancel_teardown(run_id, context, None)
+    assert run.status == AgentRunStatus.CANCELLED.value
+    assert assessment.status == AssessmentStatus.CANCELLED.value
+    assert events == [
+        "jobs_cancelled",
+        ("receipt", tenant, run_id, "cancelled"),
+        ("event", assessment_id, AssessmentStatus.CANCELLED),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_operator_cancellation_refuses_run_from_another_tenant(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from app.db.enums import AgentRunStatus, AssessmentStatus
+    from app.worker import worker as module
+
+    run_id = uuid.uuid4()
+    run = SimpleNamespace(
+        organization_id=uuid.uuid4(), status_enum=AgentRunStatus.RUNNING,
+        status=AgentRunStatus.RUNNING.value,
+    )
+    context = module._RunContext(
+        run_status=AgentRunStatus.RUNNING, organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
+        heartbeat_at=None, assessment_status=AssessmentStatus.CANCELLING,
+    )
+
+    class Session:
+        async def get(self, model, key):
+            return run
+
+    @asynccontextmanager
+    async def scope(settings):
+        yield Session()
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Cross-tenant cancellation reached assessment or receipt")
+
+    monkeypatch.setattr(module, "session_scope", scope)
+    monkeypatch.setattr(module.AgentWorker, "_load_assessment", forbidden)
+    monkeypatch.setattr(module.AgentWorker, "_record_terminal_action_receipt", forbidden)
+    worker = object.__new__(module.AgentWorker)
+    worker._settings = object()
+    worker._deps = SimpleNamespace(emitter=lambda **kwargs: (_ for _ in ()).throw(
+        AssertionError("Cross-tenant completion event was emitted")
+    ))
+    await worker._cancel_teardown(run_id, context, None)
+    assert run.status == AgentRunStatus.RUNNING.value
 
 
 @pytest.mark.asyncio
@@ -380,9 +539,12 @@ async def test_retry_is_not_driven_before_due_and_counts_real_attempt(monkeypatc
 
     run_id = uuid.uuid4()
     context = _RunContext(
-        run_status=AgentRunStatus.RUNNING, organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.RUNNING,
+        organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
     due = False
     driven = []
@@ -429,9 +591,12 @@ async def test_tenant_run_slot_refusal_never_spends_an_attempt(monkeypatch) -> N
     run_id = uuid.uuid4()
     org_id = uuid.uuid4()
     context = _RunContext(
-        run_status=AgentRunStatus.QUEUED, organization_id=org_id,
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.QUEUED,
+        organization_id=org_id,
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
 
     async def load(self, current_run_id, message_id):
@@ -467,9 +632,12 @@ async def test_tenant_run_slot_released_after_graph_settles(monkeypatch) -> None
     run_id = uuid.uuid4()
     org_id = uuid.uuid4()
     context = _RunContext(
-        run_status=AgentRunStatus.QUEUED, organization_id=org_id,
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.QUEUED,
+        organization_id=org_id,
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
     events = []
 
@@ -513,11 +681,15 @@ async def test_worker_cancels_graph_when_tenant_lease_cannot_be_renewed(monkeypa
     from app.worker import worker as module
 
     context = module._RunContext(
-        run_status=AgentRunStatus.RUNNING, organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.RUNNING,
+        organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
     worker = object.__new__(module.AgentWorker)
+
     async def lost(self, organization_id, run_id):
         return False
 
@@ -559,11 +731,22 @@ async def test_tenant_run_slot_claim_is_atomic_in_redis(monkeypatch) -> None:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
     def start_local_redis():
         return subprocess.Popen(
-            [executable, "--bind", "127.0.0.1", "--port", str(port),  # noqa: S603 - resolved executable
-             "--save", "", "--appendonly", "no"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [  # noqa: S603 - executable and all arguments are test-controlled
+                executable,
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             creationflags=creationflags,
         )
 
@@ -589,9 +772,7 @@ async def test_tenant_run_slot_claim_is_atomic_in_redis(monkeypatch) -> None:
             worker._worker_id = worker_id
             worker._redis = redis_client
             worker._stream = f"test-runs:{org_id}"
-            worker._settings = SimpleNamespace(
-                agent=SimpleNamespace(max_concurrent_runs_per_org=1)
-            )
+            worker._settings = SimpleNamespace(agent=SimpleNamespace(max_concurrent_runs_per_org=1))
             workers.append(worker)
         accepted = await asyncio.gather(
             workers[0]._claim_run_slot(org_id, first_run),
@@ -654,9 +835,12 @@ async def test_unexpected_run_error_schedules_retry_without_ack(monkeypatch) -> 
     worker._runner = _Runner()
     worker._stopping = False
     context = _RunContext(
-        run_status=AgentRunStatus.RUNNING, organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.RUNNING,
+        organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
     await worker._run("1-0", uuid.uuid4(), context, None, 3)
     assert events == [("retry", "1-0", 3)]
@@ -671,9 +855,12 @@ async def test_retry_limit_dead_letters_and_settles_without_sixth_run(monkeypatc
     events = []
     run_id = uuid.uuid4()
     context = _RunContext(
-        run_status=AgentRunStatus.RUNNING, organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.RUNNING,
+        organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
 
     async def load(self, current_run_id, message_id):
@@ -715,10 +902,14 @@ async def test_retry_limit_dead_letters_and_settles_without_sixth_run(monkeypatc
     monkeypatch.setattr(AgentWorker, "_release_run_slot", release)
     worker = object.__new__(AgentWorker)
     await worker._dispatch(
-        "1-0", RunRequest.new(run_id, RunAction.START).to_fields(), reclaimed=True,
+        "1-0",
+        RunRequest.new(run_id, RunAction.START).to_fields(),
+        reclaimed=True,
     )
     assert events == [
-        ("dead", "retry_exhausted"), ("settled", run_id), ("ack", "1-0"),
+        ("dead", "retry_exhausted"),
+        ("settled", run_id),
+        ("ack", "1-0"),
     ]
 
 
@@ -732,14 +923,18 @@ async def test_retry_exhaustion_never_changes_a_foreign_tenant_run(monkeypatch) 
 
     run_id = uuid.uuid4()
     run = SimpleNamespace(
-        organization_id=uuid.uuid4(), status_enum=AgentRunStatus.RUNNING,
-        status=AgentRunStatus.RUNNING.value, completed_at=None,
+        organization_id=uuid.uuid4(),
+        status_enum=AgentRunStatus.RUNNING,
+        status=AgentRunStatus.RUNNING.value,
+        completed_at=None,
     )
     context = worker_module._RunContext(
         run_status=AgentRunStatus.RUNNING,
         organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
 
     class _Session:
@@ -775,18 +970,27 @@ async def test_retry_exhaustion_fails_tenant_run_and_assessment(monkeypatch) -> 
     org_id = uuid.uuid4()
     assessment_id = uuid.uuid4()
     run = SimpleNamespace(
-        organization_id=org_id, status_enum=AgentRunStatus.RUNNING,
-        status=AgentRunStatus.RUNNING.value, completed_at=None,
-        heartbeat_at=None, failure_reason=None,
+        organization_id=org_id,
+        status_enum=AgentRunStatus.RUNNING,
+        status=AgentRunStatus.RUNNING.value,
+        completed_at=None,
+        heartbeat_at=None,
+        failure_reason=None,
     )
     assessment = SimpleNamespace(
-        organization_id=org_id, id=assessment_id,
-        status_enum=AssessmentStatus.PLANNING, status=AssessmentStatus.PLANNING.value,
+        organization_id=org_id,
+        id=assessment_id,
+        status_enum=AssessmentStatus.PLANNING,
+        status=AssessmentStatus.PLANNING.value,
     )
+    receipts = []
     context = worker_module._RunContext(
-        run_status=AgentRunStatus.RUNNING, organization_id=org_id,
-        assessment_id=assessment_id, session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=AssessmentStatus.PLANNING,
+        run_status=AgentRunStatus.RUNNING,
+        organization_id=org_id,
+        assessment_id=assessment_id,
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=AssessmentStatus.PLANNING,
     )
 
     class _Session:
@@ -807,9 +1011,13 @@ async def test_retry_exhaustion_fails_tenant_run_and_assessment(monkeypatch) -> 
         target.status = status.value
         target.status_enum = status
 
+    async def record_receipt(self, current_context, current_run_id, outcome):
+        receipts.append((current_context.organization_id, current_run_id, outcome))
+
     monkeypatch.setattr(worker_module, "session_scope", scoped)
     monkeypatch.setattr(worker_module, "transition", transition)
     monkeypatch.setattr(worker_module.AgentWorker, "_load_assessment", load_assessment)
+    monkeypatch.setattr(worker_module.AgentWorker, "_record_terminal_action_receipt", record_receipt)
     worker = object.__new__(worker_module.AgentWorker)
     worker._settings = object()
     await worker._settle_retry_exhausted(run_id, context)
@@ -817,6 +1025,7 @@ async def test_retry_exhaustion_fails_tenant_run_and_assessment(monkeypatch) -> 
     assert run.completed_at is not None
     assert run.failure_reason
     assert assessment.status == AssessmentStatus.FAILED.value
+    assert receipts == [(org_id, run_id, "failed")]
 
 
 @pytest.mark.asyncio
@@ -826,9 +1035,12 @@ async def test_failed_retry_settlement_keeps_stream_message_pending(monkeypatch)
     from app.worker.worker import AgentWorker, _RunContext
 
     context = _RunContext(
-        run_status=AgentRunStatus.RUNNING, organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        heartbeat_at=None, assessment_status=None,
+        run_status=AgentRunStatus.RUNNING,
+        organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        heartbeat_at=None,
+        assessment_status=None,
     )
     acked = []
 
@@ -866,7 +1078,9 @@ async def test_failed_retry_settlement_keeps_stream_message_pending(monkeypatch)
     monkeypatch.setattr(AgentWorker, "_release_run_slot", release)
     worker = object.__new__(AgentWorker)
     await worker._dispatch(
-        "1-0", RunRequest.new(uuid.uuid4(), RunAction.START).to_fields(), reclaimed=True,
+        "1-0",
+        RunRequest.new(uuid.uuid4(), RunAction.START).to_fields(),
+        reclaimed=True,
     )
     assert acked == []
 
@@ -889,8 +1103,11 @@ def test_staging_run_dispatch_is_idempotent_and_does_not_publish() -> None:
     run_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.OWNER)
     staged = stage_run_dispatch(
-        session, organization_id=org_id, run_id=run_id,
-        action=RunAction.START, principal=principal,
+        session,
+        organization_id=org_id,
+        run_id=run_id,
+        action=RunAction.START,
+        principal=principal,
     )
     assert session.added == [staged]
     assert staged.organization_id == org_id
@@ -912,10 +1129,14 @@ def test_start_dispatch_refuses_a_foreign_tenant_principal() -> None:
 
     with pytest.raises(ValueError, match="same-tenant"):
         stage_run_dispatch(
-            _Session(), organization_id=uuid.uuid4(), run_id=uuid.uuid4(),
+            _Session(),
+            organization_id=uuid.uuid4(),
+            run_id=uuid.uuid4(),
             action=RunAction.START,
             principal=Principal(
-                user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER,
+                user_id=uuid.uuid4(),
+                organization_id=uuid.uuid4(),
+                role=Role.OWNER,
             ),
         )
 
@@ -942,7 +1163,10 @@ async def test_outbox_publish_records_stream_id_after_success() -> None:
     org_id = uuid.uuid4()
     run_id = uuid.uuid4()
     row = stage_run_dispatch(
-        _Session(), organization_id=org_id, run_id=run_id, action=RunAction.RESUME,
+        _Session(),
+        organization_id=org_id,
+        run_id=run_id,
+        action=RunAction.RESUME,
     )
     redis = _Redis()
     settings = SimpleNamespace(redis=SimpleNamespace(stream="runs"))
@@ -972,7 +1196,9 @@ async def test_outbox_publish_failure_remains_pending_for_retry() -> None:
             raise RedisError("provider error containing a secret")
 
     row = stage_run_dispatch(
-        _Session(), organization_id=uuid.uuid4(), run_id=uuid.uuid4(),
+        _Session(),
+        organization_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
         action=RunAction.RESUME,
     )
     before = row.available_at
@@ -1019,11 +1245,17 @@ async def test_outbox_sweep_interleaves_tenants_and_publishes_due_rows() -> None
     run_ids = [uuid.uuid4(), uuid.uuid4()]
     for org_id, run_id in zip(org_ids, run_ids, strict=True):
         stage_run_dispatch(
-            session, organization_id=org_id, run_id=run_id, action=RunAction.RESUME,
+            session,
+            organization_id=org_id,
+            run_id=run_id,
+            action=RunAction.RESUME,
         )
     redis = _Redis()
     count = await deliver_pending_dispatches(
-        session, redis, SimpleNamespace(redis=SimpleNamespace(stream="runs")), limit=2,
+        session,
+        redis,
+        SimpleNamespace(redis=SimpleNamespace(stream="runs")),
+        limit=2,
     )
     assert count == 2
     assert redis.published == [str(item) for item in run_ids]
@@ -1041,8 +1273,15 @@ def test_recurring_scan_schema_keeps_profile_scope_and_authorization_separate() 
     schedule_columns = RecurringScan.__table__.columns
     assert {"organization_id", "config", "name", "created_by_id"} <= set(profile_columns.keys())
     assert {
-        "organization_id", "profile_id", "targets", "cron_expression", "timezone",
-        "authorization_text", "authorization_expires_at", "next_run_at", "enabled",
+        "organization_id",
+        "profile_id",
+        "targets",
+        "cron_expression",
+        "timezone",
+        "authorization_text",
+        "authorization_expires_at",
+        "next_run_at",
+        "enabled",
     } <= set(schedule_columns.keys())
     assert "authorization_text" not in profile_columns
 
@@ -1053,7 +1292,8 @@ def test_agent_action_storage_accepts_the_supported_tenable_sync() -> None:
     from app.db.models.agent import AgentAction
 
     constraint = next(
-        item for item in AgentAction.__table__.constraints
+        item
+        for item in AgentAction.__table__.constraints
         if isinstance(item, CheckConstraint) and item.name.endswith("valid_agent_action")
     )
     assert "sync_tenable_vulnerabilities" in str(constraint.sqltext)
@@ -1087,11 +1327,17 @@ async def test_immediate_dispatch_lookup_is_tenant_scoped() -> None:
     org_id = uuid.uuid4()
     session = _Session()
     row = stage_run_dispatch(
-        session, organization_id=org_id, run_id=uuid.uuid4(), action=RunAction.RESUME,
+        session,
+        organization_id=org_id,
+        run_id=uuid.uuid4(),
+        action=RunAction.RESUME,
     )
     success = await deliver_run_dispatch(
-        session, organization_id=org_id, dispatch_id=row.id,
-        redis=_Redis(), settings=SimpleNamespace(redis=SimpleNamespace(stream="runs")),
+        session,
+        organization_id=org_id,
+        dispatch_id=row.id,
+        redis=_Redis(),
+        settings=SimpleNamespace(redis=SimpleNamespace(stream="runs")),
     )
     assert success is True
     assert row.status == "sent"
@@ -1141,7 +1387,9 @@ async def test_assessment_route_commits_outbox_before_publish_attempt(monkeypatc
 
     events = []
     assessment = SimpleNamespace(
-        id=uuid.uuid4(), title="Authorized scope", agent_session_id=None,
+        id=uuid.uuid4(),
+        title="Authorized scope",
+        agent_session_id=None,
     )
 
     class _Session:
@@ -1173,10 +1421,16 @@ async def test_assessment_route_commits_outbox_before_publish_attempt(monkeypatc
     monkeypatch.setattr(assessments_route, "assessment_detail_out", project)
     session = _Session()
     principal = Principal(
-        user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER,
+        user_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        role=Role.OWNER,
     )
     result = await assessments_route.create_assessment(
-        object(), principal, session, object(), object(),
+        object(),
+        principal,
+        session,
+        object(),
+        object(),
     )
     dispatch = next(row for row in session.rows if isinstance(row, RunDispatch))
     assert result is assessment
@@ -1224,10 +1478,17 @@ async def test_approval_resolution_stages_resume_before_commit(monkeypatch) -> N
     monkeypatch.setattr(approvals_route, "load_approval_out", project)
     session = _Session()
     principal = Principal(
-        user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER,
+        user_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        role=Role.OWNER,
     )
     await approvals_route.resolve_approval(
-        uuid.uuid4(), object(), principal, session, object(), object(),
+        uuid.uuid4(),
+        object(),
+        principal,
+        session,
+        object(),
+        object(),
     )
     dispatch = next(row for row in session.rows if isinstance(row, RunDispatch))
     assert dispatch.run_id == run_id
@@ -1284,7 +1545,12 @@ def test_recurring_scan_cron_uses_tenant_timezone_and_rejects_bad_input() -> Non
 
     base = dt.datetime(2026, 10, 5, 2, 0, tzinfo=dt.UTC)
     assert next_scan_time("0 9 * * *", "Asia/Kolkata", base) == dt.datetime(
-        2026, 10, 5, 3, 30, tzinfo=dt.UTC,
+        2026,
+        10,
+        5,
+        3,
+        30,
+        tzinfo=dt.UTC,
     )
     with pytest.raises(ValueError):
         next_scan_time("* * * * * *", "UTC", base)
@@ -1304,30 +1570,50 @@ async def test_due_scan_refuses_expired_or_cross_tenant_authorization(monkeypatc
     now = dt.datetime(2026, 10, 5, 0, 0, tzinfo=dt.UTC)
     org_id = uuid.uuid4()
     principal = Principal.for_worker(
-        organization_id=org_id, user_id=uuid.uuid4(), role=Role.OWNER,
+        organization_id=org_id,
+        user_id=uuid.uuid4(),
+        role=Role.OWNER,
     )
     profile = SimpleNamespace(organization_id=org_id, is_active=True, config={})
     schedule = SimpleNamespace(
-        organization_id=org_id, authorization_expires_at=now,
-        enabled=True, last_error_code=None,
+        organization_id=org_id,
+        authorization_expires_at=now,
+        enabled=True,
+        last_error_code=None,
     )
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("unauthorized scheduled assessment was created")
 
     monkeypatch.setattr(service.assessment_service, "create_assessment", forbidden, raising=False)
-    assert await service.execute_due_scan(
-        object(), schedule, profile, principal, object(), now=now,
-    ) is None
+    assert (
+        await service.execute_due_scan(
+            object(),
+            schedule,
+            profile,
+            principal,
+            object(),
+            now=now,
+        )
+        is None
+    )
     assert schedule.enabled is False
     assert schedule.last_error_code == "authorization_expired"
 
     schedule.enabled = True
     schedule.authorization_expires_at = now + dt.timedelta(days=1)
     profile.organization_id = uuid.uuid4()
-    assert await service.execute_due_scan(
-        object(), schedule, profile, principal, object(), now=now,
-    ) is None
+    assert (
+        await service.execute_due_scan(
+            object(),
+            schedule,
+            profile,
+            principal,
+            object(),
+            now=now,
+        )
+        is None
+    )
     assert schedule.enabled is False
     assert schedule.last_error_code == "profile_tenant_mismatch"
 
@@ -1345,20 +1631,29 @@ async def test_due_scan_revalidates_scope_and_stages_a_real_run(monkeypatch) -> 
     now = dt.datetime(2026, 10, 5, 2, 0, tzinfo=dt.UTC)
     org_id = uuid.uuid4()
     principal = Principal.for_worker(
-        organization_id=org_id, user_id=uuid.uuid4(), role=Role.OWNER,
+        organization_id=org_id,
+        user_id=uuid.uuid4(),
+        role=Role.OWNER,
     )
     profile = SimpleNamespace(
-        organization_id=org_id, is_active=True,
+        organization_id=org_id,
+        is_active=True,
         config={"scope": "external", "depth": "standard"},
     )
     schedule = SimpleNamespace(
-        organization_id=org_id, targets=["example.com"], name="Daily scope",
+        organization_id=org_id,
+        targets=["example.com"],
+        name="Daily scope",
         authorization_text="I am authorized to assess example.com",
         authorization_evidence="ENG-123",
         authorization_expires_at=now + dt.timedelta(days=1),
-        cron_expression="0 9 * * *", timezone="Asia/Kolkata",
-        enabled=True, last_error_code=None, next_run_at=now,
-        last_run_at=None, last_assessment_id=None,
+        cron_expression="0 9 * * *",
+        timezone="Asia/Kolkata",
+        enabled=True,
+        last_error_code=None,
+        next_run_at=now,
+        last_run_at=None,
+        last_assessment_id=None,
     )
     assessment = SimpleNamespace(id=uuid.uuid4(), title="Daily scope")
     payloads = []
@@ -1388,7 +1683,12 @@ async def test_due_scan_revalidates_scope_and_stages_a_real_run(monkeypatch) -> 
     monkeypatch.setattr(service.assessment_service, "create_assessment", create, raising=False)
     monkeypatch.setattr(service, "stage_assessment_run", stage, raising=False)
     result = await service.execute_due_scan(
-        _Session(), schedule, profile, principal, object(), now=now,
+        _Session(),
+        schedule,
+        profile,
+        principal,
+        object(),
+        now=now,
     )
     assert result == assessment.id
     assert staged == [assessment.id]
@@ -1416,8 +1716,13 @@ async def test_assessment_creation_stamps_tenant_on_targets_and_append_only_auth
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.OWNER)
     organization = SimpleNamespace(entitlements={})
     validated = SimpleNamespace(
-        raw="EXAMPLE.COM", canonical="example.com", type=SimpleNamespace(value="domain"),
-        host="example.com", port=None, host_count=1, metadata={},
+        raw="EXAMPLE.COM",
+        canonical="example.com",
+        type=SimpleNamespace(value="domain"),
+        host="example.com",
+        port=None,
+        host_count=1,
+        metadata={},
     )
 
     class _Session:
@@ -1456,11 +1761,13 @@ async def test_assessment_creation_stamps_tenant_on_targets_and_append_only_auth
     monkeypatch.setattr(service.audit_service, "record", record)
     session = _Session()
     await service.create_assessment(
-        session, principal,
+        session,
+        principal,
         AssessmentCreateIn(
             targets=["EXAMPLE.COM"],
             authorization={"confirmed": True, "attestation_text": "Authorized"},
-        ), object(),
+        ),
+        object(),
         authorization_method="scheduled",
     )
     targets = [row for row in session.rows if isinstance(row, AssessmentTarget)]
@@ -1484,8 +1791,10 @@ async def test_due_scan_sweep_checks_current_membership_and_profile_tenant(monke
     org_id = uuid.uuid4()
     user_id = uuid.uuid4()
     schedule = SimpleNamespace(
-        organization_id=org_id, created_by_id=user_id,
-        enabled=True, last_error_code=None,
+        organization_id=org_id,
+        created_by_id=user_id,
+        enabled=True,
+        last_error_code=None,
     )
     profile = SimpleNamespace(organization_id=org_id)
     statements = []
@@ -1504,7 +1813,9 @@ async def test_due_scan_sweep_checks_current_membership_and_profile_tenant(monke
 
     monkeypatch.setattr(service, "execute_due_scan", execute)
     count = await service.run_due_scans(
-        _Session(), object(), now=dt.datetime(2026, 10, 5, tzinfo=dt.UTC),
+        _Session(),
+        object(),
+        now=dt.datetime(2026, 10, 5, tzinfo=dt.UTC),
     )
     assert count == 1
     assert called[0].organization_id == org_id
@@ -1526,8 +1837,10 @@ async def test_due_scan_disables_schedule_after_operator_loses_membership(monkey
     from app.services import recurring_scan as service
 
     schedule = SimpleNamespace(
-        organization_id=uuid.uuid4(), created_by_id=uuid.uuid4(),
-        enabled=True, last_error_code=None,
+        organization_id=uuid.uuid4(),
+        created_by_id=uuid.uuid4(),
+        enabled=True,
+        last_error_code=None,
     )
     profile = SimpleNamespace(organization_id=schedule.organization_id)
 
@@ -1546,7 +1859,9 @@ async def test_due_scan_disables_schedule_after_operator_loses_membership(monkey
 
     monkeypatch.setattr(service, "execute_due_scan", forbidden)
     count = await service.run_due_scans(
-        _Session(), object(), now=dt.datetime(2026, 10, 5, tzinfo=dt.UTC),
+        _Session(),
+        object(),
+        now=dt.datetime(2026, 10, 5, tzinfo=dt.UTC),
     )
     assert count == 0
     assert schedule.enabled is False
@@ -1574,7 +1889,8 @@ async def test_profile_creation_stores_only_tenant_owned_scan_defaults() -> None
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.OWNER)
     session = _Session()
     profile = await create_scan_profile(
-        session, principal,
+        session,
+        principal,
         ScanProfileCreateIn(name="Standard web", scope="external", depth="standard"),
     )
     assert session.added == [profile]
@@ -1618,26 +1934,38 @@ async def test_schedule_creation_rejects_expired_authority_and_minutely_cron(mon
         return object()
 
     monkeypatch.setattr(service.assessment_service, "_policy_for", policy)
-    monkeypatch.setattr(service.assessment_service, "_validate_targets", lambda targets, policy: targets)
+    monkeypatch.setattr(
+        service.assessment_service, "_validate_targets", lambda targets, policy: targets
+    )
     now = dt.datetime.now(dt.UTC)
     common = {
-        "name": "Daily scope", "profile_id": profile_id, "targets": ["example.com"],
+        "name": "Daily scope",
+        "profile_id": profile_id,
+        "targets": ["example.com"],
         "timezone": "UTC",
         "authorization": {"confirmed": True, "attestation_text": "Authorized for example.com"},
     }
     session = _Session()
     with pytest.raises(InvalidConfigurationError, match="future"):
         await service.create_recurring_scan(
-            session, principal,
-            RecurringScanCreateIn(**common, cron_expression="0 9 * * *",
-                                  authorization_expires_at=now - dt.timedelta(minutes=1)),
+            session,
+            principal,
+            RecurringScanCreateIn(
+                **common,
+                cron_expression="0 9 * * *",
+                authorization_expires_at=now - dt.timedelta(minutes=1),
+            ),
             object(),
         )
     with pytest.raises(InvalidConfigurationError, match="15 minutes"):
         await service.create_recurring_scan(
-            session, principal,
-            RecurringScanCreateIn(**common, cron_expression="* * * * *",
-                                  authorization_expires_at=now + dt.timedelta(days=1)),
+            session,
+            principal,
+            RecurringScanCreateIn(
+                **common,
+                cron_expression="* * * * *",
+                authorization_expires_at=now + dt.timedelta(days=1),
+            ),
             object(),
         )
     assert session.added == []
@@ -1672,8 +2000,11 @@ async def test_schedule_creation_rejects_cross_tenant_profile(monkeypatch) -> No
 
     session = _Session()
     payload = RecurringScanCreateIn(
-        name="Daily", profile_id=profile_id, targets=["example.com"],
-        cron_expression="0 9 * * *", timezone="UTC",
+        name="Daily",
+        profile_id=profile_id,
+        targets=["example.com"],
+        cron_expression="0 9 * * *",
+        timezone="UTC",
         authorization={"confirmed": True, "attestation_text": "Authorized"},
         authorization_expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=2),
     )
@@ -1718,18 +2049,24 @@ async def test_schedule_creation_canonicalizes_targets_and_stages_tenant_row(mon
 
     monkeypatch.setattr(service.assessment_service, "_policy_for", policy)
     monkeypatch.setattr(
-        service.assessment_service, "_validate_targets",
+        service.assessment_service,
+        "_validate_targets",
         lambda targets, policy: [SimpleNamespace(canonical="example.com")],
     )
     session = _Session()
     result = await service.create_recurring_scan(
-        session, principal,
+        session,
+        principal,
         RecurringScanCreateIn(
-            name="Daily", profile_id=profile_id, targets=["EXAMPLE.COM"],
-            cron_expression="0 9 * * *", timezone="UTC",
+            name="Daily",
+            profile_id=profile_id,
+            targets=["EXAMPLE.COM"],
+            cron_expression="0 9 * * *",
+            timezone="UTC",
             authorization={"confirmed": True, "attestation_text": "Authorized"},
             authorization_expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(days=2),
-        ), object(),
+        ),
+        object(),
     )
     assert session.added == [result]
     assert result.organization_id == org_id
@@ -1787,9 +2124,15 @@ async def test_due_scan_claim_fairly_caps_one_tenant_per_sweep() -> None:
             return SimpleNamespace(all=lambda: [])
 
     session = _Session()
-    assert await run_due_scans(
-        session, object(), now=dt.datetime.now(dt.UTC), limit=10,
-    ) == 0
+    assert (
+        await run_due_scans(
+            session,
+            object(),
+            now=dt.datetime.now(dt.UTC),
+            limit=10,
+        )
+        == 0
+    )
     sql = str(session.statement).lower()
     assert "row_number() over" in sql
     assert "partition by recurring_scans.organization_id" in sql
@@ -1907,7 +2250,10 @@ async def test_tenant_scanner_limit_is_enforced_below_deployment_limit(monkeypat
     monkeypatch.setattr(service, "release_slot", release)
     organization_id = uuid.uuid4()
     admitted = await service.claim_slot(
-        _Redis(), Settings(), organization_id, organization_limit=1,
+        _Redis(),
+        Settings(),
+        organization_id,
+        organization_limit=1,
     )
     assert admitted is False
     assert released == [organization_id]
@@ -1919,6 +2265,11 @@ async def test_tenant_scanner_limit_is_enforced_below_deployment_limit(monkeypat
             assert key == organization_id
             return org
 
-    assert await service.organization_scanner_limit(
-        _Session(), organization_id, Settings(),
-    ) == 1
+    assert (
+        await service.organization_scanner_limit(
+            _Session(),
+            organization_id,
+            Settings(),
+        )
+        == 1
+    )

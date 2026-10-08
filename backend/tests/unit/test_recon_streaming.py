@@ -30,8 +30,11 @@ def test_recon_stops_consuming_source_at_asset_cap(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(parser, "MAX_ASSETS", 5)
     assets = parser.parse_recon_output(tmp_path)
     assert [asset.name for asset in assets] == [
-        "host0.example.com", "host1.example.com", "host2.example.com",
-        "host3.example.com", "host4.example.com",
+        "host0.example.com",
+        "host1.example.com",
+        "host2.example.com",
+        "host3.example.com",
+        "host4.example.com",
     ]
     assert len(consumed) == 5
 
@@ -46,11 +49,18 @@ def test_recon_streaming_keeps_httpx_enrichment_and_ip_pair(tmp_path) -> None:
     webs.mkdir()
     (webs / "webs.txt").write_text("https://www.example.com/\n", encoding="utf-8")
     (webs / "web_full_info.txt").write_text(
-        json.dumps({
-            "url": "https://www.example.com/", "host": "203.0.113.10",
-            "port": 443, "scheme": "https", "tech": ["nginx"],
-            "title": "Home", "status_code": 200,
-        }) + "\n",
+        json.dumps(
+            {
+                "url": "https://www.example.com/",
+                "host": "203.0.113.10",
+                "port": 443,
+                "scheme": "https",
+                "tech": ["nginx"],
+                "title": "Home",
+                "status_code": 200,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     assets = parse_recon_output(tmp_path)
@@ -70,18 +80,23 @@ async def test_recon_replay_does_not_start_completed_container(monkeypatch) -> N
 
     org_id, assessment_id, job_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     state = {
-        "organization_id": str(org_id), "assessment_id": str(assessment_id),
+        "organization_id": str(org_id),
+        "assessment_id": str(assessment_id),
     }
     plan = recon._ReconPlan(
-        seeds=[], hosts=["example.com"], primary_domain="example.com",
-        job_id=job_id, timeout_seconds=30,
+        seeds=[],
+        hosts=["example.com"],
+        primary_domain="example.com",
+        job_id=job_id,
+        timeout_seconds=30,
     )
 
     class Session:
         async def get(self, model, key):
             assert key == job_id
             return SimpleNamespace(
-                organization_id=org_id, status=JobStatus.COMPLETED.value,
+                organization_id=org_id,
+                status=JobStatus.COMPLETED.value,
             )
 
     @asynccontextmanager
@@ -95,7 +110,9 @@ async def test_recon_replay_does_not_start_completed_container(monkeypatch) -> N
     monkeypatch.setattr(recon, "session_scope", scope)
     outcome = await recon._execute_recon(
         SimpleNamespace(settings=SimpleNamespace(), runner=Runner()),
-        state, SimpleNamespace(), plan,
+        state,
+        SimpleNamespace(),
+        plan,
     )
     assert outcome.assets == []
     assert outcome.degradation is not None

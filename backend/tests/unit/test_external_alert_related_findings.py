@@ -47,15 +47,30 @@ async def test_related_findings_match_cve_inside_one_tenant_with_a_bounded_query
     org_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.VIEWER)
     alert = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=org_id, provider="gitlab",
-        external_id="alert:1", category="sast", title="Dependency issue",
-        severity="high", status="open", triage_status="new", triage_version=0,
-        cve_ids=["CVE-2026-1234", "CVE-2026-5678"], evidence={}, raw_payload={},
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        provider="gitlab",
+        external_id="alert:1",
+        category="sast",
+        title="Dependency issue",
+        severity="high",
+        status="open",
+        triage_status="new",
+        triage_version=0,
+        cve_ids=["CVE-2026-1234", "CVE-2026-5678"],
+        evidence={},
+        raw_payload={},
     )
     finding = Finding(
-        id=uuid.uuid4(), organization_id=org_id, defectdojo_finding_id=42,
-        title="Vulnerable component", severity="high", status="active",
-        cve_ids=["CVE-2026-1234"], is_duplicate=False, is_false_positive=False,
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        defectdojo_finding_id=42,
+        title="Vulnerable component",
+        severity="high",
+        status="active",
+        cve_ids=["CVE-2026-1234"],
+        is_duplicate=False,
+        is_false_positive=False,
     )
     session = _Session(alert, [finding])
 
@@ -81,10 +96,19 @@ async def test_related_findings_skip_database_search_for_alert_without_cves() ->
     org_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.VIEWER)
     alert = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=org_id, provider="wazuh",
-        external_id="alert:2", category="rule", title="Authentication event",
-        severity="medium", status="open", triage_status="new", triage_version=0,
-        cve_ids=[], evidence={}, raw_payload={},
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        provider="wazuh",
+        external_id="alert:2",
+        category="rule",
+        title="Authentication event",
+        severity="medium",
+        status="open",
+        triage_status="new",
+        triage_version=0,
+        cve_ids=[],
+        evidence={},
+        raw_payload={},
     )
     session = _Session(alert, [])
 

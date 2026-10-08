@@ -49,7 +49,9 @@ async def test_sonarqube_reads_every_page_with_tenant_token_and_project_scope(mo
     assert len(issues) == 101
     assert [request[1]["p"] for request in transport.requests[1:]] == [1, 2]
     assert all(request[1]["componentKeys"] == "payments" for request in transport.requests[1:])
-    assert all(request[1]["impactSoftwareQualities"] == "SECURITY" for request in transport.requests[1:])
+    assert all(
+        request[1]["impactSoftwareQualities"] == "SECURITY" for request in transport.requests[1:]
+    )
     assert all(
         request[2]["Authorization"] == "Bearer tenant-token" for request in transport.requests
     )
@@ -101,7 +103,9 @@ async def test_sonarqube_rejects_repeated_issue_across_pages(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_sonarqube_ignores_nonsecurity_issue_if_legacy_server_ignores_quality_filter(monkeypatch) -> None:
+async def test_sonarqube_ignores_nonsecurity_issue_if_legacy_server_ignores_quality_filter(
+    monkeypatch,
+) -> None:
     from app.integrations.sonarqube import SonarQubeClient
 
     class _Mixed:
@@ -116,7 +120,13 @@ async def test_sonarqube_ignores_nonsecurity_issue_if_legacy_server_ignores_qual
 
     monkeypatch.setattr("app.integrations.sonarqube.build_client", lambda **kwargs: _Mixed())
     client = SonarQubeClient(
-        Settings(sonarqube={"base_url": "https://sonar.example", "api_token": "tenant-token", "project_keys": ["payments"]})
+        Settings(
+            sonarqube={
+                "base_url": "https://sonar.example",
+                "api_token": "tenant-token",
+                "project_keys": ["payments"],
+            }
+        )
     )
     assert [issue["key"] for issue in await client.list_vulnerabilities()] == ["security"]
 
@@ -216,9 +226,12 @@ def test_sonarqube_security_impact_overrides_legacy_severity() -> None:
     from app.services.external_alert import normalize_sonarqube_issue
 
     alert = normalize_sonarqube_issue(
-        "https://sonar.example", "payments",
+        "https://sonar.example",
+        "payments",
         {
-            "key": "AZ789", "project": "payments", "message": "Security impact",
+            "key": "AZ789",
+            "project": "payments",
+            "message": "Security impact",
             "severity": "INFO",
             "impacts": [
                 {"softwareQuality": "SECURITY", "severity": "HIGH"},
@@ -272,7 +285,9 @@ async def test_sonarqube_sync_stages_tenant_scoped_idempotent_alerts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sonarqube_reconciliation_requires_two_complete_misses_within_tenant_and_projects() -> None:
+async def test_sonarqube_reconciliation_requires_two_complete_misses_within_tenant_and_projects() -> (
+    None
+):
     import uuid
 
     from sqlalchemy.sql.dml import Update
@@ -351,6 +366,7 @@ async def test_sonarqube_sync_uses_tenant_settings_and_closes_client(monkeypatch
         async def execute(self, statement):
             events.append("staged")
             from tests.unit._empty_rows import EmptyRows
+
             return EmptyRows()
 
     async def record(*args, **kwargs):
@@ -366,7 +382,9 @@ async def test_sonarqube_sync_uses_tenant_settings_and_closes_client(monkeypatch
     monkeypatch.setattr("app.services.integration.find_integration", find)
     monkeypatch.setattr("app.services.integration.resolve_settings", resolve)
     monkeypatch.setattr("app.services.external_alert.SonarQubeClient", _Client)
-    monkeypatch.setattr("app.services.external_alert.reconcile_missing_sonarqube_issues", reconcile, raising=False)
+    monkeypatch.setattr(
+        "app.services.external_alert.reconcile_missing_sonarqube_issues", reconcile, raising=False
+    )
     monkeypatch.setattr("app.services.external_alert.audit_service.record", record)
 
     result = await sync_sonarqube_alerts(_Session(), principal, settings=Settings(), redis=None)

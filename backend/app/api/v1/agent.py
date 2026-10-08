@@ -67,11 +67,12 @@ from app.schemas.agent import (
     AgentRunOut,
     AgentSessionDetailOut,
     AgentSessionOut,
+    AssessmentWorkOut,
 )
 from app.schemas.common import Page
 from app.services import agent_action as agent_action_service
 from app.services import audit as audit_service
-from app.services.agent_chat import create_reply
+from app.services.agent_chat import create_reply, load_assessment_run_details
 from app.services.agent_chat_actions import propose_chat_actions
 from app.services.context import Principal
 from app.services.events import EventEmitter
@@ -103,7 +104,29 @@ async def list_agent_actions(
         )
         stmt = stmt.where(AgentAction.session_id == session_id)
     rows = (await session.execute(stmt)).scalars().all()
-    return [AgentActionOut.model_validate(row) for row in rows]
+    details = await load_assessment_run_details(
+        session,
+        principal,
+        [row.run_id for row in rows if row.action == "start_assessment" and row.run_id],
+    )
+    output = []
+    for row in rows:
+        action = AgentActionOut.model_validate(row)
+        if row.action == "start_assessment" and row.run_id in details:
+            detail = details[row.run_id]
+            assessment = detail.get("assessment")
+            action = action.model_copy(
+                update={
+                    "run_status": detail.get("run_status"),
+                    "assessment": (
+                        AssessmentWorkOut.model_validate(assessment)
+                        if isinstance(assessment, dict)
+                        else None
+                    ),
+                }
+            )
+        output.append(action)
+    return output
 
 
 @router.post("/actions", response_model=AgentActionOut, status_code=status.HTTP_201_CREATED)

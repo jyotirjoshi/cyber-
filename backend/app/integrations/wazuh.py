@@ -79,9 +79,7 @@ class WazuhClient:
             token = (payload.get("data") or {}).get("token")
             if isinstance(token, str) and token.strip():
                 return token.strip()
-        raise IntegrationError(
-            "Wazuh authentication returned no token.", provider=PROVIDER
-        )
+        raise IntegrationError("Wazuh authentication returned no token.", provider=PROVIDER)
 
     async def _authenticate(self) -> str:
         if self._jwt:

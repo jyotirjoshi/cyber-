@@ -83,6 +83,8 @@ def _risk_factors_for_chat(factors: dict) -> dict:
                 "severity_label",
                 "cvss_score",
                 "in_kev",
+                "exploit_available",
+                "observed_in_the_wild",
                 "epss_score",
                 "internet_exposed",
                 "asset_criticality",

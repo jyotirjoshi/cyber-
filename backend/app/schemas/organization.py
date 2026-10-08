@@ -22,12 +22,14 @@ from app.services.entitlements import OrganizationEntitlements, load_entitlement
 #: ownership is granted only by an existing owner promoting a member via PATCH,
 #: never by minting it on a fresh invite. This prevents the invite endpoint from
 #: being used to bootstrap a second owner without going through the normal flow.
-_INVITABLE_ROLES = frozenset({
-    Role.VIEWER,
-    Role.DEVELOPER,
-    Role.SECURITY_ENGINEER,
-    Role.ADMIN,
-})
+_INVITABLE_ROLES = frozenset(
+    {
+        Role.VIEWER,
+        Role.DEVELOPER,
+        Role.SECURITY_ENGINEER,
+        Role.ADMIN,
+    }
+)
 
 
 class RiskWeights(BaseModel):

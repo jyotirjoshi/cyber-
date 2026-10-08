@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import CynuxError
 from app.core.logging_conf import redact_text
 from app.db.enums import MessageRole, Permission
-from app.db.models.agent import AgentAction, AgentMessage, AgentSession
+from app.db.models.agent import AgentAction, AgentMessage, AgentRun, AgentSession
+from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding
@@ -29,7 +30,8 @@ _MAX_SEQ_RETRIES = 3
 _SNAPSHOT_LIMIT = 5
 _WORK_STATUS_QUESTION = re.compile(
     r"\b(?:status|progress|finish(?:ed)?|done|complet(?:e|ed)|did you|what happened|"
-    r"results?|worked|failed|approved?|executed?)\b", re.I,
+    r"results?|worked|failed|approved?|executed?)\b",
+    re.I,
 )
 _ACTION_NAMES = {
     "sync_connected_sources": "Connected security-source sync",
@@ -42,6 +44,7 @@ _ACTION_NAMES = {
     "create_jira_ticket": "Jira ticket creation",
     "update_github_alert": "GitHub alert update",
     "update_canonical_work": "Remediation work update",
+    "start_assessment": "Assessment start",
 }
 
 _SYSTEM_PROMPT = """You are Cynux, a cybersecurity exposure-management assistant.
@@ -97,9 +100,13 @@ def format_action_status(action_result: str | None) -> str:
         elif status == "permission_denied":
             lines.append(f"{name}: not run; your role lacks the required permission.")
         elif status == "integration_not_ready":
-            lines.append(f"{name}: not run; configure the integration before requesting this action.")
+            lines.append(
+                f"{name}: not run; configure the integration before requesting this action."
+            )
         elif status == "finding_not_found":
             lines.append(f"{name}: not run; the named finding was not accessible.")
+        elif status == "target_not_scannable":
+            lines.append(f"{name}: not run; this finding's asset cannot be assessed as a target.")
         elif status == "finding_inactive":
             lines.append(f"{name}: not run; the finding is inactive or risk-accepted.")
         elif status == "alert_not_found":
@@ -136,11 +143,69 @@ def format_recent_work_status(recent_work: str | None) -> str:
             lines.append(f"{name}: approved, awaiting execution")
         elif status == "rejected":
             lines.append(f"{name}: rejected; no work performed")
+        elif action_name == "start_assessment" and status == "executed":
+            run_status = item.get("run_status")
+            if run_status not in {
+                "queued",
+                "running",
+                "interrupted",
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                run_status = "queued; worker status unavailable"
+            detail = ""
+            assessment = item.get("assessment")
+            if isinstance(assessment, dict):
+                assessment_id = assessment.get("id")
+                if isinstance(assessment_id, str):
+                    detail = f" — assessment {assessment_id}"
+                if run_status in {"running", "interrupted"}:
+                    progress = assessment.get("progress_percent")
+                    stage = assessment.get("current_stage")
+                    if isinstance(progress, int) and 0 <= progress <= 100:
+                        detail += f", {progress}%"
+                    if isinstance(stage, str) and stage:
+                        detail += f", stage {stage.replace('_', ' ')}"
+                elif run_status == "completed" and assessment.get("status") == "COMPLETED":
+                    total = assessment.get("findings_total")
+                    critical = assessment.get("findings_critical")
+                    high = assessment.get("findings_high")
+                    assets = assessment.get("assets_discovered")
+                    if all(
+                        isinstance(value, int) and value >= 0
+                        for value in (total, critical, high, assets)
+                    ):
+                        detail += (
+                            f", {total} findings ({critical} critical, {high} high), "
+                            f"{assets} assets"
+                        )
+                    gaps = assessment.get("coverage_gap_count")
+                    if isinstance(gaps, int) and gaps > 0:
+                        detail += f", {gaps} coverage gap{'s' if gaps != 1 else ''}"
+                elif run_status == "failed":
+                    reason = assessment.get("failure_reason")
+                    if isinstance(reason, str) and reason:
+                        detail += f"; {redact_text(reason[:300])}"
+            lines.append(f"{name}: {run_status}{detail}")
         else:
             result = item.get("result")
             suffix = f" — {redact_text(result[:300])}" if isinstance(result, str) and result else ""
             lines.append(f"{name}: {status}{suffix}")
     return "\n".join(lines)
+
+
+def model_transcript(rows: Sequence[AgentMessage]) -> list[LLMMessage]:
+    """Keep provider-derived action receipts visible in the UI, not in model authority."""
+    return [
+        LLMMessage(
+            role="user" if row.role == MessageRole.USER.value else "assistant",
+            content=row.content,
+        )
+        for row in rows
+        if row.role in {MessageRole.USER.value, MessageRole.ASSISTANT.value}
+        and getattr(row, "source_action_id", None) is None
+    ]
 
 
 def build_chat_messages(
@@ -224,17 +289,29 @@ def build_chat_messages(
 
 
 async def load_recent_work_status(
-    session: AsyncSession, principal: Principal, conversation_id: uuid.UUID,
+    session: AsyncSession,
+    principal: Principal,
+    conversation_id: uuid.UUID,
 ) -> str:
     """Return bounded, sanitized action outcomes from only this conversation and tenant."""
     rows = (
-        await session.execute(
-            tenant_select(AgentAction, principal.organization_id)
-            .where(AgentAction.session_id == conversation_id)
-            .order_by(AgentAction.created_at.desc(), AgentAction.id.desc())
-            .limit(_SNAPSHOT_LIMIT)
+        (
+            await session.execute(
+                tenant_select(AgentAction, principal.organization_id)
+                .where(AgentAction.session_id == conversation_id)
+                .order_by(AgentAction.created_at.desc(), AgentAction.id.desc())
+                .limit(_SNAPSHOT_LIMIT)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
+    run_ids = [
+        row.run_id
+        for row in rows
+        if row.action == "start_assessment" and getattr(row, "run_id", None)
+    ]
+    run_details = await load_assessment_run_details(session, principal, run_ids)
     return json.dumps(
         [
             {
@@ -243,12 +320,84 @@ async def load_recent_work_status(
                 "label": redact_text(row.label[:120]),
                 "status": row.status,
                 "result": redact_text((row.result_summary or "")[:300]),
+                **(
+                    run_details.get(row.run_id, {"run_status": None})
+                    if row.action == "start_assessment"
+                    else {}
+                ),
             }
             for row in rows
         ],
         ensure_ascii=True,
         separators=(",", ":"),
     )
+
+
+async def load_assessment_run_details(
+    session: AsyncSession,
+    principal: Principal,
+    run_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, dict[str, object]]:
+    """Read bounded, tenant-scoped worker evidence for action cards and chat alike."""
+    run_details: dict[uuid.UUID, dict[str, object]] = {}
+    if run_ids:
+        result = await session.execute(
+            select(
+                AgentRun.id,
+                AgentRun.status,
+                Assessment.id,
+                Assessment.status,
+                Assessment.current_stage,
+                Assessment.progress_percent,
+                Assessment.findings_total,
+                Assessment.findings_critical,
+                Assessment.findings_high,
+                Assessment.assets_discovered,
+                Assessment.failure_reason,
+                Assessment.degradations,
+            )
+            .outerjoin(
+                Assessment,
+                (Assessment.id == AgentRun.assessment_id)
+                & (Assessment.organization_id == AgentRun.organization_id),
+            )
+            .where(
+                AgentRun.organization_id == principal.organization_id,
+                AgentRun.id.in_(run_ids),
+            )
+        )
+        for (
+            run_id,
+            run_status,
+            assessment_id,
+            assessment_status,
+            current_stage,
+            progress_percent,
+            findings_total,
+            findings_critical,
+            findings_high,
+            assets_discovered,
+            failure_reason,
+            degradations,
+        ) in result.all():
+            detail: dict[str, object] = {"run_status": run_status}
+            if assessment_id is not None:
+                detail["assessment"] = {
+                    "id": str(assessment_id),
+                    "status": assessment_status,
+                    "current_stage": current_stage,
+                    "progress_percent": progress_percent,
+                    "findings_total": findings_total,
+                    "findings_critical": findings_critical,
+                    "findings_high": findings_high,
+                    "assets_discovered": assets_discovered,
+                    "failure_reason": redact_text((failure_reason or "")[:300]),
+                    "coverage_gap_count": (
+                        len(degradations) if isinstance(degradations, list) else 0
+                    ),
+                }
+            run_details[run_id] = detail
+    return run_details
 
 
 async def load_security_snapshot(
@@ -422,47 +571,60 @@ async def create_reply(
         .scalars()
         .all()
     )
-    transcript = [
-        LLMMessage(
-            role="user" if row.role == MessageRole.USER.value else "assistant",
-            content=row.content,
-        )
-        for row in rows
-        if row.role in {MessageRole.USER.value, MessageRole.ASSISTANT.value}
-    ]
+    transcript = model_transcript(rows)
     question = next((item.content for item in reversed(transcript) if item.role == "user"), None)
-    security_snapshot = await load_security_snapshot(session, principal, question=question)
-    canonical_result = await maybe_read_canonical_findings(session, principal, question or "")
-    read_tool_result = await maybe_read_exposures(session, principal, gateway, question or "")
+    action_status = format_action_status(action_result)
+    # An operational receipt is sourced from persisted action state. Read tools and models
+    # cannot improve that state and must not prevent the receipt from reaching the user.
+    security_snapshot = (
+        await load_security_snapshot(session, principal, question=question)
+        if not action_status
+        else None
+    )
+    canonical_result = (
+        await maybe_read_canonical_findings(session, principal, question or "")
+        if not action_status
+        else None
+    )
+    read_tool_result = (
+        await maybe_read_exposures(session, principal, gateway, question or "")
+        if not action_status
+        else None
+    )
     recent_work = (
         await load_recent_work_status(session, principal, conversation_id)
         if question and _WORK_STATUS_QUESTION.search(question)
         else None
     )
-    action_status = format_action_status(action_result)
     work_status = format_recent_work_status(recent_work)
-    try:
-        response = await gateway.complete(
-            "reasoning",
-            build_chat_messages(
-                context_summary=conversation.context_summary,
-                transcript=transcript,
-                security_snapshot=security_snapshot,
-                canonical_result=canonical_result,
-                read_tool_result=read_tool_result,
-                action_result=action_result,
-                recent_work=recent_work,
-            ),
-        )
-        content = response.text.strip() or "I could not produce a usable answer. Please try again."
-    except CynuxError:
-        if not action_status and not work_status:
-            raise
-        response = LLMResponse(text="", model="deterministic", provider="cynux", usage=Usage())
-        content = "The AI explanation is unavailable right now."
     if action_status:
-        content += "\n\nAction status:\n" + action_status
-    if work_status:
+        # The model must not turn a queued proposal into a claim of completed work.
+        response = LLMResponse(text="", model="deterministic", provider="cynux", usage=Usage())
+        content = "Action status (verified server state):\n" + action_status
+    elif work_status:
+        # A status question must report the durable outcome, not an unverified model claim.
+        response = LLMResponse(text="", model="deterministic", provider="cynux", usage=Usage())
+        content = "Persisted work status (latest five actions):\n" + work_status
+    else:
+        try:
+            response = await gateway.complete(
+                "reasoning",
+                build_chat_messages(
+                    context_summary=conversation.context_summary,
+                    transcript=transcript,
+                    security_snapshot=security_snapshot,
+                    canonical_result=canonical_result,
+                    read_tool_result=read_tool_result,
+                    action_result=action_result,
+                    recent_work=recent_work,
+                ),
+            )
+            content = (
+                response.text.strip() or "I could not produce a usable answer. Please try again."
+            )
+        except CynuxError:
+            raise
+    if work_status and action_status:
         content += "\n\nPersisted work status (latest five actions):\n" + work_status
 
     for _attempt in range(_MAX_SEQ_RETRIES):

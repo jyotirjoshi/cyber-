@@ -31,12 +31,19 @@ import uuid
 from typing import Any
 
 import structlog
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.logging_conf import redact_text
 from app.db.enums import ScannerName
 from app.db.models.assessment import Assessment, AssessmentTarget, AuthorizationRecord
 from app.db.models.asset import Asset
+from app.db.models.canonical import (
+    AssessmentCanonicalFinding,
+    CanonicalFinding,
+    FindingObservation,
+)
 from app.db.models.finding import Finding, Remediation
 from app.db.models.scanner import ScannerJob
 from app.db.repository import tenant_select
@@ -53,7 +60,174 @@ _TOOL_LABELS: dict[str, str] = {
     ScannerName.NMAP.value: "Nmap",
     ScannerName.NUCLEI.value: "Nuclei",
     ScannerName.ZAP.value: "OWASP ZAP",
+    ScannerName.PROWLER_AWS.value: "Prowler AWS",
 }
+_PROWLER_EVIDENCE_FIELDS = {
+    "rule_id": 200,
+    "account_uid": 128,
+    "cloud_provider": 16,
+    "region": 64,
+    "asset_value": 2000,
+}
+
+
+def _safe_prowler_evidence(value: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: item
+        for key, limit in _PROWLER_EVIDENCE_FIELDS.items()
+        if isinstance((item := value.get(key)), str)
+        and len(item) <= limit
+        and redact_text(item) == item
+    }
+
+
+def reportable_native_findings(findings: list[Finding]) -> list[Finding]:
+    """Use the same native inclusion rule as cached assessment counters."""
+    return [
+        finding
+        for finding in findings
+        if not finding.is_duplicate and not finding.is_false_positive
+    ]
+
+
+async def linked_canonical_findings_for_assessment(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    assessment_id: uuid.UUID,
+    *,
+    native_finding_ids: list[uuid.UUID],
+) -> list[tuple[CanonicalFinding, Asset, bool, dict[str, Any] | None]]:
+    """Fetch this assessment's canonical findings and detect native duplicates."""
+    represented_by_native = exists(
+        select(FindingObservation.id).where(
+            FindingObservation.organization_id == organization_id,
+            FindingObservation.canonical_finding_id == CanonicalFinding.id,
+            FindingObservation.provider == "defectdojo",
+            FindingObservation.source_record_id.in_(native_finding_ids),
+        )
+    )
+    prowler_evidence = (
+        select(FindingObservation.evidence)
+        .where(
+            FindingObservation.organization_id == organization_id,
+            FindingObservation.canonical_finding_id == CanonicalFinding.id,
+            FindingObservation.provider == "prowler",
+        )
+        .order_by(FindingObservation.last_seen_at.desc())
+        .limit(1)
+        .correlate(CanonicalFinding)
+        .scalar_subquery()
+    )
+    statement = (
+        select(CanonicalFinding, Asset, represented_by_native, prowler_evidence)
+        .join(
+            AssessmentCanonicalFinding,
+            AssessmentCanonicalFinding.canonical_finding_id == CanonicalFinding.id,
+        )
+        .join(Asset, Asset.id == CanonicalFinding.asset_id)
+        .where(
+            AssessmentCanonicalFinding.organization_id == organization_id,
+            AssessmentCanonicalFinding.assessment_id == assessment_id,
+            CanonicalFinding.organization_id == organization_id,
+            Asset.organization_id == organization_id,
+        )
+        .order_by(CanonicalFinding.risk_score.desc(), CanonicalFinding.id)
+    )
+    return list((await session.execute(statement)).all())
+
+
+def merge_linked_canonical_findings(
+    native_summary: dict[str, Any],
+    native_blocks: list[dict[str, Any]],
+    linked: list[tuple[CanonicalFinding, Asset, bool, dict[str, Any] | None]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Append linked cloud findings, excluding canonical identities already in native rows."""
+    summary = dict(native_summary)
+    summary["by_severity"] = dict(native_summary["by_severity"])
+    summary["by_priority"] = dict(native_summary["by_priority"])
+    unavailable = set(native_summary.get("intelligence_unavailable") or [])
+    blocks = list(native_blocks)
+    for finding, asset, represented_by_native, source_evidence in linked:
+        if represented_by_native or finding.status == "false_positive":
+            continue
+        factors = finding.risk_factors if isinstance(finding.risk_factors, dict) else {}
+        raw_inputs = factors.get("inputs")
+        inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
+        missing = [item for item in factors.get("unavailable") or [] if isinstance(item, str)]
+        unavailable.update(missing)
+        intel = inputs.get("in_kev")
+        priority = finding_service.priority_for_score(
+            finding.risk_score,
+            exploited=intel is True,
+            internet_exposed=inputs.get("internet_exposed") is True,
+            excluded=finding.status in {"false_positive", "accepted_risk", "closed"},
+        ).value
+        blocks.append(
+            {
+                "id": str(finding.id),
+                "title": finding.title,
+                "severity": finding.severity,
+                "priority": priority,
+                "status": finding.status,
+                "scanner": ScannerName.PROWLER_AWS.value,
+                "endpoint": asset.endpoint,
+                "component": None,
+                "component_version": None,
+                "cve_ids": list(finding.cve_ids or []),
+                "cwe": None,
+                "cvss_score": inputs.get("cvss_score"),
+                "cvss_vector": None,
+                "risk_score": finding.risk_score,
+                "asset_criticality": asset.criticality,
+                "asset": {"name": asset.name, "endpoint": asset.endpoint},
+                "analysis": {
+                    "explanation": None,
+                    "business_impact": None,
+                    "attack_scenario": None,
+                    "adversary_profile": None,
+                    "mitre_tactics": [],
+                    "detection_hint": None,
+                    "ai_generated": False,
+                    "skipped_reason": None,
+                },
+                "intelligence": {
+                    "in_kev": intel,
+                    "epss_score": inputs.get("epss_score"),
+                    "unavailable": missing,
+                },
+                "evidence": {
+                    "prowler": {
+                        "provider": "prowler",
+                        **_safe_prowler_evidence(source_evidence),
+                    }
+                },
+                "remediations": [],
+                "ssvc": None,
+            }
+        )
+        summary["total"] += 1
+        severity = finding.severity
+        summary["by_severity"][severity] = summary["by_severity"].get(severity, 0) + 1
+        summary["by_priority"][priority] = summary["by_priority"].get(priority, 0) + 1
+        if intel is True:
+            summary["in_kev"] += 1
+        elif intel is None:
+            summary["kev_undetermined"] += 1
+    summary["intelligence_unavailable"] = sorted(unavailable)
+    return summary, blocks
+
+
+def merge_linked_assets(
+    native_assets: list[Asset],
+    linked: list[tuple[CanonicalFinding, Asset, bool, dict[str, Any] | None]],
+) -> list[Asset]:
+    """Include scanner-discovered cloud resources in the assessment inventory."""
+    by_id = {asset.id: asset for asset in native_assets}
+    for _, asset, _, _ in linked:
+        by_id.setdefault(asset.id, asset)
+    return list(by_id.values())
 
 
 async def build_report_context(
@@ -70,8 +244,12 @@ async def build_report_context(
     """
     org_id = assessment.organization_id
 
-    findings = await finding_service.findings_for_assessment(
-        session, assessment.id, organization_id=org_id
+    findings = reportable_native_findings(
+        await finding_service.findings_for_assessment(
+            session,
+            assessment.id,
+            organization_id=org_id,
+        )
     )
     finding_ids = [f.id for f in findings]
     enrichments = await enrichment_service.load_enrichments(session, finding_ids)
@@ -81,13 +259,36 @@ async def build_report_context(
     scanner_jobs = await _scanner_jobs(session, org_id, assessment.id)
 
     summary = finding_service.risk_summary(findings)
+    native_blocks = [
+        _finding_block(
+            f,
+            enrichment=enrichments.get(f.id),
+            remediations=remediations.get(f.id, []),
+            asset=asset_by_id.get(f.asset_id) if f.asset_id else None,
+        )
+        for f in findings
+    ]
+    linked = await linked_canonical_findings_for_assessment(
+        session,
+        org_id,
+        assessment.id,
+        native_finding_ids=finding_ids,
+    )
+    assets = merge_linked_assets(assets, linked)
+    summary, report_findings = merge_linked_canonical_findings(
+        summary,
+        native_blocks,
+        linked,
+    )
     targets = await _targets(session, org_id, assessment.id)
     authorizations = await _authorizations(session, org_id, assessment.id)
 
+    assessment_block = _assessment_block(assessment)
+    assessment_block["findings_total"] = summary["total"]
     return {
         "generated_at": _now().isoformat(),
         "settings": {"public_base_url": settings.public_base_url},
-        "assessment": _assessment_block(assessment),
+        "assessment": assessment_block,
         "scope": {
             "targets": [_target_block(t) for t in targets],
             "authorizations": [_authorization_block(a) for a in authorizations],
@@ -97,15 +298,7 @@ async def build_report_context(
         "assets": [_asset_block(a) for a in assets],
         "asset_count": len(assets),
         "summary": summary,
-        "findings": [
-            _finding_block(
-                f,
-                enrichment=enrichments.get(f.id),
-                remediations=remediations.get(f.id, []),
-                asset=asset_by_id.get(f.asset_id) if f.asset_id else None,
-            )
-            for f in findings
-        ],
+        "findings": report_findings,
         "degradations": list(assessment.degradations or []),
         "intelligence_unavailable": summary.get("intelligence_unavailable", []),
         # New intelligence layers

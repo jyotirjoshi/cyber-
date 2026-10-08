@@ -114,8 +114,11 @@ async def test_wazuh_sync_accepts_indexer_only_tenant_connection(monkeypatch) ->
 
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
     connection = SimpleNamespace(
-        id=uuid.uuid4(), kind_enum=IntegrationKind.WAZUH, is_usable=True,
-        name="Wazuh Indexer", base_url=None,
+        id=uuid.uuid4(),
+        kind_enum=IntegrationKind.WAZUH,
+        is_usable=True,
+        name="Wazuh Indexer",
+        base_url=None,
         config={"indexer_base_url": "https://wazuh-indexer.example:9200"},
         credentials=[],
     )
@@ -149,6 +152,9 @@ async def test_wazuh_sync_accepts_indexer_only_tenant_connection(monkeypatch) ->
     monkeypatch.setattr(external_alert, "stage_wazuh_alerts", stage)
     monkeypatch.setattr(external_alert.audit_service, "record", audit)
     result = await external_alert.sync_wazuh_alerts(
-        object(), principal, settings=Settings(), redis=None,
+        object(),
+        principal,
+        settings=Settings(),
+        redis=None,
     )
     assert result.total == 0

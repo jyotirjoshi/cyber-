@@ -90,6 +90,7 @@ class ScannerJob(Base, TenantMixin, TimestampMixin):
     artifacts_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     #: Findings imported into DefectDojo from this job's output (FR-016).
     imported_finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    imported_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     defectdojo_test_id: Mapped[int | None] = mapped_column(Integer)
 
     assessment: Mapped[Assessment] = relationship(back_populates="scanner_jobs", lazy=LAZY)
@@ -101,7 +102,10 @@ class ScannerJob(Base, TenantMixin, TimestampMixin):
         # ``scanner`` selects the adapter that will build the argv and the sandbox, so an
         # unrecognized value is not a display bug -- it is a job the worker cannot
         # dispatch, discovered only after the row is already queued.
-        CheckConstraint("scanner IN ('reconftw','nmap','nuclei','zap')", name="valid_scanner_name"),
+        CheckConstraint(
+            "scanner IN ('reconftw','nmap','nuclei','zap','trivy_repo','semgrep_repo','gitleaks_repo','trivy_image','syft_image','prowler_aws','prowler_azure','prowler_gcp')",
+            name="valid_scanner_name",
+        ),
         CheckConstraint(
             "status IN ('QUEUED','RUNNING','COMPLETED','FAILED','CANCELLED','TIMEOUT')",
             name="valid_job_status",
@@ -111,7 +115,8 @@ class ScannerJob(Base, TenantMixin, TimestampMixin):
         Index("ix_scanner_jobs_organization_id_status", "organization_id", "status"),
         Index("ix_scanner_jobs_worker_id_status", "worker_id", "status"),
         UniqueConstraint(
-            "organization_id", "idempotency_key",
+            "organization_id",
+            "idempotency_key",
             name="unique_scanner_job_idempotency_key",
         ),
     )

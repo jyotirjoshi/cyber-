@@ -35,8 +35,11 @@ async def test_github_absence_is_tenant_and_integration_scoped_without_closing()
     integration_id = uuid.uuid4()
     cutoff = dt.datetime(2026, 10, 2, tzinfo=dt.UTC)
     count = await mark_missing_source_alerts(
-        session, organization_id=org_id, integration_id=integration_id,
-        provider="github", sync_started_at=cutoff,
+        session,
+        organization_id=org_id,
+        integration_id=integration_id,
+        provider="github",
+        sync_started_at=cutoff,
     )
 
     assert count == 2
@@ -58,8 +61,11 @@ async def test_gitlab_absence_only_marks_configured_projects() -> None:
 
     session = _Session()
     await mark_missing_source_alerts(
-        session, organization_id=uuid.uuid4(), integration_id=None,
-        provider="gitlab", sync_started_at=dt.datetime(2026, 10, 2, tzinfo=dt.UTC),
+        session,
+        organization_id=uuid.uuid4(),
+        integration_id=None,
+        provider="gitlab",
+        sync_started_at=dt.datetime(2026, 10, 2, tzinfo=dt.UTC),
         project_keys=["acme/api"],
     )
     compiled = session.statement.compile(dialect=postgresql.dialect())
@@ -73,8 +79,11 @@ async def test_gitlab_absence_with_no_project_scope_does_not_update_anything() -
 
     session = _Session()
     count = await mark_missing_source_alerts(
-        session, organization_id=uuid.uuid4(), integration_id=None,
-        provider="gitlab", sync_started_at=dt.datetime(2026, 10, 2, tzinfo=dt.UTC),
+        session,
+        organization_id=uuid.uuid4(),
+        integration_id=None,
+        provider="gitlab",
+        sync_started_at=dt.datetime(2026, 10, 2, tzinfo=dt.UTC),
         project_keys=[],
     )
     assert count == 0
@@ -105,9 +114,10 @@ async def test_github_sync_marks_missing_only_after_successful_complete_fetch(mo
 
         async def list_security_alerts(self):
             events.append("fetched")
-            return [SimpleNamespace(kind=kind, alerts=[]) for kind in (
-                "dependabot", "code_scanning", "secret_scanning"
-            )]
+            return [
+                SimpleNamespace(kind=kind, alerts=[])
+                for kind in ("dependabot", "code_scanning", "secret_scanning")
+            ]
 
     async def audit(*args, **kwargs):
         events.append("audited")

@@ -22,6 +22,8 @@ import type {
   AgentSessionDetailOut,
   AgentSessionOut,
   AnalyzeIn,
+  ApplicationPatternsOut,
+  ApplicationRiskPageOut,
   ApprovalOut,
   ApproveIn,
   AssessmentCreateIn,
@@ -29,7 +31,9 @@ import type {
   AssessmentFilter,
   AssessmentOut,
   AssetCriticalityIn,
+  AssetChangePageOut,
   AssetContextIn,
+  CmdbImportOut,
   AssetFilter,
   AssetOut,
   AssetTagIn,
@@ -275,7 +279,8 @@ async function rawFetch(
   const url = `${base}${path}${buildQuery(options.query)}`;
 
   const headers: Record<string, string> = { accept: "application/json" };
-  if (options.body !== undefined) headers["content-type"] = "application/json";
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (options.body !== undefined && !isFormData) headers["content-type"] = "application/json";
   if (options.auth !== false) {
     const token = getAccessToken();
     if (token) headers.authorization = `Bearer ${token}`;
@@ -285,7 +290,9 @@ async function rawFetch(
     return await fetch(url, {
       method,
       headers,
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body: isFormData
+        ? options.body as FormData
+        : options.body !== undefined ? JSON.stringify(options.body) : undefined,
     });
   } catch {
     throw new ApiError(syntheticProblem(0, "network_error", "Unable to reach the server."));
@@ -478,7 +485,15 @@ export const api = {
   assets: {
     list: (params?: ListParams<AssetFilter>) =>
       request<Page<AssetOut>>("GET", "/assets", { query: params }),
+    changes: (params?: { limit?: number; offset?: number }) =>
+      request<AssetChangePageOut>("GET", "/assets/changes", { query: params }),
     get: (id: string) => request<AssetOut>("GET", `/assets/${id}`),
+    importCmdb: (file: File, dryRun: boolean) => {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("dry_run", String(dryRun));
+      return request<CmdbImportOut>("POST", "/assets/cmdb-import", { body: form });
+    },
     addTag: (id: string, body: AssetTagIn) =>
       request<AssetOut>("POST", `/assets/${id}/tags`, { body }),
     setCriticality: (id: string, body: AssetCriticalityIn) =>
@@ -487,6 +502,15 @@ export const api = {
       request<AssetOut>("PATCH", `/assets/${id}/context`, { body }),
     markOutOfScope: (id: string) =>
       request<AssetOut>("POST", `/assets/${id}/out-of-scope`),
+  },
+
+  applications: {
+    risks: (params?: { limit?: number; offset?: number }) =>
+      request<ApplicationRiskPageOut>("GET", "/applications/risks", { query: params }),
+    patterns: (application: string) =>
+      request<ApplicationPatternsOut>(
+        "GET", "/applications/patterns", { query: { application } },
+      ),
   },
 
   jobs: {
@@ -529,6 +553,23 @@ export const api = {
       request<IntegrationTestOut>("POST", `/integrations/${kind}/test`),
     sync: (kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable") =>
       request<IntegrationSyncOut>("POST", `/integrations/${kind}/sync`),
+    importScanExport: (input: {
+      file: File;
+      formatName: "sarif" | "nuclei_jsonl" | "nessus_xml" | "burp_xml" | "qualys_host_detection_xml" | "rapid7_csv" | "aws_inspector_csv" | "azure_defender_json" | "gcp_scc_json" | "prowler_ocsf" | "hackerone_json" | "bugcrowd_json" | "trivy" | "gitleaks" | "cyclonedx" | "spdx" | "generic_csv" | "generic_json";
+      provider: string;
+      assetType: string;
+      assetValue: string;
+      fieldMapping?: Record<string, string>;
+    }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("format_name", input.formatName);
+      form.append("provider", input.provider);
+      form.append("asset_type", input.assetType);
+      form.append("asset_value", input.assetValue);
+      if (input.fieldMapping) form.append("mapping_json", JSON.stringify(input.fieldMapping));
+      return request<{ findings_staged: number }>("POST", "/integrations/imports/scan", { body: form });
+    },
     tenableStatus: (scanId: string) =>
       request<TenableScanStatusOut>("GET", `/integrations/tenable/scans/${encodeURIComponent(scanId)}/status`),
     launchTenable: (scanId: string) =>

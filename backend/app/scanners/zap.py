@@ -21,23 +21,25 @@ Three implementation details that are not obvious and each caused a wrong first 
     Java stack trace about a missing home directory. uid 1000 is still unprivileged, still has
     no capabilities, and still cannot reach anything on the network but the target.
 
-Exit codes are informational: baseline returns 1 when it reported warnings and 2 on a
-configuration failure. ``-I`` keeps warnings from being treated as failure, and
-:attr:`ZapAdapter.success_exit_codes` records the rest, so a scan that found something is not
-filed as a broken job.
+Exit codes are significant: baseline returns 1 for alerts configured as FAIL, 2 for
+WARN-only alerts, and 3 for a scan failure. A scan is complete only when it also produced
+its JSON report.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import structlog
 
+from app.core.crypto import Secret
 from app.core.errors import UnsafeScannerInvocationError
 from app.db.enums import ArtifactKind, AssessmentDepth, ScannerName
 from app.scanners.artifacts import describe
 from app.scanners.base import ArtifactFile, ScannerAdapter, ScannerRequest
+from app.scanners.openapi_scope import SPEC_FILENAME, prepare_openapi_spec
 
 logger = structlog.get_logger(__name__)
 
@@ -86,14 +88,77 @@ class ZapAdapter(ScannerAdapter):
     #: directory, none of which fit on a tmpfs sized for scratch.
     read_only_root = False
     run_as_user = "1000:1000"
+    credential_environment_names = frozenset({"CYNUX_ZAP_API_TOKEN"})
 
-    #: 1 = warnings were reported, which is the normal outcome of a scan that found something.
-    #: 2 = ZAP failed to start or the target was unreachable; still not a Cynux fault, and the
-    #: job records it with the stderr artifact attached.
+    #: 1 = FAIL-level alerts; 2 = WARN-only alerts; 3 = scan or configuration failure.
     success_exit_codes = frozenset({0, 1, 2})
+    requires_output = True
 
     SCRIPT = "zap-baseline.py"
     REPORT_NAME = "zap.json"
+    AUTH_HOOK_NAME = "zap-auth-hook.py"
+    AUTH_SENDER_NAME = "zap-auth-sender.js"
+
+    def prepare(self, request: ScannerRequest) -> None:
+        api_mode = prepare_openapi_spec(request)
+        token = request.option("api_auth_token")
+        if token is None:
+            return
+        if not api_mode or not isinstance(token, Secret) or len(request.targets) != 1:
+            raise UnsafeScannerInvocationError("ZAP API credential is not target-scoped")
+        target = request.targets[0]
+        parsed = urlsplit(target)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise UnsafeScannerInvocationError("ZAP API credential target is invalid")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        prefix = parsed.path.rstrip("/") or "/"
+        sender = f"""function sendingRequest(msg, initiator, helper) {{
+  var uri = msg.getRequestHeader().getURI();
+  var scheme = String(uri.getScheme()).toLowerCase();
+  var host = String(uri.getHost()).toLowerCase();
+  var port = uri.getPort();
+  if (port < 0) port = scheme === 'https' ? 443 : 80;
+  var path = String(uri.getPath() || '/');
+  var prefix = {json.dumps(prefix)};
+  if (scheme !== {json.dumps(parsed.scheme)} || host !== {json.dumps(parsed.hostname.lower())}
+      || port !== {port} || path.indexOf('..') >= 0 || path.indexOf('%') >= 0
+      || !(prefix === '/' || path === prefix || path.indexOf(prefix + '/') === 0)) return;
+  var token = Java.type('java.lang.System').getenv('CYNUX_ZAP_API_TOKEN');
+  if (token) msg.getRequestHeader().setHeader('Authorization', 'Bearer ' + token);
+}}
+function responseReceived(msg, initiator, helper) {{}}
+"""
+        hook = """def zap_started(zap, target):
+    engines = [entry.split(' : ')[-1] for entry in zap.script.list_engines]
+    engine = next((name for name in ('Graal.js', 'Oracle Nashorn') if name in engines), None)
+    if engine is None:
+        raise RuntimeError('ZAP JavaScript engine is unavailable for authenticated scan')
+    loaded = zap.script.load('cynux-auth-sender', 'httpsender', engine,
+                             '/zap/wrk/zap-auth-sender.js')
+    if loaded != 'OK':
+        raise RuntimeError('ZAP could not load the scoped authentication sender')
+    enabled = zap.script.enable('cynux-auth-sender')
+    if enabled != 'OK':
+        raise RuntimeError('ZAP could not enable the scoped authentication sender')
+    return zap, target
+"""
+        (Path(request.workdir) / self.AUTH_SENDER_NAME).write_text(sender, encoding="utf-8")
+        (Path(request.workdir) / self.AUTH_HOOK_NAME).write_text(hook, encoding="utf-8")
+
+    def verify_credential_scope(
+        self, request: ScannerRequest, credentials: dict[str, str]
+    ) -> None:
+        token = request.option("api_auth_token")
+        if token is None and not credentials:
+            return
+        if (
+            not isinstance(token, Secret)
+            or len(request.targets) != 1
+            or request.option("api_spec") is None
+            or set(credentials) != {"CYNUX_ZAP_API_TOKEN"}
+            or credentials["CYNUX_ZAP_API_TOKEN"] != token.reveal()
+        ):
+            raise UnsafeScannerInvocationError("ZAP credential does not match the scoped API job")
 
     def validate(self, request: ScannerRequest) -> None:
         super().validate(request)
@@ -104,6 +169,14 @@ class ZapAdapter(ScannerAdapter):
             )
 
     def build_argv(self, request: ScannerRequest) -> tuple[str, ...]:
+        if request.option("api_spec") is not None:
+            argv = (
+                "zap-api-scan.py", "-t", self.container_path(SPEC_FILENAME),
+                "-f", "openapi", "-J", self.REPORT_NAME, "-I",
+            )
+            if request.option("api_auth_token") is not None:
+                return (*argv, f"--hook={self.container_path(self.AUTH_HOOK_NAME)}")
+            return argv
         urls = self._urls(request)
         depth = self._depth(request)
 
@@ -147,8 +220,18 @@ class ZapAdapter(ScannerAdapter):
 
     def collect(self, request: ScannerRequest) -> tuple[ArtifactFile, ...]:
         #: The workdir root, not ``out/`` -- ZAP resolves the report name against the mount.
+        report_path = Path(request.workdir) / self.REPORT_NAME
+        token = request.option("api_auth_token")
+        if report_path.is_file() and isinstance(token, Secret):
+            if report_path.stat().st_size > 64 * 1024 * 1024:
+                raise UnsafeScannerInvocationError("Authenticated ZAP report exceeds safe redaction limit")
+            raw = report_path.read_bytes()
+            plaintext = token.reveal()
+            for variant in {plaintext, json.dumps(plaintext)[1:-1]}:
+                raw = raw.replace(variant.encode("utf-8"), b"[REDACTED]")
+            report_path.write_bytes(raw)
         report = describe(
-            Path(request.workdir) / self.REPORT_NAME,
+            report_path,
             kind=ArtifactKind.RAW_OUTPUT,
             defectdojo_scan_type=self.defectdojo_scan_type,
         )

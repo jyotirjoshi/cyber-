@@ -116,6 +116,10 @@ _DEFAULT_CHANNELS: dict[NotificationEvent, tuple[NotificationChannel, ...]] = {
         NotificationChannel.EMAIL,
     ),
     NotificationEvent.TICKET_CREATED: (NotificationChannel.WEBSOCKET,),
+    NotificationEvent.NEW_ASSET: (
+        NotificationChannel.WEBSOCKET,
+        NotificationChannel.SLACK,
+    ),
 }
 
 _MAX_DEDUPE_KEY = 300
@@ -241,8 +245,10 @@ def _email_html(content: NotificationContent) -> str:
     if content.link:
         try:
             parsed = urlsplit(content.link)
-            if parsed.scheme.lower() in {"http", "https"} and parsed.hostname and not (
-                parsed.username or parsed.password
+            if (
+                parsed.scheme.lower() in {"http", "https"}
+                and parsed.hostname
+                and not (parsed.username or parsed.password)
             ):
                 link = f'<p><a href="{escape(content.link, quote=True)}">Open in Cynux</a></p>'
         except ValueError:
@@ -251,7 +257,10 @@ def _email_html(content: NotificationContent) -> str:
 
 
 async def _delivery_settings(
-    session: AsyncSession, principal: Principal, kind: IntegrationKind, settings: Settings,
+    session: AsyncSession,
+    principal: Principal,
+    kind: IntegrationKind,
+    settings: Settings,
 ) -> Settings:
     """In production, never fall back to a deployment credential for a customer tenant."""
     if settings.environment != "production":
@@ -378,7 +387,8 @@ async def dispatch(
         slack_integration = await find_integration(session, principal, IntegrationKind.SLACK)
         slack_default = (
             str((slack_integration.config or {}).get("default_channel") or "") or None
-            if slack_integration and slack_integration.is_usable else None
+            if slack_integration and slack_integration.is_usable
+            else None
         )
     else:
         slack_default = SlackClient(settings).default_channel
@@ -394,7 +404,11 @@ async def dispatch(
         ):
             key = _dedupe_key(event, resource_id, channel, recipient)
             if await _already_recorded(session, principal.organization_id, key):
-                log.debug("notification.deduplicated", notification_event=event.value, channel=channel.value)
+                log.debug(
+                    "notification.deduplicated",
+                    notification_event=event.value,
+                    channel=channel.value,
+                )
                 continue
 
             notification = Notification(
@@ -429,8 +443,11 @@ async def dispatch(
                     session, principal.organization_id, key
                 ):
                     raise
-                log.debug("notification.deduplicated_race", notification_event=event.value,
-                          channel=channel.value)
+                log.debug(
+                    "notification.deduplicated_race",
+                    notification_event=event.value,
+                    channel=channel.value,
+                )
                 continue
 
             if suppressed_reason is not None:
@@ -476,7 +493,10 @@ async def dispatch(
 
 
 async def deliver_pending(
-    session: AsyncSession, *, settings: Settings, redis: Redis | None = None,
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    redis: Redis | None = None,
     limit: int = 5,
 ) -> int:
     """Deliver committed external rows while holding row locks across provider calls.
@@ -488,7 +508,9 @@ async def deliver_pending(
         select(Notification)
         .where(
             Notification.status == NotificationStatus.PENDING.value,
-            Notification.channel.in_((NotificationChannel.SLACK.value, NotificationChannel.EMAIL.value)),
+            Notification.channel.in_(
+                (NotificationChannel.SLACK.value, NotificationChannel.EMAIL.value)
+            ),
         )
         .order_by(Notification.created_at, Notification.id)
         .limit(max(1, min(limit, 20)))
@@ -503,23 +525,34 @@ async def deliver_pending(
         except ValueError:
             severity = None
         content = NotificationContent(
-            subject=row.subject or "", body=row.body,
+            subject=row.subject or "",
+            body=row.body,
             link=payload.get("link") if isinstance(payload.get("link"), str) else None,
             html=payload.get("html") if isinstance(payload.get("html"), str) else None,
-            blocks=[
-                block for block in payload.get("blocks", []) if isinstance(block, dict)
-            ] if isinstance(payload.get("blocks"), list) else [],
+            blocks=[block for block in payload.get("blocks", []) if isinstance(block, dict)]
+            if isinstance(payload.get("blocks"), list)
+            else [],
         )
         actor = Principal(
-            user_id=None, organization_id=row.organization_id,
-            role=Role.VIEWER, actor_type=ACTOR_WORKER,
+            user_id=None,
+            organization_id=row.organization_id,
+            role=Role.VIEWER,
+            actor_type=ACTOR_WORKER,
         )
-        await _deliver(session, actor, row, content, severity=severity, settings=settings, redis=redis)
+        await _deliver(
+            session, actor, row, content, severity=severity, settings=settings, redis=redis
+        )
         await audit_service.record(
-            session, action=AuditAction.NOTIFICATION_SEND, principal=actor,
-            resource_type="notification", resource_id=row.id,
-            outcome=(AuditOutcome.SUCCESS if row.status == NotificationStatus.SENT.value
-                     else AuditOutcome.FAILURE),
+            session,
+            action=AuditAction.NOTIFICATION_SEND,
+            principal=actor,
+            resource_type="notification",
+            resource_id=row.id,
+            outcome=(
+                AuditOutcome.SUCCESS
+                if row.status == NotificationStatus.SENT.value
+                else AuditOutcome.FAILURE
+            ),
             detail={"channel": row.channel, "attempts": row.attempts},
         )
     return len(rows)

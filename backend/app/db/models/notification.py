@@ -77,7 +77,7 @@ class Notification(Base, TenantMixin, TimestampMixin):
         # delivered nor recorded as suppressed -- it just silently never arrives.
         CheckConstraint(
             "event IN ('assessment_started','approval_required','critical_finding',"
-            "'assessment_completed','assessment_failed','ticket_created')",
+            "'assessment_completed','assessment_failed','ticket_created','new_asset')",
             name="valid_notification_event",
         ),
         CheckConstraint(

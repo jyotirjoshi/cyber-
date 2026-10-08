@@ -13,6 +13,451 @@ from app.db.enums import Role
 from app.services.context import Principal
 
 
+def test_dependency_is_bound_to_exact_approved_action_digest() -> None:
+    from app.services.agent_action import action_payload_digest, new_agent_action
+
+    prerequisite_a, prerequisite_b = uuid.uuid4(), uuid.uuid4()
+    payload = {"canonical_finding_id": str(uuid.uuid4())}
+    action = new_agent_action(
+        organization_id=uuid.uuid4(), session_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(), action="create_jira_ticket",
+        label="File ticket", rationale=None, payload=payload,
+        depends_on_action_id=prerequisite_a,
+    )
+    assert action.payload_digest == action_payload_digest(
+        "create_jira_ticket", payload, depends_on_action_id=prerequisite_a,
+    )
+    assert action.payload_digest != action_payload_digest(
+        "create_jira_ticket", payload, depends_on_action_id=prerequisite_b,
+    )
+
+
+@pytest.mark.asyncio
+async def test_action_dependency_is_tenant_and_conversation_scoped() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.agent_action import action_dependency_state, new_agent_action
+
+    action = new_agent_action(
+        organization_id=uuid.uuid4(), session_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(), action="create_jira_ticket",
+        label="File ticket", rationale=None, payload={"canonical_finding_id": str(uuid.uuid4())},
+        depends_on_action_id=uuid.uuid4(),
+    )
+
+    class Session:
+        def __init__(self, dependency):
+            self.dependency = dependency
+            self.statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return SimpleNamespace(scalar_one_or_none=lambda: self.dependency)
+
+    for dependency_status, expected in (("pending", "waiting"), ("approved", "waiting"),
+                                        ("executed", "ready"), ("failed", "failed"),
+                                        ("rejected", "failed"), (None, "failed")):
+        dependency = (
+            SimpleNamespace(
+                action="update_canonical_work", status=dependency_status,
+                payload={"finding_id": action.payload["canonical_finding_id"]},
+            ) if dependency_status else None
+        )
+        session = Session(dependency)
+        assert await action_dependency_state(session, action) == expected
+        compiled = session.statement.compile(dialect=postgresql.dialect())
+        assert action.organization_id in compiled.params.values()
+        assert action.session_id in compiled.params.values()
+        assert action.depends_on_action_id in compiled.params.values()
+
+    for bad_dependency in (
+        SimpleNamespace(
+            action="update_canonical_work", status="executed",
+            payload={"finding_id": str(uuid.uuid4())},
+        ),
+        SimpleNamespace(
+            action="sync_github_alerts", status="executed",
+            payload={"finding_id": action.payload["canonical_finding_id"]},
+        ),
+    ):
+        assert await action_dependency_state(Session(bad_dependency), action) == "failed"
+
+
+@pytest.mark.asyncio
+async def test_waiting_ticket_is_not_executed_or_failed(monkeypatch) -> None:
+    from app.services import agent_action
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    action = agent_action.new_agent_action(
+        organization_id=principal.organization_id, session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id, action="create_jira_ticket",
+        label="File ticket", rationale=None, payload={"canonical_finding_id": str(uuid.uuid4())},
+        depends_on_action_id=uuid.uuid4(),
+    )
+    action.status = "approved"
+    called = False
+
+    async def dependency_state(session, row):
+        return "waiting"
+
+    async def execute(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(agent_action, "action_dependency_state", dependency_state)
+    monkeypatch.setattr(agent_action, "execute_approved_action", execute)
+    with pytest.raises(ConflictError):
+        await agent_action.execute_and_settle_action(
+            object(), principal, action, settings=object(), redis=None,
+        )
+    assert action.status == "approved"
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_rejected_triage_prevents_ticket_provider_call(monkeypatch) -> None:
+    from app.services import agent_action
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    action = agent_action.new_agent_action(
+        organization_id=principal.organization_id, session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id, action="create_jira_ticket",
+        label="File ticket", rationale=None, payload={"canonical_finding_id": str(uuid.uuid4())},
+        depends_on_action_id=uuid.uuid4(),
+    )
+    action.status = "approved"
+    calls = []
+
+    class Session:
+        @asynccontextmanager
+        async def begin_nested(self):
+            yield
+
+    async def dependency_state(session, row):
+        return "failed"
+
+    async def execute(*args, **kwargs):
+        calls.append("provider")
+
+    async def fail(session, row, reason):
+        row.status = "failed"
+        row.result_summary = reason
+
+    async def receipt(session, row):
+        calls.append("receipt")
+
+    monkeypatch.setattr(agent_action, "action_dependency_state", dependency_state)
+    monkeypatch.setattr(agent_action, "execute_approved_action", execute)
+    monkeypatch.setattr(agent_action, "_fail_approved_action", fail)
+    monkeypatch.setattr(agent_action, "append_action_receipt", receipt)
+    await agent_action.execute_and_settle_action(
+        Session(), principal, action, settings=object(), redis=None,
+    )
+    assert action.status == "failed"
+    assert calls == ["receipt"]
+
+
+def test_action_receipt_reports_verified_outcome_without_claiming_scan_finished() -> None:
+    from app.services.agent_action import format_action_receipt
+
+    queued = SimpleNamespace(
+        action="start_assessment", label="Assess example.org", status="executed",
+        result_summary="Assessment queued", run_id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+    )
+    content = format_action_receipt(queued)
+    assert "queued" in content.lower()
+    assert "11111111-1111-1111-1111-111111111111" in content
+    assert "scan completed" not in content.lower()
+
+    failed = SimpleNamespace(
+        action="sync_github_alerts", label="Sync GitHub", status="failed",
+        result_summary="GitHub unavailable", run_id=None,
+    )
+    assert "failed" in format_action_receipt(failed).lower()
+    assert "GitHub unavailable" in format_action_receipt(failed)
+    with pytest.raises(ValueError):
+        format_action_receipt(SimpleNamespace(status="pending"))
+
+
+@pytest.mark.asyncio
+async def test_terminal_action_receipt_is_tenant_scoped_and_idempotent() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.agent_action import append_action_receipt, new_agent_action
+
+    tenant = uuid.uuid4()
+    action = new_agent_action(
+        organization_id=tenant, session_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(), action="sync_github_alerts",
+        label="Sync GitHub", rationale=None, payload={},
+    )
+    action.status = "executed"
+    action.result_summary = "3 alerts synced"
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+            self.added = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            if len(self.statements) in {1, 5}:
+                return SimpleNamespace(scalar_one_or_none=lambda: action.session_id)
+            if len(self.statements) == 2:
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
+            if len(self.statements) == 3:
+                return SimpleNamespace(scalar_one=lambda: 7)
+            if len(self.statements) == 4:
+                return SimpleNamespace()
+            return SimpleNamespace(scalar_one_or_none=lambda: self.added[0])
+
+        def add(self, row):
+            self.added.append(row)
+
+        async def flush(self):
+            return None
+
+    session = Session()
+    created = await append_action_receipt(session, action)
+    again = await append_action_receipt(session, action)
+    assert created is again
+    assert len(session.added) == 1
+    assert created.organization_id == tenant
+    assert created.session_id == action.session_id
+    assert created.source_action_id == action.id
+    assert created.seq == 7
+    assert created.content == "Action completed: Sync GitHub. 3 alerts synced"
+    lookup = session.statements[1].compile(dialect=postgresql.dialect())
+    assert tenant in lookup.params.values()
+    assert action.id in lookup.params.values()
+    count_update = session.statements[3].compile(dialect=postgresql.dialect())
+    assert "agent_sessions" in str(count_update)
+    assert tenant in count_update.params.values()
+    assert action.session_id in count_update.params.values()
+
+
+@pytest.mark.asyncio
+async def test_action_receipt_refuses_a_session_outside_the_action_tenant() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.agent_action import append_action_receipt, new_agent_action
+
+    action = new_agent_action(
+        organization_id=uuid.uuid4(), session_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(), action="sync_github_alerts",
+        label="Sync GitHub", rationale=None, payload={},
+    )
+    action.status = "executed"
+    action.result_summary = "3 alerts synced"
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return SimpleNamespace(scalar_one_or_none=lambda: None, scalar_one=lambda: 0)
+
+        def add(self, row):
+            raise AssertionError("No cross-tenant receipt may be inserted")
+
+    session = Session()
+    with pytest.raises(PermissionDeniedError):
+        await append_action_receipt(session, action)
+    scope_lookup = session.statements[0].compile(dialect=postgresql.dialect())
+    assert "agent_sessions" in str(scope_lookup)
+    assert action.organization_id in scope_lookup.params.values()
+    assert action.session_id in scope_lookup.params.values()
+
+
+@pytest.mark.asyncio
+async def test_settled_action_appends_verified_receipt_to_conversation(monkeypatch) -> None:
+    from app.services import agent_action
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    action = agent_action.new_agent_action(
+        organization_id=principal.organization_id, session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id, action="sync_github_alerts",
+        label="Sync GitHub", rationale=None, payload={},
+    )
+    action.status = "approved"
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+            self.messages = []
+
+        @asynccontextmanager
+        async def begin_nested(self):
+            yield
+
+        async def execute(self, statement):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(scalar_one_or_none=lambda: action.session_id)
+            if self.calls == 2:
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
+            if self.calls == 3:
+                return SimpleNamespace(scalar_one=lambda: 4)
+            return SimpleNamespace()
+
+        def add(self, row):
+            self.messages.append(row)
+
+        async def flush(self):
+            return None
+
+    async def provider_action(session, actor, row, *, settings, redis):
+        row.status = "executed"
+        row.result_summary = "3 alerts synced"
+        return row
+
+    monkeypatch.setattr(agent_action, "execute_approved_action", provider_action)
+    session = Session()
+    settled = await agent_action.execute_and_settle_action(
+        session, principal, action, settings=object(), redis=None,
+    )
+    assert settled is action
+    assert len(session.messages) == 1
+    assert session.messages[0].source_action_id == action.id
+    assert session.messages[0].content == "Action completed: Sync GitHub. 3 alerts synced"
+
+
+@pytest.mark.asyncio
+async def test_completed_assessment_updates_its_action_receipt_with_verified_counts() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.agent_action import complete_assessment_action_receipt, new_agent_action
+
+    tenant, run_id = uuid.uuid4(), uuid.uuid4()
+    action = new_agent_action(
+        organization_id=tenant, session_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(), action="start_assessment",
+        label="Assess example.org", rationale=None,
+        payload={"target": "https://example.org", "authorization_reference": "AUTH-1"},
+    )
+    action.status = "executed"
+    action.run_id = run_id
+    receipt = SimpleNamespace(content="Assessment queued: Assess example.org")
+    assessment = SimpleNamespace(
+        organization_id=tenant, id=uuid.uuid4(), findings_total=5,
+        findings_critical=1, findings_high=2, assets_discovered=3,
+        degradations=[{"scanner": "zap"}],
+    )
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            if len(self.statements) == 1:
+                return SimpleNamespace(scalar_one_or_none=lambda: action)
+            if len(self.statements) == 2:
+                return SimpleNamespace(scalar_one_or_none=lambda: action.session_id)
+            return SimpleNamespace(scalar_one_or_none=lambda: receipt)
+
+    session = Session()
+    changed = await complete_assessment_action_receipt(session, assessment, run_id)
+    assert changed is True
+    assert receipt.content == (
+        f"Assessment completed: {assessment.id}. 5 findings (1 critical, 2 high) "
+        "across 3 discovered assets. Some scanner coverage was degraded; review the report."
+    )
+    lookup = session.statements[0].compile(dialect=postgresql.dialect())
+    assert tenant in lookup.params.values()
+    assert run_id in lookup.params.values()
+
+
+@pytest.mark.asyncio
+async def test_assessment_receipt_update_ignores_other_tenants_run() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.agent_action import complete_assessment_action_receipt
+
+    tenant, run_id = uuid.uuid4(), uuid.uuid4()
+    assessment = SimpleNamespace(
+        organization_id=tenant, id=uuid.uuid4(), findings_total=0,
+        findings_critical=0, findings_high=0, assets_discovered=0, degradations=[],
+    )
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    session = Session()
+    assert await complete_assessment_action_receipt(session, assessment, run_id) is False
+    assert len(session.statements) == 1
+    lookup = session.statements[0].compile(dialect=postgresql.dialect())
+    assert tenant in lookup.params.values()
+    assert run_id in lookup.params.values()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        ("failed", "Assessment failed. No completed scan result is available; review run details."),
+        ("cancelled", "Assessment cancelled. No completed scan result is available."),
+    ],
+)
+async def test_terminal_worker_outcome_replaces_stale_queued_receipt(outcome, expected) -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.agent_action import new_agent_action, settle_assessment_action_receipt
+
+    tenant, run_id = uuid.uuid4(), uuid.uuid4()
+    action = new_agent_action(
+        organization_id=tenant, session_id=uuid.uuid4(),
+        requested_by_user_id=uuid.uuid4(), action="start_assessment",
+        label="Assess example.org", rationale=None,
+        payload={"target": "https://example.org", "authorization_reference": "AUTH-1"},
+    )
+    action.status = "executed"
+    action.run_id = run_id
+    receipt = SimpleNamespace(content="Assessment queued: Assess example.org")
+
+    class Session:
+        def __init__(self):
+            self.statements = []
+
+        async def execute(self, statement):
+            self.statements.append(statement)
+            if len(self.statements) == 1:
+                return SimpleNamespace(scalar_one_or_none=lambda: action)
+            if len(self.statements) == 2:
+                return SimpleNamespace(scalar_one_or_none=lambda: action.session_id)
+            return SimpleNamespace(scalar_one_or_none=lambda: receipt)
+
+    session = Session()
+    assert await settle_assessment_action_receipt(
+        session, organization_id=tenant, run_id=run_id, outcome=outcome,
+    ) is True
+    assert receipt.content == expected
+    lookup = session.statements[0].compile(dialect=postgresql.dialect())
+    assert tenant in lookup.params.values()
+    assert run_id in lookup.params.values()
+
+
+@pytest.mark.asyncio
+async def test_terminal_worker_receipt_refuses_unrecognized_outcome() -> None:
+    from app.services.agent_action import settle_assessment_action_receipt
+
+    class NoQuery:
+        async def execute(self, statement):
+            raise AssertionError("Unverified outcomes must not query or change receipts")
+
+    with pytest.raises(ValueError):
+        await settle_assessment_action_receipt(
+            NoQuery(), organization_id=uuid.uuid4(), run_id=uuid.uuid4(),
+            outcome="running",
+        )
+
+
 def test_action_digest_is_stable_across_payload_key_order() -> None:
     from app.services.agent_action import action_payload_digest
 
@@ -31,16 +476,124 @@ def test_action_digest_binds_the_action_name() -> None:
     )
 
 
+def test_assessment_action_requires_exact_authorized_target() -> None:
+    from app.services.agent_action import validate_action_payload
+
+    payload = validate_action_payload(
+        "start_assessment",
+        {"target": "https://example.org", "authorization_reference": "ENG-42"},
+    )
+    assert payload == {"target": "https://example.org", "authorization_reference": "ENG-42"}
+    with pytest.raises(ValueError):
+        validate_action_payload("start_assessment", {"target": "https://example.org"})
+    with pytest.raises(ValueError):
+        validate_action_payload(
+            "start_assessment",
+            {
+                "target": "https://example.org",
+                "authorization_reference": "ENG-42",
+                "api_key": "secret",
+            },
+        )
+    with pytest.raises(ValueError):
+        validate_action_payload(
+            "start_assessment",
+            {"target": "https://example.org/?token=hidden", "authorization_reference": "ENG-42"},
+        )
+    with pytest.raises(ValueError):
+        validate_action_payload(
+            "start_assessment",
+            {
+                "target": "https://example.org\nother.example.org",
+                "authorization_reference": "ENG-42",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://example.org",
+        "aws:123456789012",
+        "gcp:example-project-1",
+    ],
+)
 @pytest.mark.asyncio
-async def test_approved_tenable_action_syncs_vulnerabilities_and_records_result(monkeypatch) -> None:
+async def test_approved_assessment_action_stages_a_durable_worker_run(monkeypatch, target) -> None:
     from app.db.base import utcnow
     from app.services import agent_action
 
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
     row = agent_action.new_agent_action(
-        organization_id=principal.organization_id, session_id=uuid.uuid4(),
-        requested_by_user_id=principal.user_id, action="sync_tenable_vulnerabilities",
-        label="Sync Tenable", rationale=None, payload={},
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id,
+        action="start_assessment",
+        label="Scan example.org",
+        rationale=None,
+        payload={"target": target, "authorization_reference": "ENG-42"},
+    )
+    row.status = "approved"
+    row.approved_by_user_id = principal.user_id
+    row.resolved_at = utcnow()
+    assessment_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    calls = []
+
+    async def fake_create(session, actor, payload, settings):
+        calls.append(
+            (
+                "create",
+                actor.organization_id,
+                payload.targets,
+                payload.authorization.confirmed,
+                payload.authorization.evidence_reference,
+            )
+        )
+        return SimpleNamespace(id=assessment_id)
+
+    def fake_stage(session, actor, assessment):
+        calls.append(("stage", actor.organization_id, assessment.id))
+        return run_id, uuid.uuid4()
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_action.assessment_service, "create_assessment", fake_create)
+    monkeypatch.setattr(agent_action, "stage_assessment_run", fake_stage)
+    monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
+    await agent_action.execute_approved_action(
+        object(),
+        principal,
+        row,
+        settings=object(),
+        redis=None,
+    )
+    assert calls == [
+        ("create", principal.organization_id, [target], True, "ENG-42"),
+        ("stage", principal.organization_id, assessment_id),
+    ]
+    assert row.status == "executed"
+    assert row.run_id == run_id
+    assert str(assessment_id) in row.result_summary
+
+
+@pytest.mark.asyncio
+async def test_approved_tenable_action_syncs_vulnerabilities_and_records_result(
+    monkeypatch,
+) -> None:
+    from app.db.base import utcnow
+    from app.services import agent_action
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    row = agent_action.new_agent_action(
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id,
+        action="sync_tenable_vulnerabilities",
+        label="Sync Tenable",
+        rationale=None,
+        payload={},
     )
     row.status = "approved"
     row.approved_by_user_id = principal.user_id
@@ -54,11 +607,17 @@ async def test_approved_tenable_action_syncs_vulnerabilities_and_records_result(
     async def fake_audit(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(agent_action.external_alert_service, "sync_tenable_vulnerabilities", fake_sync)
+    monkeypatch.setattr(
+        agent_action.external_alert_service, "sync_tenable_vulnerabilities", fake_sync
+    )
     monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
     settings = object()
     await agent_action.execute_approved_action(
-        object(), principal, row, settings=settings, redis=None,
+        object(),
+        principal,
+        row,
+        settings=settings,
+        redis=None,
     )
     assert calls == [(principal.organization_id, settings, None)]
     assert row.status == "executed"
@@ -175,6 +734,78 @@ async def test_worker_refuses_approved_action_after_membership_revocation(monkey
 
 
 @pytest.mark.asyncio
+async def test_worker_settles_permission_revocation_and_continues_next_action(monkeypatch) -> None:
+    from app.services import agent_action
+
+    org_id, user_id = uuid.uuid4(), uuid.uuid4()
+    denied = agent_action.new_agent_action(
+        organization_id=org_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=user_id,
+        action="sync_github_alerts",
+        label="Sync",
+        rationale=None,
+        payload={},
+    )
+    permitted = agent_action.new_agent_action(
+        organization_id=org_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=user_id,
+        action="update_canonical_work",
+        label="Assign",
+        rationale=None,
+        payload={
+            "finding_id": str(uuid.uuid4()),
+            "expected_version": 1,
+            "assignee_user_id": str(user_id),
+        },
+    )
+    for row in (denied, permitted):
+        row.status = "approved"
+        row.approved_by_user_id = user_id
+    reads = 0
+    executed = []
+
+    class _Result:
+        def __init__(self, value):
+            self.value = value
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.value
+
+        def one_or_none(self):
+            return self.value
+
+    class _Session:
+        async def execute(self, statement):
+            nonlocal reads
+            reads += 1
+            return _Result([denied, permitted] if reads == 1 else ("developer",))
+
+        @asynccontextmanager
+        async def begin_nested(self):
+            yield
+
+    async def fake_execute(session, principal, action, *, settings, redis):
+        executed.append(action.id)
+        action.status = "executed"
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agent_action, "execute_approved_action", fake_execute)
+    monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
+    assert await agent_action.execute_approved_batch(_Session(), settings=object(), redis=None) == 2
+    assert denied.status == "failed"
+    assert "permission" in denied.result_summary.lower()
+    assert permitted.status == "executed"
+    assert executed == [permitted.id]
+
+
+@pytest.mark.asyncio
 async def test_worker_marks_provider_error_failed_without_repeating_approval(monkeypatch) -> None:
     from app.services import agent_action
 
@@ -230,14 +861,20 @@ async def test_worker_marks_provider_error_failed_without_repeating_approval(mon
 
 
 @pytest.mark.asyncio
-async def test_worker_isolates_unexpected_action_failure_without_leaking_details(monkeypatch) -> None:
+async def test_worker_isolates_unexpected_action_failure_without_leaking_details(
+    monkeypatch,
+) -> None:
     from app.services import agent_action
 
     user_id = uuid.uuid4()
     row = agent_action.new_agent_action(
-        organization_id=uuid.uuid4(), session_id=uuid.uuid4(),
-        requested_by_user_id=user_id, action="sync_github_alerts",
-        label="Sync", rationale=None, payload={},
+        organization_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        requested_by_user_id=user_id,
+        action="sync_github_alerts",
+        label="Sync",
+        rationale=None,
+        payload={},
     )
     row.status = "approved"
     row.approved_by_user_id = user_id
@@ -442,9 +1079,13 @@ async def test_approved_canonical_jira_action_calls_canonical_ticket_service(mon
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
     finding_id = uuid.uuid4()
     row = agent_action.new_agent_action(
-        organization_id=principal.organization_id, session_id=uuid.uuid4(),
-        requested_by_user_id=principal.user_id, action="create_jira_ticket",
-        label="Jira", rationale=None, payload={"canonical_finding_id": str(finding_id)},
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id,
+        action="create_jira_ticket",
+        label="Jira",
+        rationale=None,
+        payload={"canonical_finding_id": str(finding_id)},
     )
     row.status = "approved"
     row.approved_by_user_id = principal.user_id
@@ -461,7 +1102,11 @@ async def test_approved_canonical_jira_action_calls_canonical_ticket_service(mon
     monkeypatch.setattr(ticket, "create_canonical_ticket", fake_ticket)
     monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
     await agent_action.execute_approved_action(
-        object(), principal, row, settings=object(), redis=None,
+        object(),
+        principal,
+        row,
+        settings=object(),
+        redis=None,
     )
     assert called == [(principal.organization_id, finding_id, True)]
     assert row.status == "executed"
@@ -781,7 +1426,9 @@ async def test_jira_timeout_does_not_retry_create_with_or_without_optional_field
     client.search = no_existing
     with pytest.raises(IntegrationTimeoutError):
         await client.create_issue(
-            summary="Finding", description="Detail", finding_id=str(uuid.uuid4()),
+            summary="Finding",
+            description="Detail",
+            finding_id=str(uuid.uuid4()),
             priority=Priority.P1,
         )
     assert attempts == [("/rest/api/3/issue", None)]

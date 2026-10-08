@@ -94,16 +94,21 @@ async def resolve_approval(
     dispatch_id = None
     if run_id is not None:
         dispatch = stage_run_dispatch(
-            session, organization_id=principal.organization_id,
-            run_id=run_id, action=RunAction.RESUME,
+            session,
+            organization_id=principal.organization_id,
+            run_id=run_id,
+            action=RunAction.RESUME,
         )
         dispatch_id = dispatch.id
     await session.commit()
 
     if dispatch_id is not None:
         await deliver_run_dispatch(
-            session, organization_id=principal.organization_id, dispatch_id=dispatch_id,
-            redis=redis, settings=settings,
+            session,
+            organization_id=principal.organization_id,
+            dispatch_id=dispatch_id,
+            redis=redis,
+            settings=settings,
         )
         await session.commit()
 

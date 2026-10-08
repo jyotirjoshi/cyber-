@@ -43,12 +43,15 @@ looks like the save failed.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
+import re
 import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -68,10 +71,11 @@ from app.core.errors import (
     ResourceNotFoundError,
 )
 from app.db.base import utcnow
-from app.db.enums import AuditOutcome, IntegrationKind, IntegrationStatus, Permission
+from app.db.enums import AuditOutcome, IntegrationKind, IntegrationStatus, Permission, ScannerName
 from app.db.models.identity import Organization
 from app.db.models.integration import Integration, IntegrationCredential
 from app.db.repository import tenant_select
+from app.integrations.bitbucket import BitbucketClient
 from app.integrations.circuit import CircuitBreaker
 from app.integrations.defectdojo import DefectDojoClient
 from app.integrations.dify import DifyClient
@@ -85,6 +89,8 @@ from app.integrations.snyk import SnykClient
 from app.integrations.sonarqube import SonarQubeClient
 from app.integrations.tenable import TenableClient
 from app.integrations.wazuh import WazuhClient
+from app.scanners.base import ScannerRequest
+from app.scanners.prowler import AWS_ADAPTER, AZURE_ADAPTER, GCP_ADAPTER
 from app.schemas.integration import (
     CredentialOut,
     IntegrationHealthOut,
@@ -96,6 +102,7 @@ from app.services import audit as audit_service
 from app.services.audit import AuditAction
 from app.services.context import Principal
 from app.services.entitlements import assert_integration_capacity, load_entitlements
+from app.services.gcp_credentials import mint_gcp_access_token
 
 log = structlog.get_logger(__name__)
 
@@ -233,6 +240,16 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         config={"project_ids": "project_ids"},
         required=("api_token",),
     ),
+    IntegrationKind.BITBUCKET: _KindSpec(
+        section="bitbucket",
+        credentials={"api_token": "api_token"},
+        config={
+            "account_email": "account_email",
+            "workspace": "workspace",
+            "repository": "repository",
+        },
+        required=("api_token",),
+    ),
     IntegrationKind.WAZUH: _KindSpec(
         section="wazuh",
         base_url_field="base_url",
@@ -260,9 +277,37 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         required=("api_token",),
     ),
     IntegrationKind.TENABLE: _KindSpec(
-        section="tenable", base_url_field="base_url",
+        section="tenable",
+        base_url_field="base_url",
         credentials={"access_key": "access_key", "secret_key": "secret_key"},
-        config={"scan_ids": "scan_ids"}, required=("access_key", "secret_key"),
+        config={"scan_ids": "scan_ids"},
+        required=("access_key", "secret_key"),
+    ),
+    IntegrationKind.PROWLER_AWS: _KindSpec(
+        section="scanner",
+        credentials={
+            "access_key_id": "aws_access_key_id",
+            "secret_access_key": "aws_secret_access_key",
+            "session_token": "aws_session_token",
+        },
+        config={"account_id": "aws_account_id"},
+        required=("access_key_id", "secret_access_key"),
+    ),
+    IntegrationKind.PROWLER_AZURE: _KindSpec(
+        section="scanner",
+        credentials={
+            "client_id": "azure_client_id",
+            "tenant_id": "azure_tenant_id",
+            "client_secret": "azure_client_secret",
+        },
+        config={"account_id": "azure_subscription_id"},
+        required=("client_id", "tenant_id", "client_secret"),
+    ),
+    IntegrationKind.PROWLER_GCP: _KindSpec(
+        section="scanner",
+        credentials={"service_account_json": "gcp_service_account_json"},
+        config={"account_id": "gcp_project_id"},
+        required=("service_account_json",),
     ),
 }
 
@@ -273,17 +318,23 @@ _UNIMPLEMENTED: frozenset[IntegrationKind] = frozenset()
 
 # These connectors act on customer-owned accounts. A deployment credential must never
 # become an implicit credential for an unrelated organization in a hosted SaaS.
-_TENANT_PRIVATE_KINDS: frozenset[IntegrationKind] = frozenset({
-    IntegrationKind.JIRA,
-    IntegrationKind.DIFY,
-    IntegrationKind.MISP,
-    IntegrationKind.GITHUB,
-    IntegrationKind.GITLAB,
-    IntegrationKind.WAZUH,
-    IntegrationKind.SONARQUBE,
-    IntegrationKind.SNYK,
-    IntegrationKind.TENABLE,
-})
+_TENANT_PRIVATE_KINDS: frozenset[IntegrationKind] = frozenset(
+    {
+        IntegrationKind.JIRA,
+        IntegrationKind.DIFY,
+        IntegrationKind.MISP,
+        IntegrationKind.GITHUB,
+        IntegrationKind.GITLAB,
+        IntegrationKind.BITBUCKET,
+        IntegrationKind.WAZUH,
+        IntegrationKind.SONARQUBE,
+        IntegrationKind.SNYK,
+        IntegrationKind.TENABLE,
+        IntegrationKind.PROWLER_AWS,
+        IntegrationKind.PROWLER_AZURE,
+        IntegrationKind.PROWLER_GCP,
+    }
+)
 
 _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.LLM: "Bring your own AI provider",
@@ -296,11 +347,83 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.NVD: "NVD",
     IntegrationKind.GITHUB: "GitHub",
     IntegrationKind.GITLAB: "GitLab",
+    IntegrationKind.BITBUCKET: "Bitbucket",
     IntegrationKind.WAZUH: "Wazuh",
     IntegrationKind.SONARQUBE: "SonarQube",
     IntegrationKind.SNYK: "Snyk",
     IntegrationKind.TENABLE: "Tenable VM",
+    IntegrationKind.PROWLER_AWS: "Prowler AWS account",
+    IntegrationKind.PROWLER_AZURE: "Prowler Azure subscription",
+    IntegrationKind.PROWLER_GCP: "Prowler GCP project",
 }
+
+
+def validate_aws_account_config(config: Mapping[str, Any]) -> str:
+    account = config.get("account_id")
+    if not isinstance(account, str) or re.fullmatch(r"\d{12}", account) is None:
+        raise InvalidConfigurationError(
+            "invalid AWS account ID",
+            user_message="AWS account_id must be exactly 12 digits.",
+        )
+    return account
+
+
+def validate_azure_subscription_config(config: Mapping[str, Any]) -> str:
+    account = config.get("account_id")
+    if (
+        not isinstance(account, str)
+        or re.fullmatch(
+            r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}",
+            account,
+        )
+        is None
+    ):
+        raise InvalidConfigurationError(
+            "invalid Azure subscription ID",
+            user_message="Azure account_id must be a subscription UUID.",
+        )
+    return account.lower()
+
+
+def validate_gcp_project_config(config: Mapping[str, Any]) -> str:
+    project = config.get("account_id")
+    if (
+        not isinstance(project, str)
+        or re.fullmatch(
+            r"[a-z][a-z0-9-]{4,28}[a-z0-9]",
+            project,
+        )
+        is None
+    ):
+        raise InvalidConfigurationError(
+            "invalid GCP project ID",
+            user_message="GCP account_id must be a canonical project ID.",
+        )
+    return project
+
+
+def validate_bitbucket_config(config: Mapping[str, Any]) -> None:
+    """Reject malformed repository coordinates before they reach an outbound client."""
+    email = config.get("account_email")
+    if email is not None and (
+        not isinstance(email, str)
+        or len(email) > 254
+        or re.fullmatch(r"[^\s:@]+@[^\s:@]+", email) is None
+    ):
+        raise InvalidConfigurationError(
+            "invalid Bitbucket account email",
+            user_message="Bitbucket account_email must be a valid email address.",
+        )
+    for config_field in ("workspace", "repository"):
+        value = config.get(config_field)
+        if value is not None and (
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", value) is None
+        ):
+            raise InvalidConfigurationError(
+                f"invalid Bitbucket {config_field}",
+                user_message=f"Bitbucket {config_field} must be a repository identifier.",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -642,11 +765,12 @@ async def resolve_settings(
     configuration still lacks a required credential -- use it at the point of a real
     outbound call, so the error names the provider the user was waiting on.
     """
-    tenant_private = settings.is_production and kind in _TENANT_PRIVATE_KINDS
-    base = (
-        _without_deployment_provider_config(settings, kind)
-        if tenant_private else settings
-    )
+    tenant_private = kind in {
+        IntegrationKind.PROWLER_AWS,
+        IntegrationKind.PROWLER_AZURE,
+        IntegrationKind.PROWLER_GCP,
+    } or (settings.is_production and kind in _TENANT_PRIVATE_KINDS)
+    base = _without_deployment_provider_config(settings, kind) if tenant_private else settings
     integration = await find_integration(session, principal, kind)
     if integration is None:
         if require:
@@ -768,9 +892,14 @@ async def upsert_integration(
     if kind == IntegrationKind.TENABLE and "scan_ids" in payload.config:
         scans = payload.config["scan_ids"]
         try:
-            valid = (isinstance(scans, list) and 1 <= len(scans) <= 20
-                     and all(isinstance(item, str) and str(uuid.UUID(item)) == item.lower() for item in scans)
-                     and len(set(scans)) == len(scans))
+            valid = (
+                isinstance(scans, list)
+                and 1 <= len(scans) <= 20
+                and all(
+                    isinstance(item, str) and str(uuid.UUID(item)) == item.lower() for item in scans
+                )
+                and len(set(scans)) == len(scans)
+            )
         except (ValueError, TypeError):
             valid = False
         if not valid:
@@ -778,6 +907,15 @@ async def upsert_integration(
                 "invalid Tenable scan IDs",
                 user_message="Tenable scan_ids must be 1-20 unique scan UUIDs.",
             )
+
+    if kind is IntegrationKind.PROWLER_AWS and "account_id" in payload.config:
+        validate_aws_account_config(payload.config)
+    if kind is IntegrationKind.PROWLER_AZURE and "account_id" in payload.config:
+        payload.config["account_id"] = validate_azure_subscription_config(payload.config)
+    if kind is IntegrationKind.PROWLER_GCP and "account_id" in payload.config:
+        payload.config["account_id"] = validate_gcp_project_config(payload.config)
+    if kind is IntegrationKind.BITBUCKET:
+        validate_bitbucket_config(payload.config)
 
     # Serialize connector creation per organization.  This prevents two concurrent settings
     # requests from both seeing the last available slot and storing more integrations than
@@ -929,6 +1067,73 @@ async def disable_integration(
 
 
 async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) -> bool:
+    if kind is IntegrationKind.PROWLER_AWS:
+        account = validate_aws_account_config({"account_id": scoped.scanner.aws_account_id})
+        access = scoped.scanner.aws_access_key_id
+        secret = scoped.scanner.aws_secret_access_key
+        if access is None or secret is None:
+            raise IntegrationNotConfiguredError("prowler_aws", hint="Both AWS keys are required.")
+        credentials = {
+            "AWS_ACCESS_KEY_ID": access.get_secret_value(),
+            "AWS_SECRET_ACCESS_KEY": secret.get_secret_value(),
+        }
+        if scoped.scanner.aws_session_token is not None:
+            credentials["AWS_SESSION_TOKEN"] = scoped.scanner.aws_session_token.get_secret_value()
+        request = ScannerRequest(
+            scanner=ScannerName.PROWLER_AWS,
+            targets=(f"aws:{account}",),
+            workdir=Path("."),
+            timeout_seconds=1,
+        )
+        await asyncio.to_thread(AWS_ADAPTER.verify_credential_scope, request, credentials)
+        return True
+    if kind is IntegrationKind.PROWLER_AZURE:
+        account = validate_azure_subscription_config(
+            {"account_id": scoped.scanner.azure_subscription_id}
+        )
+        client_id = scoped.scanner.azure_client_id
+        tenant_id = scoped.scanner.azure_tenant_id
+        secret = scoped.scanner.azure_client_secret
+        if not all((client_id, tenant_id, secret)):
+            raise IntegrationNotConfiguredError(
+                "prowler_azure", hint="Azure service-principal credentials are required."
+            )
+        credentials = {
+            "AZURE_CLIENT_ID": client_id.get_secret_value(),
+            "AZURE_TENANT_ID": tenant_id.get_secret_value(),
+            "AZURE_CLIENT_SECRET": secret.get_secret_value(),
+        }
+        request = ScannerRequest(
+            scanner=ScannerName.PROWLER_AZURE,
+            targets=(f"azure:{account}",),
+            workdir=Path("."),
+            timeout_seconds=1,
+        )
+        await asyncio.to_thread(AZURE_ADAPTER.verify_credential_scope, request, credentials)
+        return True
+    if kind is IntegrationKind.PROWLER_GCP:
+        project = validate_gcp_project_config({"account_id": scoped.scanner.gcp_project_id})
+        key = scoped.scanner.gcp_service_account_json
+        if key is None:
+            raise IntegrationNotConfiguredError(
+                "prowler_gcp", hint="Service-account JSON is required."
+            )
+        token = await asyncio.to_thread(mint_gcp_access_token, key.get_secret_value(), project)
+        request = ScannerRequest(
+            scanner=ScannerName.PROWLER_GCP,
+            targets=(f"gcp:{project}",),
+            workdir=Path("."),
+            timeout_seconds=1,
+        )
+        await asyncio.to_thread(
+            GCP_ADAPTER.verify_credential_scope,
+            request,
+            {
+                "CLOUDSDK_AUTH_ACCESS_TOKEN": token,
+                "GOOGLE_CLOUD_PROJECT": project,
+            },
+        )
+        return True
     if kind is IntegrationKind.DEFECTDOJO:
         return await DefectDojoClient(scoped, redis).ping()
     if kind is IntegrationKind.JIRA:
@@ -947,6 +1152,12 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await GitHubClient(scoped, redis).ping()
     if kind is IntegrationKind.GITLAB:
         return await GitLabClient(scoped, redis).ping()
+    if kind is IntegrationKind.BITBUCKET:
+        client = BitbucketClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
     if kind is IntegrationKind.SONARQUBE:
         client = SonarQubeClient(scoped, redis)
         try:
@@ -976,8 +1187,12 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
 
 
 async def tenable_scan_status(
-    session: AsyncSession, principal: Principal, scan_id: str, *,
-    settings: Settings, redis: Redis | None = None,
+    session: AsyncSession,
+    principal: Principal,
+    scan_id: str,
+    *,
+    settings: Settings,
+    redis: Redis | None = None,
 ) -> str:
     """Read live status of a tenant-configured Tenable scan."""
     principal.require(Permission.INTEGRATION_READ)
@@ -993,17 +1208,24 @@ async def tenable_scan_status(
 
 
 async def require_tenant_tenable_integration(
-    session: AsyncSession, principal: Principal, scan_id: str | None = None,
+    session: AsyncSession,
+    principal: Principal,
+    scan_id: str | None = None,
 ) -> Integration:
     """Never let an organization launch with another tenant's deployment fallback."""
     integration = await find_integration(session, principal, IntegrationKind.TENABLE)
     if integration is None or not integration.is_usable:
-        raise IntegrationNotConfiguredError("Tenable VM", hint="Configure an enabled integration first.")
+        raise IntegrationNotConfiguredError(
+            "Tenable VM", hint="Configure an enabled integration first."
+        )
     scan_ids = integration.config.get("scan_ids")
     credential_names = {credential.name for credential in integration.credentials}
-    if (not isinstance(scan_ids, list) or not scan_ids
-            or (scan_id is not None and scan_id not in scan_ids)
-            or not {"access_key", "secret_key"}.issubset(credential_names)):
+    if (
+        not isinstance(scan_ids, list)
+        or not scan_ids
+        or (scan_id is not None and scan_id not in scan_ids)
+        or not {"access_key", "secret_key"}.issubset(credential_names)
+    ):
         raise IntegrationNotConfiguredError(
             "Tenable VM", hint="Save this scan UUID and both API keys in your organization first."
         )
@@ -1011,8 +1233,12 @@ async def require_tenant_tenable_integration(
 
 
 async def launch_tenable_scan(
-    session: AsyncSession, principal: Principal, scan_id: str, *,
-    settings: Settings, redis: Redis | None = None,
+    session: AsyncSession,
+    principal: Principal,
+    scan_id: str,
+    *,
+    settings: Settings,
+    redis: Redis | None = None,
 ) -> str | None:
     """Launch an already configured scan, then record the action in this tenant's audit trail."""
     principal.require(Permission.INTEGRATION_MANAGE)
@@ -1024,8 +1250,10 @@ async def launch_tenable_scan(
     try:
         launched_uuid = await client.launch_scan(scan_id)
         await audit_service.record(
-            session, action=AuditAction.INTEGRATION_SCAN_LAUNCH,
-            principal=principal, resource_type="integration",
+            session,
+            action=AuditAction.INTEGRATION_SCAN_LAUNCH,
+            principal=principal,
+            resource_type="integration",
             resource_id=integration.id if integration else None,
             detail={"provider": "tenable", "scan_id": scan_id, "run_uuid": launched_uuid},
         )

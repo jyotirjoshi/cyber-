@@ -19,9 +19,12 @@ async def test_enqueue_reuses_existing_job_for_same_run_step(monkeypatch) -> Non
 
     assessment = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
     existing = ScannerJob(
-        id=uuid.uuid4(), organization_id=assessment.organization_id,
-        assessment_id=assessment.id, scanner=ScannerName.NMAP.value,
-        idempotency_key="agent:run-1:nmap", targets=["example.com"],
+        id=uuid.uuid4(),
+        organization_id=assessment.organization_id,
+        assessment_id=assessment.id,
+        scanner=ScannerName.NMAP.value,
+        idempotency_key="agent:run-1:nmap",
+        targets=["example.com"],
         timeout_seconds=30,
     )
     calls = []
@@ -40,8 +43,11 @@ async def test_enqueue_reuses_existing_job_for_same_run_step(monkeypatch) -> Non
 
     monkeypatch.setattr(service.audit_service, "record", unexpected_audit)
     result = await enqueue_job(
-        Session(), assessment, scanner=ScannerName.NMAP,
-        targets=["example.com"], idempotency_key="agent:run-1:nmap",
+        Session(),
+        assessment,
+        scanner=ScannerName.NMAP,
+        targets=["example.com"],
+        idempotency_key="agent:run-1:nmap",
     )
     assert result is existing
     assert len(calls) == 2
@@ -51,9 +57,9 @@ def test_scanner_job_has_tenant_scoped_unique_idempotency_key() -> None:
     assert "idempotency_key" in ScannerJob.__table__.columns
     constraints = ScannerJob.__table__.constraints
     assert any(
-        {column.name for column in constraint.columns}
-        == {"organization_id", "idempotency_key"}
-        for constraint in constraints if hasattr(constraint, "columns")
+        {column.name for column in constraint.columns} == {"organization_id", "idempotency_key"}
+        for constraint in constraints
+        if hasattr(constraint, "columns")
     )
 
 
@@ -63,9 +69,12 @@ async def test_enqueue_rejects_reuse_of_key_for_different_targets(monkeypatch) -
 
     assessment = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
     existing = ScannerJob(
-        id=uuid.uuid4(), organization_id=assessment.organization_id,
-        assessment_id=assessment.id, scanner=ScannerName.NMAP.value,
-        idempotency_key="agent:run-1:nmap", targets=["different.example"],
+        id=uuid.uuid4(),
+        organization_id=assessment.organization_id,
+        assessment_id=assessment.id,
+        scanner=ScannerName.NMAP.value,
+        idempotency_key="agent:run-1:nmap",
+        targets=["different.example"],
         timeout_seconds=30,
     )
 
@@ -82,8 +91,11 @@ async def test_enqueue_rejects_reuse_of_key_for_different_targets(monkeypatch) -
     monkeypatch.setattr(service.audit_service, "record", unexpected_audit)
     with pytest.raises(ConflictError):
         await enqueue_job(
-            Session(), assessment, scanner=ScannerName.NMAP,
-            targets=["example.com"], idempotency_key="agent:run-1:nmap",
+            Session(),
+            assessment,
+            scanner=ScannerName.NMAP,
+            targets=["example.com"],
+            idempotency_key="agent:run-1:nmap",
         )
 
 
@@ -94,9 +106,12 @@ async def test_enqueue_records_one_audit_for_new_idempotent_job(monkeypatch) -> 
     assessment = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
     job_id = uuid.uuid4()
     job = ScannerJob(
-        id=job_id, organization_id=assessment.organization_id,
-        assessment_id=assessment.id, scanner=ScannerName.NMAP.value,
-        idempotency_key="agent:run-1:nmap", targets=["example.com"],
+        id=job_id,
+        organization_id=assessment.organization_id,
+        assessment_id=assessment.id,
+        scanner=ScannerName.NMAP.value,
+        idempotency_key="agent:run-1:nmap",
+        targets=["example.com"],
         timeout_seconds=30,
     )
     audits = []
@@ -114,8 +129,11 @@ async def test_enqueue_records_one_audit_for_new_idempotent_job(monkeypatch) -> 
 
     monkeypatch.setattr(service.audit_service, "record", record)
     result = await enqueue_job(
-        Session(), assessment, scanner=ScannerName.NMAP,
-        targets=["example.com"], idempotency_key="agent:run-1:nmap",
+        Session(),
+        assessment,
+        scanner=ScannerName.NMAP,
+        targets=["example.com"],
+        idempotency_key="agent:run-1:nmap",
     )
     assert result is job
     assert len(audits) == 1
@@ -128,10 +146,13 @@ async def test_replay_accepts_same_target_set_in_different_order(monkeypatch) ->
 
     assessment = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
     existing = ScannerJob(
-        id=uuid.uuid4(), organization_id=assessment.organization_id,
-        assessment_id=assessment.id, scanner=ScannerName.NMAP.value,
+        id=uuid.uuid4(),
+        organization_id=assessment.organization_id,
+        assessment_id=assessment.id,
+        scanner=ScannerName.NMAP.value,
         idempotency_key="agent:run-2:nmap",
-        targets=["a.example.com", "b.example.com"], timeout_seconds=30,
+        targets=["a.example.com", "b.example.com"],
+        timeout_seconds=30,
     )
 
     class Session:
@@ -146,7 +167,9 @@ async def test_replay_accepts_same_target_set_in_different_order(monkeypatch) ->
 
     monkeypatch.setattr(service.audit_service, "record", unexpected_audit)
     result = await enqueue_job(
-        Session(), assessment, scanner=ScannerName.NMAP,
+        Session(),
+        assessment,
+        scanner=ScannerName.NMAP,
         targets=["b.example.com", "a.example.com"],
         idempotency_key="agent:run-2:nmap",
     )

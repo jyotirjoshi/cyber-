@@ -129,6 +129,22 @@ ALLOWED_ENV_NAMES = frozenset(
     }
 )
 
+# Explicit per-run cloud identity channel. These names are never allowed through the static
+# adapter environment; a caller must also use an adapter that declares each name.
+ALLOWED_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_CLIENT_SECRET",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN",
+        "GOOGLE_CLOUD_PROJECT",
+        "CYNUX_ZAP_API_TOKEN",
+    }
+)
+
 
 def validate_argv(argv: tuple[str, ...] | list[str], *, scanner: str) -> tuple[str, ...]:
     """Check every argv element, or refuse to run.
@@ -212,6 +228,7 @@ def build_sandbox(
     work_mount: str = "/work",
     run_as_user: str | None = None,
     environment: Mapping[str, str] | None = None,
+    credential_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Container kwargs for one scanner run.
 
@@ -242,6 +259,10 @@ def build_sandbox(
     user = run_as_user or settings.run_as_user
     _assert_unprivileged(user)
     env = _validate_environment(environment)
+    credentials = _validate_credentials(credential_environment)
+    if env.keys() & credentials.keys():
+        raise UnsafeScannerInvocationError("Scanner environment names overlap credential names.")
+    env.update(credentials)
 
     host_workdir = Path(workdir).resolve()
     if not host_workdir.is_dir():
@@ -304,7 +325,7 @@ def build_sandbox(
         #: a tmpfs, or the tool fails on startup with an opaque permission error.
         sandbox["tmpfs"]["/home/nonroot"] = f"size=64m,mode=1777,uid={_uid_of(user)}"
 
-    assert_sandbox_safe(sandbox)
+    assert_sandbox_safe(sandbox, credential_environment_names=frozenset(credentials))
     return sandbox
 
 
@@ -355,6 +376,30 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
     return checked
 
 
+def _validate_credentials(environment: Mapping[str, str] | None) -> dict[str, str]:
+    if not environment:
+        return {}
+    checked: dict[str, str] = {}
+    for name, value in environment.items():
+        if name not in ALLOWED_CREDENTIAL_ENV_NAMES:
+            raise UnsafeScannerInvocationError(
+                "A scanner requested a credential name that is not allow-listed.",
+                context={"name": str(name)},
+            )
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 8192
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise UnsafeScannerInvocationError(
+                "A scanner credential value was invalid.",
+                context={"name": name},
+            )
+        checked[name] = value
+    return checked
+
+
 def _assert_mount_source_allowed(source: Path) -> None:
     resolved = str(source).replace("\\", "/")
     for forbidden in _FORBIDDEN_MOUNT_SOURCES:
@@ -366,7 +411,11 @@ def _assert_mount_source_allowed(source: Path) -> None:
             )
 
 
-def assert_sandbox_safe(sandbox: dict[str, Any]) -> None:
+def assert_sandbox_safe(
+    sandbox: dict[str, Any],
+    *,
+    credential_environment_names: frozenset[str] = frozenset(),
+) -> None:
     """Re-check the invariants on the built dict.
 
     Belt and braces on purpose. :func:`build_sandbox` is the only place these are set, so this
@@ -407,6 +456,10 @@ def assert_sandbox_safe(sandbox: dict[str, Any]) -> None:
     if environment:
         for name in environment:
             upper = str(name).upper()
+            if name in credential_environment_names:
+                if name not in ALLOWED_CREDENTIAL_ENV_NAMES:
+                    problems.append(f"environment:{name}")
+                continue
             if name not in ALLOWED_ENV_NAMES or any(
                 fragment in upper for fragment in _SECRET_ENV_FRAGMENTS
             ):

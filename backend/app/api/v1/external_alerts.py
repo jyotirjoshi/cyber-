@@ -33,8 +33,12 @@ async def external_alert_inbox(
     principal: PrincipalDep,
     session: DbSession,
     pagination: PaginationDep,
-    provider: Annotated[Literal["github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"] | None, Query()] = None,
-    severity: Annotated[Literal["critical", "high", "medium", "low", "info"] | None, Query()] = None,
+    provider: Annotated[
+        Literal["github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"] | None, Query()
+    ] = None,
+    severity: Annotated[
+        Literal["critical", "high", "medium", "low", "info"] | None, Query()
+    ] = None,
     status: Annotated[Literal["open", "resolved", "dismissed", "fixed"] | None, Query()] = None,
     triage_status: Annotated[
         Literal["new", "investigating", "risk_accepted", "false_positive", "closed"] | None,
@@ -121,9 +125,14 @@ async def update_github_alert_source(
 ) -> ExternalAlertDetailOut:
     """Apply an explicit GitHub alert decision and return confirmed source status."""
     row = await set_github_alert_state(
-        session, principal, alert_id, decision=payload.decision,
-        reason=payload.reason, comment=payload.comment,
-        settings=settings, redis=redis,
+        session,
+        principal,
+        alert_id,
+        decision=payload.decision,
+        reason=payload.reason,
+        comment=payload.comment,
+        settings=settings,
+        redis=redis,
     )
     await session.commit()
     return ExternalAlertDetailOut.model_validate(row)

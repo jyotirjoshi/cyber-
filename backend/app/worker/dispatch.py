@@ -21,7 +21,9 @@ from app.worker.protocol import RunAction, RunRequest, publish_run_request
 
 
 def stage_assessment_run(
-    session: AsyncSession, principal: Principal, assessment: Assessment,
+    session: AsyncSession,
+    principal: Principal,
+    assessment: Assessment,
 ) -> tuple[uuid.UUID, uuid.UUID]:
     """Stage the conversation, queued run, and dispatch as one database unit."""
     session_id = uuid.uuid4()
@@ -48,8 +50,11 @@ def stage_assessment_run(
         )
     )
     dispatch = stage_run_dispatch(
-        session, organization_id=principal.organization_id, run_id=run_id,
-        action=RunAction.START, principal=principal,
+        session,
+        organization_id=principal.organization_id,
+        run_id=run_id,
+        action=RunAction.START,
+        principal=principal,
     )
     return run_id, dispatch.id
 
@@ -84,7 +89,9 @@ def stage_run_dispatch(
 
 
 async def publish_staged_dispatch(
-    dispatch: RunDispatch, redis: Redis, settings: Settings,
+    dispatch: RunDispatch,
+    redis: Redis,
+    settings: Settings,
 ) -> bool:
     """Publish a locked outbox row; leave transient failures pending for a later sweep."""
     if dispatch.status == "sent":
@@ -123,10 +130,12 @@ async def deliver_pending_dispatches(
     ranked = (
         select(
             RunDispatch.id.label("dispatch_id"),
-            func.row_number().over(
+            func.row_number()
+            .over(
                 partition_by=RunDispatch.organization_id,
                 order_by=(RunDispatch.available_at, RunDispatch.created_at, RunDispatch.id),
-            ).label("tenant_rank"),
+            )
+            .label("tenant_rank"),
         )
         .join(
             AgentRun,
@@ -183,6 +192,9 @@ async def deliver_run_dispatch(
 
 
 __all__ = [
-    "deliver_pending_dispatches", "deliver_run_dispatch", "publish_staged_dispatch",
-    "stage_assessment_run", "stage_run_dispatch",
+    "deliver_pending_dispatches",
+    "deliver_run_dispatch",
+    "publish_staged_dispatch",
+    "stage_assessment_run",
+    "stage_run_dispatch",
 ]

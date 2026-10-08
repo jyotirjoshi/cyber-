@@ -111,11 +111,7 @@ async def allocate_slug(session: AsyncSession, base: str) -> str:
     violation and retries.
     """
     taken = set(
-        (
-            await session.execute(
-                select(Organization.slug).where(Organization.slug.like(f"{base}%"))
-            )
-        )
+        (await session.execute(select(Organization.slug).where(Organization.slug.like(f"{base}%"))))
         .scalars()
         .all()
     )

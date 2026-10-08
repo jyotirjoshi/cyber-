@@ -41,7 +41,15 @@ class GitLabClient:
         if not self.configured:
             raise IntegrationNotConfiguredError(PROVIDER, hint="Set CYNUX_GITLAB__API_TOKEN.")
         if self._client is None:
-            self._client = build_client(provider=PROVIDER, base_url=self._cfg.base_url.rstrip("/"), settings=self._settings, redis=self._redis, timeout=30.0, retry=RetryPolicy(max_attempts=2, backoff_base=1.0), breaker_config=BreakerConfig(failure_threshold=4, cooldown_seconds=180))
+            self._client = build_client(
+                provider=PROVIDER,
+                base_url=self._cfg.base_url.rstrip("/"),
+                settings=self._settings,
+                redis=self._redis,
+                timeout=30.0,
+                retry=RetryPolicy(max_attempts=2, backoff_base=1.0),
+                breaker_config=BreakerConfig(failure_threshold=4, cooldown_seconds=180),
+            )
         return self._client
 
     def _headers(self) -> dict[str, str]:
@@ -53,7 +61,9 @@ class GitLabClient:
 
     async def list_security_alerts(self) -> list[GitLabAlertFeed]:
         if not self._cfg.project_ids:
-            raise IntegrationNotConfiguredError(PROVIDER, hint="Configure at least one GitLab project ID or path.")
+            raise IntegrationNotConfiguredError(
+                PROVIDER, hint="Configure at least one GitLab project ID or path."
+            )
         client = self._require()
         headers = self._headers()
         feeds = []
@@ -62,11 +72,16 @@ class GitLabClient:
             alerts: list[dict[str, Any]] = []
             for page in range(1, _MAX_PAGES + 1):
                 payload = await client.get_json(
-                    path, headers=headers,
+                    path,
+                    headers=headers,
                     params={"scope": "all", "per_page": _PAGE_SIZE, "page": page},
                 )
-                if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
-                    raise IntegrationError("GitLab returned an invalid finding page", provider=PROVIDER)
+                if not isinstance(payload, list) or any(
+                    not isinstance(item, dict) for item in payload
+                ):
+                    raise IntegrationError(
+                        "GitLab returned an invalid finding page", provider=PROVIDER
+                    )
                 alerts.extend(payload)
                 if len(payload) < _PAGE_SIZE:
                     break

@@ -206,6 +206,14 @@ class AssessmentStage(StrEnum):
     SCAN_NMAP = "scanning_nmap"
     SCAN_NUCLEI = "scanning_nuclei"
     SCAN_ZAP = "scanning_zap"
+    SCAN_TRIVY_REPO = "scanning_trivy_repo"
+    SCAN_SEMGREP_REPO = "scanning_semgrep_repo"
+    SCAN_GITLEAKS_REPO = "scanning_gitleaks_repo"
+    SCAN_TRIVY_IMAGE = "scanning_trivy_image"
+    SCAN_SYFT_IMAGE = "scanning_syft_image"
+    SCAN_PROWLER_AWS = "scanning_prowler_aws"
+    SCAN_PROWLER_AZURE = "scanning_prowler_azure"
+    SCAN_PROWLER_GCP = "scanning_prowler_gcp"
     IMPORT = "importing_findings"
     ENRICH = "threat_intelligence"
     AI_ANALYSIS = "ai_analysis"
@@ -228,6 +236,14 @@ STAGE_ORDER: tuple[AssessmentStage, ...] = (
     AssessmentStage.SCAN_NMAP,
     AssessmentStage.SCAN_NUCLEI,
     AssessmentStage.SCAN_ZAP,
+    AssessmentStage.SCAN_TRIVY_REPO,
+    AssessmentStage.SCAN_SEMGREP_REPO,
+    AssessmentStage.SCAN_GITLEAKS_REPO,
+    AssessmentStage.SCAN_TRIVY_IMAGE,
+    AssessmentStage.SCAN_SYFT_IMAGE,
+    AssessmentStage.SCAN_PROWLER_AWS,
+    AssessmentStage.SCAN_PROWLER_AZURE,
+    AssessmentStage.SCAN_PROWLER_GCP,
     AssessmentStage.IMPORT,
     AssessmentStage.ENRICH,
     AssessmentStage.AI_ANALYSIS,
@@ -341,6 +357,7 @@ class CriticalitySource(StrEnum):
     guess for a curated fact."""
 
     OPERATOR_TAG = "operator_tag"
+    CMDB = "cmdb"
     INFERRED_KEYWORD = "inferred_keyword"
     INFERRED_EXPOSURE = "inferred_exposure"
     DEFAULT = "default"
@@ -356,6 +373,14 @@ class ScannerName(StrEnum):
     NMAP = "nmap"
     NUCLEI = "nuclei"
     ZAP = "zap"
+    TRIVY_REPO = "trivy_repo"
+    SEMGREP_REPO = "semgrep_repo"
+    GITLEAKS_REPO = "gitleaks_repo"
+    TRIVY_IMAGE = "trivy_image"
+    SYFT_IMAGE = "syft_image"
+    PROWLER_AWS = "prowler_aws"
+    PROWLER_AZURE = "prowler_azure"
+    PROWLER_GCP = "prowler_gcp"
 
 
 class JobStatus(StrEnum):
@@ -530,6 +555,7 @@ class AgentActionName(StrEnum):
     UPDATE_GITHUB_ALERT = "update_github_alert"
     CREATE_JIRA_TICKET = "create_jira_ticket"
     UPDATE_CANONICAL_WORK = "update_canonical_work"
+    START_ASSESSMENT = "start_assessment"
 
 
 class AgentActionStatus(StrEnum):
@@ -572,10 +598,14 @@ class IntegrationKind(StrEnum):
     NVD = "nvd"
     GITHUB = "github"
     GITLAB = "gitlab"
+    BITBUCKET = "bitbucket"
     WAZUH = "wazuh"
     SONARQUBE = "sonarqube"
     SNYK = "snyk"
     TENABLE = "tenable"
+    PROWLER_AWS = "prowler_aws"
+    PROWLER_AZURE = "prowler_azure"
+    PROWLER_GCP = "prowler_gcp"
 
 
 class IntegrationStatus(StrEnum):
@@ -592,6 +622,7 @@ class NotificationEvent(StrEnum):
     ASSESSMENT_COMPLETED = "assessment_completed"
     ASSESSMENT_FAILED = "assessment_failed"
     TICKET_CREATED = "ticket_created"
+    NEW_ASSET = "new_asset"
 
 
 class NotificationChannel(StrEnum):

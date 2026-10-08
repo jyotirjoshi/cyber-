@@ -292,9 +292,7 @@ def _iter_httpx_jsonl(path: Path) -> Iterator[DiscoveredAsset]:
         yield DiscoveredAsset(
             name=url,
             asset_type=ASSET_TYPE_URL,
-            ip_address=clean(
-                record.get("host") if _is_ip(str(record.get("host"))) else None, 64
-            ),
+            ip_address=clean(record.get("host") if _is_ip(str(record.get("host"))) else None, 64),
             port=_as_port(record.get("port")) or port,
             protocol="tcp",
             service=clean(record.get("scheme") or record.get("webserver"), MAX_SERVICE),

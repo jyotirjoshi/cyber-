@@ -40,10 +40,17 @@ async def decide_status(
             "canonical finding decision reason missing or too long",
             user_message="Provide a rationale of at most 2000 characters.",
         )
-    rows = (await session.execute(
-        tenant_select(CanonicalFinding, principal.organization_id)
-        .where(CanonicalFinding.id == finding_id).with_for_update()
-    )).scalars().all()
+    rows = (
+        (
+            await session.execute(
+                tenant_select(CanonicalFinding, principal.organization_id)
+                .where(CanonicalFinding.id == finding_id)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
     if not rows:
         raise TenantIsolationError("canonical finding not found in organization")
     finding = rows[0]
@@ -63,15 +70,24 @@ async def decide_status(
     finding.disposition_reason = clean_reason
     finding.closed_at = None
     now = utcnow()
-    session.add(FindingHistory(
-        id=uuid.uuid4(), organization_id=principal.organization_id,
-        canonical_finding_id=finding.id, previous_status=previous,
-        new_status=status, reason=clean_reason,
-        actor_user_id=principal.user_id, occurred_at=now,
-    ))
+    session.add(
+        FindingHistory(
+            id=uuid.uuid4(),
+            organization_id=principal.organization_id,
+            canonical_finding_id=finding.id,
+            previous_status=previous,
+            new_status=status,
+            reason=clean_reason,
+            actor_user_id=principal.user_id,
+            occurred_at=now,
+        )
+    )
     await audit_service.record(
-        session, action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
-        principal=principal, resource_type="canonical_finding", resource_id=finding.id,
+        session,
+        action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
+        principal=principal,
+        resource_type="canonical_finding",
+        resource_id=finding.id,
         detail={"from": previous, "to": status, "version": finding.status_version},
         reason=clean_reason,
     )

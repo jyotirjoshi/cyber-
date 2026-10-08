@@ -52,6 +52,7 @@ from app.core.errors import (
     InvalidModelResponseError,
     UnverifiableClaimError,
 )
+from app.core.targets import TargetType
 from app.db.enums import (
     AuditOutcome,
     Criticality,
@@ -209,6 +210,7 @@ async def import_from_defectdojo(
     """
     now = _now()
     job = await _job_for_test(session, assessment, test_id=test_id)
+    job_asset = await _job_target_asset(session, assessment, job)
     total = 0
     created = 0
     status_change_count = 0
@@ -244,7 +246,13 @@ async def import_from_defectdojo(
                 finding,
                 record,
                 assessment=assessment,
-                asset=_match_asset(record, by_host_port=by_host_port, by_host=by_host),
+                asset=_import_asset_for_record(
+                    record,
+                    scanner=job.scanner if job is not None else None,
+                    job_asset=job_asset,
+                    by_host_port=by_host_port,
+                    by_host=by_host,
+                ),
                 job=job,
                 now=now,
             )
@@ -278,6 +286,7 @@ async def import_from_defectdojo(
     if job is not None:
         job.imported_finding_count = total
         job.defectdojo_test_id = test_id
+        job.imported_at = _now()
 
     await audit_service.record(
         session,
@@ -983,6 +992,72 @@ async def _job_for_test(
     return (await session.execute(stmt)).scalars().first()
 
 
+async def _job_target_asset(
+    session: AsyncSession,
+    assessment: Assessment,
+    job: ScannerJob | None,
+) -> Asset | None:
+    """Bind a one-target code/image scanner's findings to its approved tenant asset."""
+    expected_type = (
+        {
+            "trivy_repo": TargetType.REPOSITORY.value,
+            "semgrep_repo": TargetType.REPOSITORY.value,
+            "gitleaks_repo": TargetType.REPOSITORY.value,
+            "trivy_image": TargetType.CONTAINER_IMAGE.value,
+            "syft_image": TargetType.CONTAINER_IMAGE.value,
+        }.get(job.scanner)
+        if job is not None
+        else None
+    )
+    if (
+        expected_type is None
+        or job is None
+        or len(job.targets or []) != 1
+        or job.organization_id != assessment.organization_id
+        or job.assessment_id != assessment.id
+    ):
+        return None
+    target = job.targets[0]
+    candidate = (
+        (
+            await session.execute(
+                select(Asset)
+                .where(
+                    Asset.organization_id == assessment.organization_id,
+                    Asset.name == target,
+                    Asset.asset_type == expected_type,
+                    Asset.seen_in_assessments.contains([str(assessment.id)]),
+                )
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if (
+        candidate is None
+        or candidate.organization_id != assessment.organization_id
+        or candidate.name != target
+        or candidate.asset_type != expected_type
+        or str(assessment.id) not in (candidate.seen_in_assessments or [])
+    ):
+        return None
+    return candidate
+
+
+def _import_asset_for_record(
+    record: DDFinding,
+    *,
+    scanner: str | None,
+    job_asset: Asset | None,
+    by_host_port: dict[tuple[str, int], Asset],
+    by_host: dict[str, Asset],
+) -> Asset | None:
+    if scanner in {"trivy_repo", "semgrep_repo", "gitleaks_repo", "trivy_image", "syft_image"}:
+        return job_asset
+    return _match_asset(record, by_host_port=by_host_port, by_host=by_host)
+
+
 async def _asset_index(
     session: AsyncSession,
     *,
@@ -1387,6 +1462,28 @@ def _score(finding: Finding) -> tuple[float, dict[str, Any]]:
     return total, factors
 
 
+def priority_for_score(
+    score: float,
+    *,
+    exploited: bool,
+    internet_exposed: bool,
+    excluded: bool,
+) -> Priority:
+    """Apply the shared work-queue bands and exploitation overrides."""
+    if excluded:
+        return Priority.P5
+    if exploited and internet_exposed:
+        return Priority.P1
+    banded = Priority.P5
+    for threshold, priority in _PRIORITY_BANDS:
+        if score >= threshold:
+            banded = priority
+            break
+    if exploited and banded.rank > Priority.P2.rank:
+        return Priority.P2
+    return banded
+
+
 def _priority_for(score: float, finding: Finding) -> Priority:
     """Band the score, with three rules stated outright rather than tuned into existence.
 
@@ -1406,21 +1503,12 @@ def _priority_for(score: float, finding: Finding) -> Priority:
     reprieve; an exploited vulnerability behind the perimeter is one lateral move from
     being reachable, and P3 or below reads as "next quarter".
     """
-    if finding.is_duplicate or finding.is_false_positive:
-        return Priority.P5
-
-    exploited = _kev_state(finding) is True
-    if exploited and finding.asset is not None and finding.asset.internet_exposed:
-        return Priority.P1
-
-    banded = Priority.P5
-    for threshold, priority in _PRIORITY_BANDS:
-        if score >= threshold:
-            banded = priority
-            break
-    if exploited and banded.rank > Priority.P2.rank:
-        return Priority.P2
-    return banded
+    return priority_for_score(
+        score,
+        exploited=_kev_state(finding) is True,
+        internet_exposed=finding.asset is not None and finding.asset.internet_exposed,
+        excluded=finding.is_duplicate or finding.is_false_positive,
+    )
 
 
 def _weights() -> dict[str, float]:

@@ -31,6 +31,7 @@ from types import MappingProxyType
 from typing import Any
 
 from app.core.config import ScannerSettings
+from app.core.errors import UnsafeScannerInvocationError
 from app.db.enums import ArtifactKind, ScannerName
 
 #: Where the per-job host directory is bind-mounted inside every scanner container. Adapters
@@ -170,11 +171,22 @@ class ScannerAdapter(ABC):
     #: where to write.
     container_env: Mapping[str, str] = MappingProxyType({})
 
+    #: Credential names this adapter may receive for an explicitly authorized run. Values
+    #: are supplied per run, never stored on the adapter or persisted with the job.
+    credential_environment_names: frozenset[str] = frozenset()
+
     #: Exit codes that mean "this scanner did its job". Most tools use 0; ZAP's baseline
     #: reports findings through its exit code, so a "failure" there is a normal result. The
     #: job service consults this rather than assuming 0, so a scan that found something is
     #: not recorded as a failed job.
     success_exit_codes: frozenset[int] = frozenset({0})
+
+    #: Secret scanners can emit discovered credentials even when their report is redacted.
+    #: Suppress container log capture so neither job details nor archived streams retain them.
+    capture_logs: bool = True
+
+    #: Report-producing scanners must not count a zero-exit run with no report as completed.
+    requires_output: bool = False
 
     def container_path(self, *parts: str) -> str:
         """A path under this adapter's :attr:`work_mount`, as the container sees it."""
@@ -208,6 +220,18 @@ class ScannerAdapter(ABC):
         """
         if not request.targets:
             raise ValueError(f"{self.name} was given no targets")
+
+    def verify_credential_scope(
+        self,
+        request: ScannerRequest,
+        credentials: Mapping[str, str],
+    ) -> None:
+        """Verify per-run credentials against the approved target before execution."""
+        if credentials:
+            raise UnsafeScannerInvocationError(
+                "Scanner has no credential scope verifier.",
+                context={"scanner": str(self.name)},
+            )
 
     def prepare(self, request: ScannerRequest) -> None:  # noqa: B027
         """Write any input files the argv references, before the container starts.

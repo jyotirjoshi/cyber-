@@ -34,14 +34,66 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, File, Form, Query, UploadFile
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep
-from app.schemas.asset import AssetContextIn, AssetCriticalityIn, AssetFilter, AssetOut, AssetTagIn
+from app.core.errors import InvalidConfigurationError
+from app.schemas.asset import (
+    AssetContextIn,
+    AssetCriticalityIn,
+    AssetFilter,
+    AssetOut,
+    AssetTagIn,
+    CmdbImportOut,
+)
+from app.schemas.asset_change import AssetChangePageOut
 from app.schemas.common import Page
+from app.schemas.policy_gate import PolicyGateOut
 from app.services import asset as asset_service
+from app.services import asset_change as asset_change_service
+from app.services import asset_cmdb as asset_cmdb_service
+from app.services import policy_gate as policy_gate_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+
+@router.get("/changes", response_model=AssetChangePageOut)
+async def list_asset_changes(
+    principal: PrincipalDep,
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AssetChangePageOut:
+    return await asset_change_service.list_asset_changes(
+        session,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/cmdb-import", response_model=CmdbImportOut)
+async def import_cmdb_assets(
+    file: Annotated[UploadFile, File()],
+    principal: PrincipalDep,
+    session: DbSession,
+    dry_run: Annotated[bool, Form()] = True,
+) -> CmdbImportOut:
+    """Attach CMDB tier and ownership to existing tenant inventory; no asset discovery."""
+    data = await file.read(asset_cmdb_service.MAX_CMDB_BYTES + 1)
+    try:
+        rows = asset_cmdb_service.parse_cmdb_csv(data)
+    except ValueError as exc:
+        raise InvalidConfigurationError("invalid CMDB CSV", user_message=str(exc)) from exc
+    result = await asset_cmdb_service.apply_cmdb_csv(
+        session,
+        principal,
+        rows,
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        await session.commit()
+    return CmdbImportOut(dry_run=dry_run, **result)
 
 
 @router.get("", response_model=Page[AssetOut])
@@ -79,6 +131,15 @@ async def get_asset(
     """
     asset = await asset_service.get_asset(session, principal, asset_id)
     return AssetOut.model_validate(asset)
+
+
+@router.get("/{asset_id}/policy-gate", response_model=PolicyGateOut)
+async def evaluate_asset_policy_gate(
+    asset_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> PolicyGateOut:
+    return await policy_gate_service.evaluate_asset_gate(session, principal, asset_id)
 
 
 @router.post("/{asset_id}/tags", response_model=AssetOut)

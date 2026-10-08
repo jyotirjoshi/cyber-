@@ -61,7 +61,9 @@ async def probe_worker_dependencies(settings: Settings) -> list[DependencyHealth
 
 async def assert_worker_dependencies(settings: Settings) -> None:
     """Refuse worker startup before it can consume work it cannot retain or publish."""
-    unhealthy = [item.name for item in await probe_worker_dependencies(settings) if not item.healthy]
+    unhealthy = [
+        item.name for item in await probe_worker_dependencies(settings) if not item.healthy
+    ]
     if unhealthy:
         raise ConfigurationError(
             f"Worker dependencies are unavailable: {', '.join(unhealthy)}.",

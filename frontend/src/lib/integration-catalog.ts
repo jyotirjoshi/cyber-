@@ -20,6 +20,22 @@ export const INTEGRATION_SETUP_HINTS = {
     config: '{"scan_ids":["11111111-1111-4111-8111-111111111111"]}',
     credential: "access_key + secret_key",
   },
+  bitbucket: {
+    config: '{"account_email":"security@example.com","workspace":"my-workspace","repository":"my-repo"}',
+    credential: "api_token",
+  },
+  prowler_aws: {
+    config: '{"account_id":"123456789012"}',
+    credential: "access_key_id + secret_access_key (optional session_token)",
+  },
+  prowler_azure: {
+    config: '{"account_id":"11111111-1111-1111-1111-111111111111"}',
+    credential: "client_id + tenant_id + client_secret",
+  },
+  prowler_gcp: {
+    config: '{"account_id":"example-project-1"}',
+    credential: "service_account_json",
+  },
 } as const;
 
 export const ADDABLE_INTEGRATIONS: Array<{ kind: IntegrationKind; label: string }> = [
@@ -32,8 +48,12 @@ export const ADDABLE_INTEGRATIONS: Array<{ kind: IntegrationKind; label: string 
   { kind: "nvd", label: "NVD" },
   { kind: "github", label: "GitHub" },
   { kind: "gitlab", label: "GitLab" },
+  { kind: "bitbucket", label: "Bitbucket" },
   { kind: "wazuh", label: "Wazuh" },
   { kind: "sonarqube", label: "SonarQube" },
   { kind: "snyk", label: "Snyk" },
   { kind: "tenable", label: "Tenable VM" },
+  { kind: "prowler_aws", label: "Prowler AWS account" },
+  { kind: "prowler_azure", label: "Prowler Azure subscription" },
+  { kind: "prowler_gcp", label: "Prowler GCP project" },
 ];

@@ -40,7 +40,7 @@ const STATUSES: readonly FindingStatus[] = [
   "mitigated",
   "duplicate",
 ];
-const SCANNERS: readonly ScannerName[] = ["reconftw", "nmap", "nuclei", "zap"];
+const SCANNERS: readonly ScannerName[] = ["reconftw", "nmap", "nuclei", "zap", "trivy_repo", "semgrep_repo", "gitleaks_repo", "trivy_image", "syft_image"];
 
 type KevChoice = "all" | "in" | "not";
 

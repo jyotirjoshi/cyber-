@@ -13,28 +13,177 @@ import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.config import Settings
-from app.core.errors import ConflictError, CynuxError, InvalidConfigurationError
+from app.core.errors import (
+    ConflictError,
+    CynuxError,
+    InvalidConfigurationError,
+    PermissionDeniedError,
+)
 from app.core.logging_conf import redact_text
 from app.db.base import utcnow
-from app.db.enums import AuditOutcome, Permission, Role
-from app.db.models.agent import AgentAction, AgentSession
+from app.db.enums import AuditOutcome, MessageRole, Permission, Role
+from app.db.models.agent import AgentAction, AgentMessage, AgentSession
+from app.db.models.assessment import Assessment
 from app.db.models.identity import Membership, Organization, User
 from app.db.repository import TenantRepository, tenant_select
+from app.schemas.assessment import AssessmentCreateIn, AuthorizationIn
 from app.schemas.canonical import CanonicalWorkIn
 from app.schemas.external_alert import ExternalAlertSourceActionIn
+from app.services import assessment as assessment_service
 from app.services import audit as audit_service
 from app.services import canonical_work as canonical_work_service
 from app.services import external_alert as external_alert_service
 from app.services import ticket as ticket_service
 from app.services.context import ACTOR_AGENT, Principal
+from app.worker.dispatch import stage_assessment_run
 
 log = structlog.get_logger(__name__)
+
+
+def format_action_receipt(action: AgentAction) -> str:
+    """State the persisted outcome without turning a queued run into a completed scan."""
+    if action.status not in {"executed", "failed"}:
+        raise ValueError("Action has no terminal outcome")
+    label = redact_text(str(action.label or action.action))[:300]
+    summary = redact_text(str(action.result_summary or "No result details were recorded."))[:500]
+    if action.status == "failed":
+        return f"Action failed: {label}. {summary}"
+    if action.action == "start_assessment":
+        run = f" Worker run: {action.run_id}." if action.run_id else ""
+        return f"Assessment queued: {label}. {summary}.{run} Track the run for scan results."
+    return f"Action completed: {label}. {summary}"
+
+
+async def append_action_receipt(
+    session: AsyncSession, action: AgentAction,
+) -> AgentMessage | None:
+    """Append one deterministic transcript receipt for a terminal tenant action."""
+    if action.status not in {"executed", "failed"}:
+        return None
+    session_id = (
+        await session.execute(
+            select(AgentSession.id).where(
+                AgentSession.organization_id == action.organization_id,
+                AgentSession.id == action.session_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if session_id is None:
+        raise PermissionDeniedError("Agent action session is outside its organization.")
+    existing = (
+        await session.execute(
+            select(AgentMessage).where(
+                AgentMessage.organization_id == action.organization_id,
+                AgentMessage.session_id == action.session_id,
+                AgentMessage.source_action_id == action.id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    seq = int((await session.execute(
+        select(func.coalesce(func.max(AgentMessage.seq), -1) + 1).where(
+            AgentMessage.organization_id == action.organization_id,
+            AgentMessage.session_id == action.session_id,
+        )
+    )).scalar_one())
+    message = AgentMessage(
+        id=uuid.uuid4(), organization_id=action.organization_id,
+        session_id=action.session_id, source_action_id=action.id,
+        seq=seq, role=MessageRole.ASSISTANT.value,
+        content=format_action_receipt(action),
+        model="deterministic", provider="cynux",
+    )
+    session.add(message)
+    await session.flush()
+    await session.execute(
+        update(AgentSession)
+        .where(
+            AgentSession.organization_id == action.organization_id,
+            AgentSession.id == action.session_id,
+        )
+        .values(
+            message_count=AgentSession.message_count + 1,
+            last_activity_at=utcnow(),
+        )
+    )
+    return message
+
+
+async def complete_assessment_action_receipt(
+    session: AsyncSession, assessment: Assessment, run_id: uuid.UUID,
+) -> bool:
+    """Replace the queued receipt with persisted scan results in the same tenant."""
+    action = (
+        await session.execute(
+            select(AgentAction).where(
+                AgentAction.organization_id == assessment.organization_id,
+                AgentAction.run_id == run_id,
+                AgentAction.action == "start_assessment",
+                AgentAction.status == "executed",
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if action is None:
+        return False
+    receipt = await append_action_receipt(session, action)
+    if receipt is None:
+        return False
+    total = max(0, int(assessment.findings_total or 0))
+    critical = max(0, int(assessment.findings_critical or 0))
+    high = max(0, int(assessment.findings_high or 0))
+    assets = max(0, int(assessment.assets_discovered or 0))
+    receipt.content = (
+        f"Assessment completed: {assessment.id}. {total} findings "
+        f"({critical} critical, {high} high) across {assets} discovered assets."
+        + (
+            " Some scanner coverage was degraded; review the report."
+            if assessment.degradations else " Report ready."
+        )
+    )
+    return True
+
+
+async def settle_assessment_action_receipt(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    run_id: uuid.UUID,
+    outcome: str,
+) -> bool:
+    """Show failed or cancelled run state without claiming that its scan completed."""
+    if outcome not in {"failed", "cancelled"}:
+        raise ValueError("Only failed or cancelled assessment outcomes are supported")
+    action = (
+        await session.execute(
+            select(AgentAction).where(
+                AgentAction.organization_id == organization_id,
+                AgentAction.run_id == run_id,
+                AgentAction.action == "start_assessment",
+                AgentAction.status == "executed",
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if action is None:
+        return False
+    receipt = await append_action_receipt(session, action)
+    if receipt is None:
+        return False
+    receipt.content = (
+        "Assessment failed. No completed scan result is available; review run details."
+        if outcome == "failed"
+        else "Assessment cancelled. No completed scan result is available."
+    )
+    return True
 
 # Each action is deliberate and narrow.  Adding an entry is a security review point.
 _ACTION_PERMISSIONS: dict[str, Permission] = {
@@ -47,6 +196,7 @@ _ACTION_PERMISSIONS: dict[str, Permission] = {
     "update_github_alert": Permission.INTEGRATION_MANAGE,
     "create_jira_ticket": Permission.TICKET_CREATE,
     "update_canonical_work": Permission.FINDING_REMEDIATE,
+    "start_assessment": Permission.ASSESSMENT_CREATE,
 }
 _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     "sync_github_alerts": frozenset(),
@@ -68,14 +218,20 @@ _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
             "remediation_plan",
         }
     ),
+    "start_assessment": frozenset({"target", "authorization_reference"}),
 }
 _SECRET_KEY_PARTS = frozenset({"token", "secret", "password", "credential", "api_key"})
 
 
-def action_payload_digest(action: str, payload: Mapping[str, Any]) -> str:
+def action_payload_digest(
+    action: str, payload: Mapping[str, Any], *, depends_on_action_id: uuid.UUID | None = None
+) -> str:
     """A stable hash binding consent to both the operation and exact payload."""
+    envelope: dict[str, Any] = {"action": action, "payload": dict(payload)}
+    if depends_on_action_id is not None:
+        envelope["depends_on_action_id"] = str(depends_on_action_id)
     encoded = json.dumps(
-        {"action": action, "payload": dict(payload)},
+        envelope,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -97,6 +253,30 @@ def validate_action_payload(action: str, payload: Mapping[str, Any]) -> dict[str
     unexpected = sorted(set(normalized) - allowed)
     if unexpected:
         raise ValueError(f"Unsupported payload fields for {action}: {', '.join(unexpected)}")
+    if action == "start_assessment":
+        target = normalized.get("target")
+        reference = normalized.get("authorization_reference")
+        if (
+            not isinstance(target, str)
+            or not target.strip()
+            or len(target) > 2048
+            or any(ord(ch) < 32 for ch in target)
+        ):
+            raise ValueError("A single valid assessment target is required")
+        if target.lower().startswith(("http://", "https://")):
+            parsed = urlsplit(target)
+            if parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError(
+                    "Assessment targets must not contain credentials or URL parameters"
+                )
+        if (
+            not isinstance(reference, str)
+            or not reference.strip()
+            or len(reference) > 1024
+            or any(ord(ch) < 32 for ch in reference)
+        ):
+            raise ValueError("An authorization evidence reference is required")
+        normalized = {"target": target.strip(), "authorization_reference": reference.strip()}
     if action == "update_github_alert":
         try:
             alert_id = normalized.get("alert_id")
@@ -177,6 +357,7 @@ def new_agent_action(
     label: str,
     rationale: str | None,
     payload: Mapping[str, Any],
+    depends_on_action_id: uuid.UUID | None = None,
 ) -> AgentAction:
     """Construct a pending action whose approval can only cover this exact payload."""
     validated = validate_action_payload(action, payload)
@@ -185,13 +366,42 @@ def new_agent_action(
         organization_id=organization_id,
         session_id=session_id,
         requested_by_user_id=requested_by_user_id,
+        depends_on_action_id=depends_on_action_id,
         action=action,
         label=label.strip()[:300] or action.replace("_", " ").title(),
         rationale=rationale.strip()[:2000] if rationale and rationale.strip() else None,
         payload=validated,
-        payload_digest=action_payload_digest(action, validated),
+        payload_digest=action_payload_digest(
+            action, validated, depends_on_action_id=depends_on_action_id
+        ),
         status="pending",
     )
+
+
+async def action_dependency_state(session: AsyncSession, action: AgentAction) -> str:
+    """Only an executed action in the same tenant and conversation unlocks a dependent step."""
+    if action.depends_on_action_id is None:
+        return "ready"
+    dependency = (
+        await session.execute(
+            select(AgentAction).where(
+                AgentAction.id == action.depends_on_action_id,
+                AgentAction.organization_id == action.organization_id,
+                AgentAction.session_id == action.session_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if dependency is None or (
+        action.action != "create_jira_ticket"
+        or dependency.action != "update_canonical_work"
+        or action.payload.get("canonical_finding_id") != dependency.payload.get("finding_id")
+    ):
+        return "failed"
+    if dependency.status == "executed":
+        return "ready"
+    if dependency.status in {"pending", "approved"}:
+        return "waiting"
+    return "failed"
 
 
 async def propose_action(
@@ -253,7 +463,9 @@ async def execute_approved_action(
         raise ConflictError(
             "agent action is not approved", user_message="Approve this action before running it."
         )
-    if proposed.payload_digest != action_payload_digest(proposed.action, proposed.payload):
+    if proposed.payload_digest != action_payload_digest(
+        proposed.action, proposed.payload, depends_on_action_id=proposed.depends_on_action_id
+    ):
         raise ConflictError(
             "agent action payload changed",
             user_message="This action request changed. Create a new request.",
@@ -311,16 +523,26 @@ async def execute_approved_action(
         ticket_target = payload.get("canonical_finding_id") or payload["finding_id"]
         if "canonical_finding_id" in payload:
             ticket = await ticket_service.create_canonical_ticket(
-                session, principal, uuid.UUID(ticket_target), settings=settings,
-                redis=redis, project_key=payload.get("project_key"),
-                issue_type=payload.get("issue_type"), assignee=payload.get("assignee"),
+                session,
+                principal,
+                uuid.UUID(ticket_target),
+                settings=settings,
+                redis=redis,
+                project_key=payload.get("project_key"),
+                issue_type=payload.get("issue_type"),
+                assignee=payload.get("assignee"),
                 by_agent=True,
             )
         else:
             ticket = await ticket_service.create_ticket(
-                session, principal, uuid.UUID(ticket_target), settings=settings,
-                redis=redis, project_key=payload.get("project_key"),
-                issue_type=payload.get("issue_type"), assignee=payload.get("assignee"),
+                session,
+                principal,
+                uuid.UUID(ticket_target),
+                settings=settings,
+                redis=redis,
+                project_key=payload.get("project_key"),
+                issue_type=payload.get("issue_type"),
+                assignee=payload.get("assignee"),
                 by_agent=True,
             )
         summary = f"Jira ticket {ticket.external_key} linked"
@@ -334,6 +556,26 @@ async def execute_approved_action(
             ),
         )
         summary = f"Remediation work updated to version {finding.status_version}"
+    elif proposed.action == "start_assessment":
+        assessment = await assessment_service.create_assessment(
+            session,
+            principal,
+            AssessmentCreateIn(
+                targets=[payload["target"]],
+                authorization=AuthorizationIn(
+                    confirmed=True,
+                    attestation_text=(
+                        "The approving user confirms authorization to assess the exact target "
+                        "in this action and the supplied evidence reference."
+                    ),
+                    evidence_reference=payload["authorization_reference"],
+                ),
+            ),
+            settings,
+        )
+        run_id, _dispatch_id = stage_assessment_run(session, principal, assessment)
+        proposed.run_id = run_id
+        summary = f"Assessment {assessment.id} queued; scanning has not completed"
     else:  # pragma: no cover - the allowlist above rejects this first
         raise ConflictError("unsupported agent action")
 
@@ -364,11 +606,23 @@ async def execute_approved_batch(
     and the API's immediate execute route; a crash before commit leaves the row
     approved for another sweep. Provider operations must therefore be idempotent.
     """
+    prerequisite = aliased(AgentAction)
+    waiting_on_prerequisite = exists(
+        select(1).select_from(prerequisite).where(
+            prerequisite.id == AgentAction.depends_on_action_id,
+            prerequisite.organization_id == AgentAction.organization_id,
+            prerequisite.session_id == AgentAction.session_id,
+            prerequisite.status.in_(("pending", "approved")),
+        )
+    )
     rows = (
         (
             await session.execute(
                 select(AgentAction)
-                .where(AgentAction.status == "approved")
+                .where(
+                    AgentAction.status == "approved",
+                    or_(AgentAction.depends_on_action_id.is_(None), ~waiting_on_prerequisite),
+                )
                 .order_by(AgentAction.resolved_at, AgentAction.id)
                 .limit(max(1, min(limit, 20)))
                 .with_for_update(skip_locked=True)
@@ -378,6 +632,8 @@ async def execute_approved_batch(
         .all()
     )
     for action in rows:
+        if await action_dependency_state(session, action) == "waiting":
+            continue
         membership = None
         if action.approved_by_user_id is not None:
             membership = (
@@ -409,9 +665,14 @@ async def execute_approved_batch(
             role=role,
             actor_type=ACTOR_AGENT,
         )
-        await execute_and_settle_action(
-            session, principal, action, settings=settings, redis=redis
-        )
+        try:
+            require_action_permission(principal, action.action)
+        except PermissionDeniedError:
+            await _fail_approved_action(
+                session, action, "Approver no longer has permission for this action."
+            )
+            continue
+        await execute_and_settle_action(session, principal, action, settings=settings, redis=redis)
     return len(rows)
 
 
@@ -429,25 +690,53 @@ async def execute_and_settle_action(
         raise ConflictError(
             "agent action is not approved", user_message="Approve this action before running it."
         )
-    try:
-        async with session.begin_nested():
-            await execute_approved_action(
-                session, principal, action, settings=settings, redis=redis
-            )
-    except CynuxError as exc:
-        await _fail_approved_action(session, action, redact_text(exc.user_message)[:500])
-    except Exception as exc:
-        # Do not persist exception text: provider responses may echo credentials.
-        log.error(
-            "agent_action.unexpected_failure",
-            action_id=str(action.id),
-            action=action.action,
-            error_type=type(exc).__name__,
+    dependency = await action_dependency_state(session, action)
+    if dependency == "waiting":
+        raise ConflictError(
+            "agent action dependency pending",
+            user_message="Complete the prerequisite action before running this one.",
         )
+    if dependency == "failed":
         await _fail_approved_action(
-            session, action,
-            "Action failed unexpectedly; review worker logs and retry with a new approval.",
+            session, action, "Prerequisite action was rejected, failed, or is unavailable."
         )
+    else:
+        try:
+            async with session.begin_nested():
+                await execute_approved_action(
+                    session, principal, action, settings=settings, redis=redis
+                )
+        except CynuxError as exc:
+            await _fail_approved_action(session, action, redact_text(exc.user_message)[:500])
+        except Exception as exc:
+            # Do not persist exception text: provider responses may echo credentials.
+            log.error(
+                "agent_action.unexpected_failure",
+                action_id=str(action.id),
+                action=action.action,
+                error_type=type(exc).__name__,
+            )
+            await _fail_approved_action(
+                session,
+                action,
+                "Action failed unexpectedly; review worker logs and retry with a new approval.",
+            )
+    for _attempt in range(3):
+        try:
+            async with session.begin_nested():
+                await append_action_receipt(session, action)
+            break
+        except IntegrityError:
+            # A concurrent chat turn may have taken the same sequence number.
+            continue
+        except Exception as exc:
+            # An action that reached a provider must not be replayed because a receipt failed.
+            log.warning(
+                "agent_action.receipt_failed",
+                action_id=str(action.id),
+                error_type=type(exc).__name__,
+            )
+            break
     return action
 
 
@@ -493,7 +782,9 @@ async def resolve_action(
             "agent action already resolved",
             user_message="Someone already responded to this action request.",
         )
-    if proposed.payload_digest != action_payload_digest(proposed.action, proposed.payload):
+    if proposed.payload_digest != action_payload_digest(
+        proposed.action, proposed.payload, depends_on_action_id=proposed.depends_on_action_id
+    ):
         raise ConflictError(
             "agent action payload changed",
             user_message="This action request is no longer valid. Create a new request.",

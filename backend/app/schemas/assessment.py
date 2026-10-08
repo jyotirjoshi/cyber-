@@ -20,7 +20,7 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from app.db.enums import (
     ApprovalDecision,
@@ -71,6 +71,11 @@ class AssessmentCreateIn(BaseModel):
     #: Free-text intent, interpreted by the agent's request-understanding node (FR-004).
     #: Treated as untrusted input for prompt-injection purposes (SEC-005).
     objective: str | None = Field(default=None, max_length=4000)
+    #: Inline JSON only: remote contract URLs would let an assessment fetch arbitrary hosts.
+    #: The service validates every server against ``api_target`` before persisting it.
+    api_spec: dict[str, Any] | None = None
+    api_target: str | None = Field(default=None, max_length=2048)
+    api_auth_token: SecretStr | None = None
     authorization: AuthorizationIn
     #: Email addresses or Slack channels to notify. Resolved against the organization's
     #: notification policy; unknown recipients are dropped, not delivered blind.

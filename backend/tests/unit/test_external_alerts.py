@@ -117,15 +117,22 @@ async def test_github_staging_keeps_same_number_from_two_repositories() -> None:
         session,
         organization_id=uuid.uuid4(),
         integration_id=None,
-        feeds=[("dependabot", [
-            {"number": 7, "repository": {"full_name": "acme/api"}},
-            {"number": 7, "repository": {"full_name": "acme/web"}},
-        ])],
+        feeds=[
+            (
+                "dependabot",
+                [
+                    {"number": 7, "repository": {"full_name": "acme/api"}},
+                    {"number": 7, "repository": {"full_name": "acme/web"}},
+                ],
+            )
+        ],
     )
     assert result.total == 2
-    values = session.statements[0].compile(
-        dialect=__import__("sqlalchemy").dialects.postgresql.dialect()
-    ).params.values()
+    values = (
+        session.statements[0]
+        .compile(dialect=__import__("sqlalchemy").dialects.postgresql.dialect())
+        .params.values()
+    )
     assert "dependabot:acme/api:7" in values
     assert "dependabot:acme/web:7" in values
 
@@ -209,7 +216,11 @@ async def test_github_sync_stages_a_tenant_scoped_conflict_safe_upsert() -> None
 
     assert result == GitHubSyncResult(total=1)
     assert len(session.statements) == 1
-    statement = str(session.statements[0].compile(dialect=__import__("sqlalchemy").dialects.postgresql.dialect()))
+    statement = str(
+        session.statements[0].compile(
+            dialect=__import__("sqlalchemy").dialects.postgresql.dialect()
+        )
+    )
     assert "ON CONFLICT ON CONSTRAINT unique_external_security_alert DO UPDATE" in statement
     assert "organization_id" in statement
 
@@ -239,7 +250,9 @@ async def test_gitlab_sync_stages_project_findings_in_the_same_tenant_ledger() -
 
     assert result.total == 1
     statement = str(
-        session.statements[0].compile(dialect=__import__("sqlalchemy").dialects.postgresql.dialect())
+        session.statements[0].compile(
+            dialect=__import__("sqlalchemy").dialects.postgresql.dialect()
+        )
     )
     assert "ON CONFLICT ON CONSTRAINT unique_external_security_alert DO UPDATE" in statement
 
@@ -262,7 +275,9 @@ async def test_wazuh_sync_stages_indexer_hits_in_the_same_tenant_ledger() -> Non
 
     assert result.total == 1
     statement = str(
-        session.statements[0].compile(dialect=__import__("sqlalchemy").dialects.postgresql.dialect())
+        session.statements[0].compile(
+            dialect=__import__("sqlalchemy").dialects.postgresql.dialect()
+        )
     )
     assert "ON CONFLICT ON CONSTRAINT unique_external_security_alert DO UPDATE" in statement
 

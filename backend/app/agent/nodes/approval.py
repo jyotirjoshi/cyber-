@@ -32,6 +32,7 @@ import structlog
 from app.agent.nodes._common import load_assessment, record_step
 from app.agent.registry import AgentDeps
 from app.agent.state import AssessmentState, state_uuid
+from app.core.targets import TargetType, classify
 from app.db.enums import (
     ApprovalDecision,
     ApprovalKind,
@@ -59,6 +60,12 @@ _SCANNER_LABELS: dict[ScannerName, str] = {
     ScannerName.NMAP: "Nmap",
     ScannerName.NUCLEI: "Nuclei",
     ScannerName.ZAP: "OWASP ZAP",
+    ScannerName.TRIVY_REPO: "Trivy repository",
+    ScannerName.SEMGREP_REPO: "Semgrep source code",
+    ScannerName.GITLEAKS_REPO: "Gitleaks secrets",
+    ScannerName.TRIVY_IMAGE: "Trivy container image",
+    ScannerName.SYFT_IMAGE: "Syft SBOM",
+    ScannerName.PROWLER_AWS: "Prowler AWS",
 }
 
 #: Criticalities that make an internet-exposed asset a higher-risk thing to scan (FR-034).
@@ -120,13 +127,21 @@ async def _open_and_stage(deps: AgentDeps, state: AssessmentState) -> ApprovalOu
     the row before projection rather than triggering an implicit read mid-attribute-access.
     """
     depth = _depth_from(state)
-    scanners = list(active_scanners(depth))
+    depth_scanners = list(active_scanners(depth))
     assessment_id = state_uuid(state, "assessment_id")
     run_id = state_uuid(state, "run_id")
 
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
         assets = await selected_assets(session, assessment_id)
+        scanners = [
+            scanner
+            for scanner in depth_scanners
+            if any(
+                scanner in _compatible_scanners_for_target(asset.endpoint, depth_scanners)
+                for asset in assets
+            )
+        ]
 
         approval = await open_approval(
             session,
@@ -191,9 +206,39 @@ def _proposed_asset(asset: Asset, scanners: list[ScannerName]) -> ProposedAssetO
         criticality=asset.criticality_enum,
         risk_score=asset.risk_score,
         internet_exposed=asset.internet_exposed,
-        scanners=scanners,
+        scanners=_compatible_scanners_for_target(asset.endpoint, scanners),
         rationale=asset.selection_rationale,
     )
+
+
+def _compatible_scanners_for_target(
+    target: str,
+    scanners: list[ScannerName],
+) -> list[ScannerName]:
+    """Keep approval options aligned with actual job planning for this asset."""
+    kind = classify(target)
+    eligible = {
+        TargetType.DOMAIN: {ScannerName.NMAP, ScannerName.NUCLEI, ScannerName.ZAP},
+        TargetType.IP: {ScannerName.NMAP, ScannerName.NUCLEI, ScannerName.ZAP},
+        TargetType.URL: {ScannerName.NMAP, ScannerName.NUCLEI, ScannerName.ZAP},
+        TargetType.CIDR: {ScannerName.NMAP},
+        TargetType.REPOSITORY: {
+            ScannerName.TRIVY_REPO,
+            ScannerName.SEMGREP_REPO,
+            ScannerName.GITLEAKS_REPO,
+        },
+        TargetType.CONTAINER_IMAGE: {ScannerName.TRIVY_IMAGE, ScannerName.SYFT_IMAGE},
+        TargetType.CLOUD_ACCOUNT: {
+            "aws": {ScannerName.PROWLER_AWS},
+            "azure": {ScannerName.PROWLER_AZURE},
+            "gcp": {ScannerName.PROWLER_GCP},
+        }.get(target.split(":", 1)[0], set()),
+    }[kind]
+    if kind is TargetType.REPOSITORY and not target.startswith(
+        ("https://github.com/", "https://gitlab.com/", "https://bitbucket.org/")
+    ):
+        eligible.difference_update({ScannerName.SEMGREP_REPO, ScannerName.GITLEAKS_REPO})
+    return [scanner for scanner in scanners if scanner in eligible]
 
 
 def _requested_payload(

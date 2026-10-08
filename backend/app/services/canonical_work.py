@@ -19,14 +19,24 @@ from app.services.context import Principal
 
 
 async def update_work(
-    session: AsyncSession, principal: Principal, finding_id: uuid.UUID, payload: CanonicalWorkIn,
+    session: AsyncSession,
+    principal: Principal,
+    finding_id: uuid.UUID,
+    payload: CanonicalWorkIn,
 ) -> CanonicalFinding:
     """Assign an active exposure and capture a concrete plan without changing source truth."""
     principal.require(Permission.FINDING_REMEDIATE)
-    rows = (await session.execute(
-        tenant_select(CanonicalFinding, principal.organization_id)
-        .where(CanonicalFinding.id == finding_id).with_for_update()
-    )).scalars().all()
+    rows = (
+        (
+            await session.execute(
+                tenant_select(CanonicalFinding, principal.organization_id)
+                .where(CanonicalFinding.id == finding_id)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
     if not rows:
         raise TenantIsolationError("canonical finding not found in organization")
     finding = rows[0]
@@ -43,16 +53,18 @@ async def update_work(
     changes = payload.model_dump(exclude_unset=True, exclude={"expected_version"})
     assignee = changes.get("assignee_user_id")
     if assignee is not None:
-        member_id = (await session.execute(
-            select(Membership.user_id)
-            .join(User, User.id == Membership.user_id)
-            .where(
-                Membership.organization_id == principal.organization_id,
-                Membership.user_id == assignee,
-                Membership.accepted_at.is_not(None),
-                User.is_active.is_(True),
+        member_id = (
+            await session.execute(
+                select(Membership.user_id)
+                .join(User, User.id == Membership.user_id)
+                .where(
+                    Membership.organization_id == principal.organization_id,
+                    Membership.user_id == assignee,
+                    Membership.accepted_at.is_not(None),
+                    User.is_active.is_(True),
+                )
             )
-        )).scalar_one_or_none()
+        ).scalar_one_or_none()
         if member_id is None:
             raise InvalidConfigurationError(
                 "assignee is not an active organization member",
@@ -71,15 +83,24 @@ async def update_work(
         setattr(finding, key, changes[key])
     finding.status_version += 1
     now = utcnow()
-    session.add(FindingHistory(
-        id=uuid.uuid4(), organization_id=principal.organization_id,
-        canonical_finding_id=finding.id, previous_status=finding.status,
-        new_status=finding.status, reason=f"Remediation work updated: {', '.join(sorted(changed))}",
-        actor_user_id=principal.user_id, occurred_at=now,
-    ))
+    session.add(
+        FindingHistory(
+            id=uuid.uuid4(),
+            organization_id=principal.organization_id,
+            canonical_finding_id=finding.id,
+            previous_status=finding.status,
+            new_status=finding.status,
+            reason=f"Remediation work updated: {', '.join(sorted(changed))}",
+            actor_user_id=principal.user_id,
+            occurred_at=now,
+        )
+    )
     await audit_service.record(
-        session, action=audit_service.AuditAction.FINDING_WORK_UPDATE,
-        principal=principal, resource_type="canonical_finding", resource_id=finding.id,
+        session,
+        action=audit_service.AuditAction.FINDING_WORK_UPDATE,
+        principal=principal,
+        resource_type="canonical_finding",
+        resource_id=finding.id,
         detail={"fields": sorted(changed), "version": finding.status_version},
     )
     return finding

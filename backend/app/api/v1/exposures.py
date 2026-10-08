@@ -19,13 +19,20 @@ async def exposure_feed(
     principal: PrincipalDep,
     session: DbSession,
     pagination: PaginationDep,
-    source: Annotated[Literal["defectdojo", "github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"] | None, Query()] = None,
-    severity: Annotated[Literal["critical", "high", "medium", "low", "info"] | None, Query()] = None,
+    source: Annotated[
+        Literal["defectdojo", "github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"] | None,
+        Query(),
+    ] = None,
+    severity: Annotated[
+        Literal["critical", "high", "medium", "low", "info"] | None, Query()
+    ] = None,
 ) -> Page[ExposureOut]:
     rows, total = await list_exposures(
         session, principal, pagination=pagination, source=source, severity=severity
     )
     return Page.build(
         [ExposureOut.model_validate(row) for row in rows],
-        total=total, limit=pagination.limit, offset=pagination.offset,
+        total=total,
+        limit=pagination.limit,
+        offset=pagination.offset,
     )

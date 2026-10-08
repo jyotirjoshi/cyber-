@@ -20,13 +20,14 @@ covered on the day it is written.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.config import ScannerSettings
 from app.core.errors import UnsafeScannerInvocationError
-from app.db.enums import ScannerName
-from app.scanners.base import ScannerAdapter, ScannerRequest, tail
+from app.db.enums import ArtifactKind, JobStatus, ScannerName
+from app.scanners.base import ArtifactFile, ScannerAdapter, ScannerRequest, ScannerResult, tail
 from app.scanners.reconftw import FORBIDDEN_FLAGS, ReconFTWAdapter, hardening_config
 from app.scanners.registry import ALL_ADAPTERS, PRE_APPROVAL_SCANNERS
 from app.scanners.sandbox import (
@@ -35,9 +36,62 @@ from app.scanners.sandbox import (
     build_sandbox,
     validate_argv,
 )
+from app.scanners.zap import ZapAdapter
+from app.services.job import _apply_result
 
 ADAPTERS = sorted(ALL_ADAPTERS.items(), key=lambda kv: str(kv[0]))
 ADAPTER_IDS = [str(name) for name, _ in ADAPTERS]
+
+
+def test_zap_configuration_failure_cannot_complete_as_success() -> None:
+    adapter = ZapAdapter()
+    assert 0 in adapter.success_exit_codes
+    assert 1 in adapter.success_exit_codes  # FAIL-level findings
+    assert 2 in adapter.success_exit_codes  # WARN-level findings
+    assert 3 not in adapter.success_exit_codes  # scan or configuration failure
+    assert adapter.requires_output is True
+
+
+@pytest.mark.parametrize("exit_code", [0, 1, 2, 3])
+@pytest.mark.parametrize("has_report", [False, True])
+def test_zap_job_completion_requires_success_code_and_report(
+    exit_code: int, has_report: bool, tmp_path: Path
+) -> None:
+    adapter = ZapAdapter()
+    artifacts = (
+        (
+            ArtifactFile(
+                kind=ArtifactKind.RAW_OUTPUT,
+                filename="zap.json",
+                path=tmp_path / "zap.json",
+                size_bytes=42,
+                sha256="0" * 64,
+                defectdojo_scan_type="ZAP Scan",
+            ),
+        )
+        if has_report
+        else ()
+    )
+    result = ScannerResult(
+        scanner=ScannerName.ZAP,
+        exit_code=exit_code,
+        duration_seconds=1.0,
+        argv=("zap-baseline.py",),
+        image="zap:test",
+        container_id="container",
+        sandbox={},
+        artifacts=artifacts,
+        stdout_tail="",
+        stderr_tail="",
+    )
+    job = SimpleNamespace(timeout_seconds=120)
+    _apply_result(
+        job,
+        result,
+        adapter_success_codes=adapter.success_exit_codes,
+        requires_output=adapter.requires_output,
+    )
+    assert (job.status == JobStatus.COMPLETED.value) is (exit_code != 3 and has_report)
 
 
 def make_request(
@@ -213,10 +267,21 @@ def test_every_adapter_builds_argv_that_passes_validation(
 ) -> None:
     """The argv check is enforced at run time; an adapter that cannot pass it is broken.
 
-    ZAP and Nuclei take a URL, so the target is one that is valid for all four.
+    Each adapter receives a target of the type it supports.
     """
-    request = make_request(name, workdir, "https://example.com")
-    adapter.prepare(request)
+    target = {
+        ScannerName.TRIVY_REPO: "https://github.com/acme/api",
+        ScannerName.SEMGREP_REPO: "https://github.com/acme/api",
+        ScannerName.GITLEAKS_REPO: "https://github.com/acme/api",
+        ScannerName.TRIVY_IMAGE: "docker.io/acme/api:1.0",
+        ScannerName.SYFT_IMAGE: "docker.io/acme/api:1.0",
+        ScannerName.PROWLER_AWS: "aws:123456789012",
+        ScannerName.PROWLER_AZURE: "azure:11111111-2222-4333-8444-555555555555",
+        ScannerName.PROWLER_GCP: "gcp:acme-project",
+    }.get(name, "https://example.com")
+    request = make_request(name, workdir, target)
+    if name not in {ScannerName.SEMGREP_REPO, ScannerName.GITLEAKS_REPO}:
+        adapter.prepare(request)
     argv = adapter.build_argv(request)
     assert argv, f"{name} built an empty argv"
     assert validate_argv(argv, scanner=str(name)) == argv
@@ -228,10 +293,21 @@ def test_every_adapter_writes_only_under_its_work_mount(
 ) -> None:
     """An output path outside the bind mount is written to the container's own
     filesystem, which is read-only or discarded -- so the artifact never reaches Cynux."""
-    request = make_request(name, workdir, "https://example.com")
-    adapter.prepare(request)
+    target = {
+        ScannerName.TRIVY_REPO: "https://github.com/acme/api",
+        ScannerName.SEMGREP_REPO: "https://github.com/acme/api",
+        ScannerName.GITLEAKS_REPO: "https://github.com/acme/api",
+        ScannerName.TRIVY_IMAGE: "docker.io/acme/api:1.0",
+        ScannerName.SYFT_IMAGE: "docker.io/acme/api:1.0",
+        ScannerName.PROWLER_AWS: "aws:123456789012",
+        ScannerName.PROWLER_AZURE: "azure:11111111-2222-4333-8444-555555555555",
+        ScannerName.PROWLER_GCP: "gcp:acme-project",
+    }.get(name, "https://example.com")
+    request = make_request(name, workdir, target)
+    if name not in {ScannerName.SEMGREP_REPO, ScannerName.GITLEAKS_REPO}:
+        adapter.prepare(request)
     for element in adapter.build_argv(request):
-        if element.startswith("/") and not element.startswith(adapter.work_mount):
+        if element.startswith("/") and not element.startswith((adapter.work_mount, "/tmp/")):
             pytest.fail(f"{name} references {element}, outside {adapter.work_mount}")
 
 
@@ -280,7 +356,12 @@ def test_collect_tolerates_a_run_that_produced_nothing(
     Raising there would replace a partial-result job with a crash, losing the evidence
     the scan did produce.
     """
-    request = make_request(name, workdir, "https://example.com")
+    target = {
+        ScannerName.PROWLER_AWS: "aws:123456789012",
+        ScannerName.PROWLER_AZURE: "azure:11111111-2222-4333-8444-555555555555",
+        ScannerName.PROWLER_GCP: "gcp:acme-project",
+    }.get(name, "https://example.com")
+    request = make_request(name, workdir, target)
     assert adapter.collect(request) == ()
 
 

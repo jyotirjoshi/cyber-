@@ -7,7 +7,9 @@ from app.services.canonical_ingest import alert_asset_identity, asset_storage_na
 
 def test_github_and_gitlab_use_same_repository_identity() -> None:
     github = SimpleNamespace(provider="github", resource="Acme/Api", evidence={})
-    gitlab = SimpleNamespace(provider="gitlab", resource="acme/api:src/main.py", evidence={"project": "acme/api"})
+    gitlab = SimpleNamespace(
+        provider="gitlab", resource="acme/api:src/main.py", evidence={"project": "acme/api"}
+    )
     assert alert_asset_identity(github) == ("repo", "acme/api")
     assert alert_asset_identity(gitlab) == ("repo", "acme/api")
 

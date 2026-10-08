@@ -59,7 +59,11 @@ class OpenAIClient:
 
     def __init__(self, settings: LLMSettings, *, provider: str = PROVIDER) -> None:
         self.name = provider
-        key = settings.openrouter_api_key if provider == OPENROUTER_PROVIDER else settings.openai_api_key
+        key = (
+            settings.openrouter_api_key
+            if provider == OPENROUTER_PROVIDER
+            else settings.openai_api_key
+        )
         if key is None or not key.get_secret_value():
             raise ConfigurationError(
                 f"{provider.title()} is selected but no API key is set.",

@@ -17,16 +17,31 @@ from app.services.context import Principal
 
 def test_asset_persists_and_projects_owner_environment_and_groups() -> None:
     asset = Asset(
-        id=uuid.uuid4(), organization_id=uuid.uuid4(), name="api.example",
-        asset_type="domain", status="active", criticality="high",
-        criticality_source="operator_tag", risk_score=0.0,
-        internet_exposed=True, technology=[], evidence={}, seen_in_assessments=[],
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        name="api.example",
+        asset_type="domain",
+        status="active",
+        criticality="high",
+        criticality_source="operator_tag",
+        risk_score=0.0,
+        internet_exposed=True,
+        technology=[],
+        evidence={},
+        seen_in_assessments=[],
         selected_for_scanning=False,
-        owner_team="platform", environment="production", groups=["payments", "pci"],
+        owner_team="platform",
+        environment="production",
+        groups=["payments", "pci"],
+        custom_fields={},
     )
-    payload = AssetOut.model_validate({
-        **asset.as_dict(), "tags": [], "created_at": "2026-10-02T00:00:00Z",
-    })
+    payload = AssetOut.model_validate(
+        {
+            **asset.as_dict(),
+            "tags": [],
+            "created_at": "2026-10-02T00:00:00Z",
+        }
+    )
     assert payload.owner_team == "platform"
     assert payload.environment == "production"
     assert payload.groups == ["payments", "pci"]
@@ -56,8 +71,12 @@ def test_context_normalizes_team_and_group_names() -> None:
 async def test_context_update_is_tenant_scoped_and_audited() -> None:
     org_id = uuid.uuid4()
     asset = Asset(
-        id=uuid.uuid4(), organization_id=org_id, name="api.example", asset_type="domain",
-        environment="unknown", groups=[],
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        name="api.example",
+        asset_type="domain",
+        environment="unknown",
+        groups=[],
     )
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.SECURITY_ENGINEER)
     session = AsyncMock()
@@ -66,19 +85,30 @@ async def test_context_update_is_tenant_scoped_and_audited() -> None:
     ) as audit:
         repo_type.return_value.get_or_404 = AsyncMock(return_value=asset)
         result = await set_asset_context(
-            session, principal, asset.id,
+            session,
+            principal,
+            asset.id,
             AssetContextIn(owner_team="Platform", environment="production", groups=["pci"]),
         )
     assert result is asset
-    assert (asset.owner_team, asset.environment, asset.groups) == ("Platform", "production", ["pci"])
+    assert (asset.owner_team, asset.environment, asset.groups) == (
+        "Platform",
+        "production",
+        ["pci"],
+    )
     repo_type.return_value.get_or_404.assert_awaited_once_with(asset.id)
     audit.assert_awaited_once()
 
 
 def test_curated_production_environment_overrides_nonprod_name_heuristic() -> None:
     asset = Asset(
-        name="dev-api.example", asset_type="domain", status="active", criticality="high",
-        criticality_source="operator_tag", internet_exposed=False, technology=[],
+        name="dev-api.example",
+        asset_type="domain",
+        status="active",
+        criticality="high",
+        criticality_source="operator_tag",
+        internet_exposed=False,
+        technology=[],
         environment="production",
     )
     settings = SimpleNamespace(agent=SimpleNamespace(criticality_keywords=[]))

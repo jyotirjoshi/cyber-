@@ -26,7 +26,9 @@ class TenableClient:
 
     def _scope(self) -> list[str]:
         if not self._cfg.configured:
-            raise IntegrationNotConfiguredError(PROVIDER, hint="Set access_key, secret_key, and scan_ids.")
+            raise IntegrationNotConfiguredError(
+                PROVIDER, hint="Set access_key, secret_key, and scan_ids."
+            )
         if self._cfg.base_url.rstrip("/") != "https://cloud.tenable.com":
             raise IntegrationError("Unsupported Tenable VM host", provider=PROVIDER)
         try:
@@ -41,15 +43,20 @@ class TenableClient:
         self._scope()
         if self._client is None:
             self._client = build_client(
-                provider=PROVIDER, base_url="https://cloud.tenable.com",
-                settings=self.settings, redis=self._redis, timeout=30.0,
+                provider=PROVIDER,
+                base_url="https://cloud.tenable.com",
+                settings=self.settings,
+                redis=self._redis,
+                timeout=30.0,
                 retry=RetryPolicy(max_attempts=3, backoff_base=1.0),
             )
         return self._client
 
     def _headers(self) -> dict[str, str]:
-        return {"X-ApiKeys": f"accessKey={reveal(self._cfg.access_key)}; secretKey={reveal(self._cfg.secret_key)}",
-                "Accept": "application/json"}
+        return {
+            "X-ApiKeys": f"accessKey={reveal(self._cfg.access_key)}; secretKey={reveal(self._cfg.secret_key)}",
+            "Accept": "application/json",
+        }
 
     async def ping(self) -> bool:
         scan = self._scope()[0]
@@ -62,7 +69,9 @@ class TenableClient:
         except (ValueError, TypeError) as exc:
             raise IntegrationError("Invalid Tenable scan UUID", provider=PROVIDER) from exc
         if normalized not in self._scope():
-            raise IntegrationError("Tenable scan is not configured for this organization", provider=PROVIDER)
+            raise IntegrationError(
+                "Tenable scan is not configured for this organization", provider=PROVIDER
+            )
         return normalized
 
     async def latest_scan_status(self, scan_id: str) -> str:
@@ -88,13 +97,13 @@ class TenableClient:
             )
             raise IntegrationError(
                 f"Tenable scan cannot be launched while status is {status}",
-                provider=PROVIDER, user_message=user_message, retryable=False,
+                provider=PROVIDER,
+                user_message=user_message,
+                retryable=False,
             )
         # POST is intentionally not supplied an idempotency key: Tenable does not
         # document one, so the shared transport must not retry an ambiguous launch.
-        payload = await self._require().post_json(
-            f"/scans/{scan}/launch", headers=self._headers()
-        )
+        payload = await self._require().post_json(f"/scans/{scan}/launch", headers=self._headers())
         launched_uuid = payload.get("scan_uuid") if isinstance(payload, dict) else None
         return launched_uuid if isinstance(launched_uuid, str) and launched_uuid else None
 
@@ -110,9 +119,13 @@ class TenableClient:
                 raise IntegrationError("Malformed Tenable scan response", provider=PROVIDER)
             info = detail["info"]
             if info.get("is_archived") is True or info.get("status") != "completed":
-                raise IntegrationError("Tenable scan is archived or not complete", provider=PROVIDER)
+                raise IntegrationError(
+                    "Tenable scan is archived or not complete", provider=PROVIDER
+                )
             if info.get("reporting_mode") == "differential":
-                raise IntegrationError("Differential Tenable scan cannot be fully imported", provider=PROVIDER)
+                raise IntegrationError(
+                    "Differential Tenable scan cannot be fully imported", provider=PROVIDER
+                )
             hosts = detail.get("hosts")
             if not isinstance(hosts, list):
                 raise IntegrationError("Tenable scan omitted hosts", provider=PROVIDER)
@@ -125,17 +138,35 @@ class TenableClient:
                 host_id = host["host_id"]
                 host_uuid = host.get("uuid") or host.get("asset_id")
                 if not host_uuid:
-                    raise IntegrationError("Tenable scan host has no stable identity", provider=PROVIDER)
-                payload = await client.get_json(f"/scans/{scan}/hosts/{host_id}", headers=self._headers())
-                if not isinstance(payload, dict) or not isinstance(payload.get("vulnerabilities"), list):
-                    raise IntegrationError("Tenable host omitted vulnerabilities", provider=PROVIDER)
+                    raise IntegrationError(
+                        "Tenable scan host has no stable identity", provider=PROVIDER
+                    )
+                payload = await client.get_json(
+                    f"/scans/{scan}/hosts/{host_id}", headers=self._headers()
+                )
+                if not isinstance(payload, dict) or not isinstance(
+                    payload.get("vulnerabilities"), list
+                ):
+                    raise IntegrationError(
+                        "Tenable host omitted vulnerabilities", provider=PROVIDER
+                    )
                 for vuln in payload["vulnerabilities"]:
                     if not isinstance(vuln, dict) or not isinstance(vuln.get("plugin_id"), int):
-                        raise IntegrationError("Tenable vulnerability has no plugin ID", provider=PROVIDER)
-                    records.append({**vuln, "scan_id": scan, "host_uuid": str(host_uuid),
-                                    "hostname": str(host.get("hostname") or host_uuid)})
+                        raise IntegrationError(
+                            "Tenable vulnerability has no plugin ID", provider=PROVIDER
+                        )
+                    records.append(
+                        {
+                            **vuln,
+                            "scan_id": scan,
+                            "host_uuid": str(host_uuid),
+                            "hostname": str(host.get("hostname") or host_uuid),
+                        }
+                    )
                     if len(records) > _MAX_VULNS:
-                        raise IntegrationError("Tenable vulnerability limit exceeded", provider=PROVIDER)
+                        raise IntegrationError(
+                            "Tenable vulnerability limit exceeded", provider=PROVIDER
+                        )
         return records
 
     async def aclose(self) -> None:

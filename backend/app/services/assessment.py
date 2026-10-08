@@ -33,11 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import Settings, TargetPolicySettings
+from app.core.crypto import get_cipher
 from app.core.errors import (
     ConflictError,
     InvalidTargetError,
     ResourceNotFoundError,
     UnauthorizedTargetError,
+    UserError,
 )
 from app.core.targets import ValidatedTarget, validate_target
 from app.db.enums import (
@@ -45,16 +47,17 @@ from app.db.enums import (
     AssessmentStage,
     AssessmentStatus,
     AuditOutcome,
+    EngagementType,
     Permission,
-    Severity,
 )
 from app.db.models.assessment import Assessment, AssessmentTarget, AuthorizationRecord
-from app.db.models.finding import Finding
 from app.db.models.identity import Organization
 from app.db.repository import TenantRepository, tenant_select
+from app.scanners.openapi_scope import OpenAPIScopeError, normalize_openapi_spec
 from app.schemas.assessment import AssessmentCreateIn, AssessmentFilter, CancelIn
 from app.schemas.common import PaginationParams
 from app.services import audit as audit_service
+from app.services.canonical_ingest import assessment_finding_counts
 from app.services.context import Principal
 from app.services.entitlements import assert_active_assessment_capacity, load_entitlements
 from app.services.organization import load_policy
@@ -79,7 +82,9 @@ _DETAIL_OPTIONS = (
 #: row without bound, and the first entries are the informative ones.
 _MAX_DEGRADATIONS = 200
 
-_ACTIVE_ASSESSMENT_STATUSES = tuple(status.value for status in AssessmentStatus if not status.is_terminal)
+_ACTIVE_ASSESSMENT_STATUSES = tuple(
+    status.value for status in AssessmentStatus if not status.is_terminal
+)
 
 
 async def create_assessment(
@@ -122,6 +127,40 @@ async def create_assessment(
 
     policy = await _policy_for(session, principal, settings)
     validated = _validate_targets(payload.targets, policy)
+    api_scan: dict[str, Any] | None = None
+    if payload.api_spec is not None or payload.api_target is not None or payload.api_auth_token is not None:
+        if (
+            payload.engagement_type is not EngagementType.API_SECURITY
+            or payload.api_spec is None
+            or payload.api_target is None
+        ):
+            raise UserError(
+                "API contract and target must be provided together for an API assessment",
+                user_message="Choose API security and provide both the API target and contract.",
+            )
+        selected = validate_target(payload.api_target, policy).canonical
+        if selected not in {target.canonical for target in validated}:
+            raise UserError(
+                "API target is not among the authorized assessment targets",
+                user_message="The API target must be included in this assessment's scope.",
+            )
+        try:
+            normalized = normalize_openapi_spec(payload.api_spec, selected)
+        except OpenAPIScopeError as exc:
+            raise UserError(
+                "OpenAPI contract is not safe for the authorized target",
+                user_message=str(exc),
+            ) from exc
+        api_scan = {"target": selected, "spec": normalized}
+        if payload.api_auth_token is not None:
+            token_value = payload.api_auth_token.get_secret_value()
+            if not 1 <= len(token_value) <= 8192 or any(
+                ord(character) < 32 or ord(character) == 127 for character in token_value
+            ):
+                raise UserError(
+                    "API credential is empty, too large, or contains control characters",
+                    user_message="Provide a valid API bearer token without line breaks.",
+                )
 
     # The reference allocator and entitlement check must share a per-organization lock.
     # Otherwise concurrent self-service requests can both allocate the same reference and
@@ -155,6 +194,11 @@ async def create_assessment(
         current_stage=AssessmentStage.QUEUED.value,
         progress_percent=0,
         request_interpretation={"objective": payload.objective} if payload.objective else {},
+        extra_data={"api_scan": api_scan} if api_scan is not None else {},
+        api_auth_ciphertext=(
+            get_cipher(settings).encrypt(payload.api_auth_token.get_secret_value())
+            if payload.api_auth_token is not None else None
+        ),
     )
     session.add(assessment)
     # Flushed so the child rows below have an ``assessment_id`` without relying on
@@ -440,29 +484,17 @@ async def cancel_assessment(
 
 
 async def refresh_counters(session: AsyncSession, assessment: Assessment) -> None:
-    """Recompute the cached finding counts from the ``findings`` table.
-
-    The columns are a denormalization for the list view; this is the one function that
-    writes them, so they cannot drift per call site.  Duplicates and false positives are
-    excluded: DefectDojo owns deduplication (FR-018), and a total that counted its
-    duplicates would contradict the number DefectDojo itself reports.
-    """
-    stmt = (
-        select(Finding.severity, func.count())
-        .where(
-            Finding.assessment_id == assessment.id,
-            Finding.is_duplicate.is_(False),
-            Finding.is_false_positive.is_(False),
-        )
-        .group_by(Finding.severity)
+    """Refresh cached native and assessment-linked canonical finding counts."""
+    counts = await assessment_finding_counts(
+        session,
+        assessment.organization_id,
+        assessment.id,
     )
-    counts = {str(severity): int(total) for severity, total in (await session.execute(stmt)).all()}
-
-    assessment.findings_critical = counts.get(Severity.CRITICAL.value, 0)
-    assessment.findings_high = counts.get(Severity.HIGH.value, 0)
-    assessment.findings_medium = counts.get(Severity.MEDIUM.value, 0)
-    assessment.findings_low = counts.get(Severity.LOW.value, 0)
-    assessment.findings_info = counts.get(Severity.INFO.value, 0)
+    assessment.findings_critical = counts["critical"]
+    assessment.findings_high = counts["high"]
+    assessment.findings_medium = counts["medium"]
+    assessment.findings_low = counts["low"]
+    assessment.findings_info = counts["info"]
     assessment.findings_total = sum(counts.values())
 
 

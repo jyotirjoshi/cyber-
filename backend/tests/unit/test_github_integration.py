@@ -44,9 +44,33 @@ async def test_github_reads_all_three_organization_security_alert_feeds(monkeypa
     assert [feed.kind for feed in feeds] == ["dependabot", "code_scanning", "secret_scanning"]
     assert [feed.alerts[0]["number"] for feed in feeds] == [7, 8, 9]
     assert transport.requests == [
-        ("/orgs/acme/dependabot/alerts", {"Authorization": "Bearer ghp_test_token", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}, {"per_page": 100, "page": 1}),
-        ("/orgs/acme/code-scanning/alerts", {"Authorization": "Bearer ghp_test_token", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}, {"per_page": 100, "page": 1}),
-        ("/orgs/acme/secret-scanning/alerts", {"Authorization": "Bearer ghp_test_token", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}, {"per_page": 100, "page": 1}),
+        (
+            "/orgs/acme/dependabot/alerts",
+            {
+                "Authorization": "Bearer ghp_test_token",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            {"per_page": 100, "page": 1},
+        ),
+        (
+            "/orgs/acme/code-scanning/alerts",
+            {
+                "Authorization": "Bearer ghp_test_token",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            {"per_page": 100, "page": 1},
+        ),
+        (
+            "/orgs/acme/secret-scanning/alerts",
+            {
+                "Authorization": "Bearer ghp_test_token",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            {"per_page": 100, "page": 1},
+        ),
     ]
 
 
@@ -59,7 +83,11 @@ async def test_github_reads_following_pages_before_reporting_a_complete_feed(mon
         async def get_json(self, path: str, *, headers=None, params=None):
             self.pages.append((path, params["page"]))
             if "dependabot" in path:
-                return [{"number": i, "state": "open"} for i in range(100)] if params["page"] == 1 else [{"number": 100, "state": "open"}]
+                return (
+                    [{"number": i, "state": "open"} for i in range(100)]
+                    if params["page"] == 1
+                    else [{"number": 100, "state": "open"}]
+                )
             return []
 
     transport = _Paged()

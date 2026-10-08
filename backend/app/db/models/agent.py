@@ -105,6 +105,9 @@ class AgentMessage(Base, TenantMixin, TimestampMixin):
     run_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="SET NULL")
     )
+    source_action_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_actions.id", ondelete="SET NULL")
+    )
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -138,6 +141,7 @@ class AgentMessage(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("session_id", "seq", name="unique_message_seq"),
+        UniqueConstraint("source_action_id", name="unique_action_receipt"),
         CheckConstraint("role IN ('user','assistant','system','tool')", name="valid_message_role"),
         Index("ix_agent_messages_session_id_seq", "session_id", "seq"),
     )
@@ -158,6 +162,9 @@ class AgentAction(Base, TenantMixin, TimestampMixin):
     )
     run_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="SET NULL")
+    )
+    depends_on_action_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_actions.id", ondelete="CASCADE"), index=True
     )
     requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
@@ -181,7 +188,7 @@ class AgentAction(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','update_github_alert','create_jira_ticket','update_canonical_work')",
+            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','update_github_alert','create_jira_ticket','update_canonical_work','start_assessment')",
             name="valid_agent_action",
         ),
         CheckConstraint(

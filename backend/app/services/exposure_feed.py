@@ -45,7 +45,9 @@ async def list_exposures(
         ExternalSecurityAlert.severity.label("severity"),
         ExternalSecurityAlert.status.label("status"),
         ExternalSecurityAlert.resource.label("resource"),
-        func.coalesce(ExternalSecurityAlert.last_seen_at, ExternalSecurityAlert.created_at).label("seen_at"),
+        func.coalesce(ExternalSecurityAlert.last_seen_at, ExternalSecurityAlert.created_at).label(
+            "seen_at"
+        ),
     ).where(ExternalSecurityAlert.organization_id == principal.organization_id)
     exposures = union_all(findings, alerts).subquery("exposures")
     conditions = []
@@ -54,9 +56,11 @@ async def list_exposures(
     if severity:
         conditions.append(exposures.c.severity == severity)
 
-    total = int((await session.execute(
-        select(func.count()).select_from(exposures).where(*conditions)
-    )).scalar_one())
+    total = int(
+        (
+            await session.execute(select(func.count()).select_from(exposures).where(*conditions))
+        ).scalar_one()
+    )
     statement = (
         select(exposures)
         .where(*conditions)

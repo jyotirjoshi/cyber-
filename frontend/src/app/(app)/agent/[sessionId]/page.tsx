@@ -16,7 +16,7 @@ import { Spinner } from "@/components/ui/Spinner";
 import { ApprovalCard } from "@/components/approval/ApprovalCard";
 import { useApiResource } from "@/hooks/useApi";
 import { api } from "@/lib/api";
-import { approveAndRunAgentAction, canApproveAgentAction, requireExecutedAgentAction } from "@/lib/agent-action-workflow";
+import { actionPrerequisiteReady, agentActionSuccessTitle, assessmentWorkSummary, approveAndRunAgentAction, canApproveAgentAction, requireExecutedAgentAction, settledActionSignature } from "@/lib/agent-action-workflow";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/cn";
 import { getErrorMessage } from "@/lib/errors";
@@ -137,6 +137,7 @@ export default function AgentConversationPage() {
   const maxSeqRef = React.useRef(0);
   const refetchRef = React.useRef(session.refetch);
   refetchRef.current = session.refetch;
+  const lastSettledRef = React.useRef<{ sessionId: string; signature: string } | null>(null);
   const approvalSeededRef = React.useRef(false);
   const bottomRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -226,6 +227,17 @@ export default function AgentConversationPage() {
       }
     }
   }, [session.data]);
+
+  // The action list polls independently of the chat stream. A worker can settle an
+  // approval (or finish a queued scan) while this page is open, so refresh its receipts.
+  React.useEffect(() => {
+    if (!sessionId || !actions.data) return;
+    const signature = settledActionSignature(actions.data);
+    const previous = lastSettledRef.current;
+    if (previous?.sessionId === sessionId && previous.signature === signature) return;
+    lastSettledRef.current = { sessionId, signature };
+    if (signature) void refetchRef.current();
+  }, [sessionId, actions.data]);
 
   // REST replay fallback: while the socket is not open, poll the event log from our cursor so the
   // timeline keeps advancing even if the WS is blocked (INTERFACES §14).
@@ -377,14 +389,25 @@ export default function AgentConversationPage() {
       if (decision === "execute") {
         requireExecutedAgentAction(await api.agent.executeAction(item.id));
       } else if (decision === "approve") {
-        await approveAndRunAgentAction(item.id, api.agent);
+        if (!actionPrerequisiteReady(item, actions.data ?? [])) {
+          await api.agent.resolveAction(item.id, true);
+        } else {
+          await approveAndRunAgentAction(item.id, api.agent, () => session.refetch());
+        }
       } else {
         await api.agent.resolveAction(item.id, false);
       }
       actions.refetch();
-      toast({ title: decision === "reject" ? "Action rejected" : "Action completed", tone: "ok" });
+      session.refetch();
+      toast({
+        title: decision === "approve" && !actionPrerequisiteReady(item, actions.data ?? [])
+          ? "Approved — waiting for prerequisite work"
+          : agentActionSuccessTitle(item.action, decision),
+        tone: "ok",
+      });
     } catch (error) {
       actions.refetch();
+      session.refetch();
       toast({ title: decision === "approve" ? "Approval saved, but execution failed" : "Action failed", description: getErrorMessage(error), tone: "danger" });
     } finally {
       setActionBusyId(null);
@@ -540,14 +563,28 @@ export default function AgentConversationPage() {
             {actions.data?.length === 0 && <p className="text-xs text-faint">No actions queued for this conversation.</p>}
             {actions.data?.map((item) => {
               const permitted = canApproveAgentAction(item.action, can);
+              const workerStatus = item.action === "start_assessment" && item.status === "executed" ? item.run_status : null;
+              const actionTone = workerStatus === "failed" || workerStatus === "cancelled" || item.status === "rejected" || item.status === "failed"
+                ? "danger" : (workerStatus === "completed" && item.assessment?.status === "COMPLETED") || (item.status === "executed" && !workerStatus && item.action !== "start_assessment")
+                  ? "ok" : "warn";
               return (
                 <div key={item.id} className="space-y-2 rounded-lg border border-line bg-surface-2/50 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-medium text-fg">{item.label}</span>
-                    <Badge tone={item.status === "executed" ? "ok" : item.status === "rejected" || item.status === "failed" ? "danger" : "warn"}>{humanize(item.status)}</Badge>
+                    <Badge tone={actionTone}>{workerStatus ? humanize(workerStatus) : humanize(item.status)}</Badge>
                   </div>
                   {item.rationale && <p className="text-xs text-muted">{item.rationale}</p>}
                   {item.action === "create_jira_ticket" && <p className="text-xs text-muted">Finding: {String(item.payload.canonical_finding_id ?? item.payload.finding_id ?? "unknown")}</p>}
+                  {item.depends_on_action_id && (item.status === "pending" || item.status === "approved") && !actionPrerequisiteReady(item, actions.data ?? []) && <p className="text-xs text-muted">Waiting for the matching triage action to complete. Approval queues the ticket; the worker files it afterward.</p>}
+                  {item.action === "start_assessment" && (
+                    <div className="space-y-1 text-xs text-muted">
+                      <p>Exact target: {String(item.payload.target ?? "unknown")}</p>
+                      <p>Authorization evidence: {String(item.payload.authorization_reference ?? "missing")}</p>
+                      <p>Approving confirms you are authorized to assess this target. The scan is queued and its results must be reviewed separately.</p>
+                      {item.status === "executed" && <p className="font-medium text-fg">{assessmentWorkSummary(item)}</p>}
+                      {item.assessment && <Link href={`/assessments/${item.assessment.id}`} className="text-primary hover:underline">Open assessment results</Link>}
+                    </div>
+                  )}
                   {item.action === "update_canonical_work" && (
                     <div className="space-y-1 text-xs text-muted">
                       <p>Finding: {String(item.payload.finding_id ?? "unknown")} · Version: {String(item.payload.expected_version ?? "unknown")}</p>
@@ -558,14 +595,14 @@ export default function AgentConversationPage() {
                   {item.action === "update_github_alert" && (
                     <p className="text-xs text-muted">Alert: {String(item.payload.alert_id ?? "unknown")} · Decision: {String(item.payload.decision ?? "unknown")} {item.payload.reason ? `· Reason: ${String(item.payload.reason)}` : ""} {item.payload.comment ? `· Rationale: ${String(item.payload.comment)}` : ""}</p>
                   )}
-                  {item.result_summary && <p className="text-xs text-muted">{item.result_summary}</p>}
+                  {item.result_summary && !(item.action === "start_assessment" && item.status === "executed") && <p className="text-xs text-muted">{item.result_summary}</p>}
                   {permitted && item.status === "pending" && (
                     <div className="flex gap-2">
-                      <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "approve")}>Approve and run</Button>
+                      <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "approve")}>{actionPrerequisiteReady(item, actions.data ?? []) ? "Approve and run" : "Approve and queue"}</Button>
                       <Button size="sm" variant="outline" disabled={!!actionBusyId} onClick={() => void handleAction(item, "reject")}>Reject</Button>
                     </div>
                   )}
-                  {permitted && item.status === "approved" && <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "execute")}>Run approved action</Button>}
+                  {permitted && item.status === "approved" && actionPrerequisiteReady(item, actions.data ?? []) && <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "execute")}>Run approved action</Button>}
                 </div>
               );
             })}

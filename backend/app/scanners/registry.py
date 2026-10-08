@@ -17,9 +17,17 @@ from types import MappingProxyType
 from app.core.errors import UnsafeScannerInvocationError
 from app.db.enums import AssessmentDepth, ScannerName
 from app.scanners.base import ScannerAdapter
+from app.scanners.gitleaks import ADAPTER as GITLEAKS_REPO_ADAPTER
 from app.scanners.nmap import ADAPTER as NMAP_ADAPTER
 from app.scanners.nuclei import ADAPTER as NUCLEI_ADAPTER
+from app.scanners.prowler import AWS_ADAPTER as PROWLER_AWS_ADAPTER
+from app.scanners.prowler import AZURE_ADAPTER as PROWLER_AZURE_ADAPTER
+from app.scanners.prowler import GCP_ADAPTER as PROWLER_GCP_ADAPTER
 from app.scanners.reconftw import ADAPTER as RECONFTW_ADAPTER
+from app.scanners.semgrep import ADAPTER as SEMGREP_REPO_ADAPTER
+from app.scanners.syft import ADAPTER as SYFT_IMAGE_ADAPTER
+from app.scanners.trivy import IMAGE_ADAPTER as TRIVY_IMAGE_ADAPTER
+from app.scanners.trivy import REPO_ADAPTER as TRIVY_REPO_ADAPTER
 from app.scanners.zap import ADAPTER as ZAP_ADAPTER
 
 ALL_ADAPTERS: Mapping[ScannerName, ScannerAdapter] = MappingProxyType(
@@ -28,6 +36,14 @@ ALL_ADAPTERS: Mapping[ScannerName, ScannerAdapter] = MappingProxyType(
         ScannerName.NMAP: NMAP_ADAPTER,
         ScannerName.NUCLEI: NUCLEI_ADAPTER,
         ScannerName.ZAP: ZAP_ADAPTER,
+        ScannerName.TRIVY_REPO: TRIVY_REPO_ADAPTER,
+        ScannerName.SEMGREP_REPO: SEMGREP_REPO_ADAPTER,
+        ScannerName.GITLEAKS_REPO: GITLEAKS_REPO_ADAPTER,
+        ScannerName.TRIVY_IMAGE: TRIVY_IMAGE_ADAPTER,
+        ScannerName.SYFT_IMAGE: SYFT_IMAGE_ADAPTER,
+        ScannerName.PROWLER_AWS: PROWLER_AWS_ADAPTER,
+        ScannerName.PROWLER_AZURE: PROWLER_AZURE_ADAPTER,
+        ScannerName.PROWLER_GCP: PROWLER_GCP_ADAPTER,
     }
 )
 
@@ -41,8 +57,32 @@ PRE_APPROVAL_SCANNERS: frozenset[ScannerName] = frozenset({ScannerName.RECONFTW}
 _DEPTH_SCANNERS: dict[AssessmentDepth, tuple[ScannerName, ...]] = {
     #: Passive means recon and nothing else -- there is no active scanner to offer.
     AssessmentDepth.PASSIVE: (),
-    AssessmentDepth.STANDARD: (ScannerName.NMAP, ScannerName.NUCLEI, ScannerName.ZAP),
-    AssessmentDepth.DEEP: (ScannerName.NMAP, ScannerName.NUCLEI, ScannerName.ZAP),
+    AssessmentDepth.STANDARD: (
+        ScannerName.NMAP,
+        ScannerName.NUCLEI,
+        ScannerName.ZAP,
+        ScannerName.TRIVY_REPO,
+        ScannerName.SEMGREP_REPO,
+        ScannerName.GITLEAKS_REPO,
+        ScannerName.TRIVY_IMAGE,
+        ScannerName.SYFT_IMAGE,
+        ScannerName.PROWLER_AWS,
+        ScannerName.PROWLER_AZURE,
+        ScannerName.PROWLER_GCP,
+    ),
+    AssessmentDepth.DEEP: (
+        ScannerName.NMAP,
+        ScannerName.NUCLEI,
+        ScannerName.ZAP,
+        ScannerName.TRIVY_REPO,
+        ScannerName.SEMGREP_REPO,
+        ScannerName.GITLEAKS_REPO,
+        ScannerName.TRIVY_IMAGE,
+        ScannerName.SYFT_IMAGE,
+        ScannerName.PROWLER_AWS,
+        ScannerName.PROWLER_AZURE,
+        ScannerName.PROWLER_GCP,
+    ),
 }
 
 _MISSING = set(ScannerName) - set(ALL_ADAPTERS)

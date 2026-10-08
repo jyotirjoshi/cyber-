@@ -17,13 +17,18 @@ async def test_correlation_candidate_keeps_analysis_enabled_and_cannot_mark_othe
 
     organization_id, assessment_id = uuid.uuid4(), uuid.uuid4()
     valid = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=organization_id,
-        assessment_id=assessment_id, risk_factors={"ssvc": {"outcome": "act"}},
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        assessment_id=assessment_id,
+        risk_factors={"ssvc": {"outcome": "act"}},
         ai_skipped_reason=None,
     )
     foreign = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=uuid.uuid4(),
-        assessment_id=uuid.uuid4(), risk_factors={}, ai_skipped_reason=None,
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        assessment_id=uuid.uuid4(),
+        risk_factors={},
+        ai_skipped_reason=None,
     )
 
     class _Session:
@@ -63,24 +68,28 @@ async def test_legacy_correlation_skip_is_removed_without_erasing_other_skip_rea
 
     organization_id, assessment_id = uuid.uuid4(), uuid.uuid4()
     legacy = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=organization_id,
-        assessment_id=assessment_id, risk_factors={},
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        assessment_id=assessment_id,
+        risk_factors={},
         ai_skipped_reason="Flagged as likely false positive by cross-scanner correlation analysis.",
     )
     unrelated = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=organization_id,
-        assessment_id=assessment_id, risk_factors={},
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        assessment_id=assessment_id,
+        risk_factors={},
         ai_skipped_reason="Analysis provider unavailable",
     )
 
     class _Session:
         async def execute(self, _statement):
-            return SimpleNamespace(
-                scalars=lambda: SimpleNamespace(all=lambda: [legacy, unrelated])
-            )
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [legacy, unrelated]))
 
     await record_false_positive_candidates(
-        _Session(), organization_id=organization_id, assessment_id=assessment_id,
+        _Session(),
+        organization_id=organization_id,
+        assessment_id=assessment_id,
         candidates=[
             FalsePositiveCandidate(legacy.id, "Needs review", "high"),
             FalsePositiveCandidate(unrelated.id, "Needs review", "high"),

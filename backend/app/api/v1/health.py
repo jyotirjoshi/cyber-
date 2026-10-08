@@ -72,7 +72,9 @@ async def _probe_worker(
         log.warning("health.worker_probe_failed", error=type(exc).__name__)
         return DependencyHealth(name="worker", healthy=False, detail="unreachable")
     return DependencyHealth(
-        name="worker", healthy=count > 0, detail=f"{count} active",
+        name="worker",
+        healthy=count > 0,
+        detail=f"{count} active",
         latency_ms=_elapsed_ms(start),
     )
 

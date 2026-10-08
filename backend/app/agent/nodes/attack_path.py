@@ -48,9 +48,7 @@ from app.services.ssvc import evaluate_ssvc
 log = structlog.get_logger(__name__)
 
 _NODE = "attack_path"
-_LEGACY_CORRELATION_SKIP = (
-    "Flagged as likely false positive by cross-scanner correlation analysis."
-)
+_LEGACY_CORRELATION_SKIP = "Flagged as likely false positive by cross-scanner correlation analysis."
 
 
 async def record_false_positive_candidates(
@@ -61,19 +59,26 @@ async def record_false_positive_candidates(
     candidates: list[FalsePositiveCandidate],
 ) -> int:
     """Retain high-confidence AI suggestions without altering finding lifecycle or analysis."""
-    by_id = {candidate.finding_id: candidate for candidate in candidates
-             if candidate.confidence == "high"}
+    by_id = {
+        candidate.finding_id: candidate
+        for candidate in candidates
+        if candidate.confidence == "high"
+    }
     if not by_id:
         return 0
     rows = (
-        await session.execute(
-            select(Finding).where(
-                Finding.id.in_(by_id),
-                Finding.organization_id == organization_id,
-                Finding.assessment_id == assessment_id,
+        (
+            await session.execute(
+                select(Finding).where(
+                    Finding.id.in_(by_id),
+                    Finding.organization_id == organization_id,
+                    Finding.assessment_id == assessment_id,
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     count = 0
     for finding in rows:
         if finding.organization_id != organization_id or finding.assessment_id != assessment_id:
@@ -116,9 +121,7 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
                     factors = dict(finding.risk_factors or {})
                     factors["ssvc"] = result.to_dict()
                     finding.risk_factors = factors
-                    ssvc_counts[result.outcome.value] = (
-                        ssvc_counts.get(result.outcome.value, 0) + 1
-                    )
+                    ssvc_counts[result.outcome.value] = ssvc_counts.get(result.outcome.value, 0) + 1
                 log.info(
                     "attack_path.ssvc_applied",
                     assessment_id=str(assessment_id),
@@ -225,9 +228,7 @@ async def _load_all_findings(session: AsyncSession, assessment_id, org_id):
         .where(
             Finding.assessment_id == assessment_id,
             Finding.organization_id == org_id,
-            Finding.status.in_(
-                [FindingStatus.ACTIVE.value, FindingStatus.VERIFIED.value]
-            ),
+            Finding.status.in_([FindingStatus.ACTIVE.value, FindingStatus.VERIFIED.value]),
             Finding.is_duplicate.is_(False),
         )
         .limit(500)

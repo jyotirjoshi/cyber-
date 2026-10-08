@@ -179,15 +179,45 @@ class ScannerSettings(BaseSettings):
     #: Host directory used as the working directory per scanner job. Cleared after upload.
     artifact_workdir: str = "/var/lib/cynux/artifacts"
 
+    # Only populated on a per-tenant copy of Settings for integration probes.
+    # Scanner jobs decrypt from the tenant integration row directly, never from these defaults.
+    aws_account_id: str | None = None
+    aws_access_key_id: SecretStr | None = None
+    aws_secret_access_key: SecretStr | None = None
+    aws_session_token: SecretStr | None = None
+    azure_subscription_id: str | None = None
+    azure_client_id: SecretStr | None = None
+    azure_tenant_id: SecretStr | None = None
+    azure_client_secret: SecretStr | None = None
+    gcp_project_id: str | None = None
+    gcp_service_account_json: SecretStr | None = None
+
     image_reconftw: str = "six2dez/reconftw:main"
     image_nmap: str = "instrumentisto/nmap:7.95"
     image_nuclei: str = "projectdiscovery/nuclei:v3.3.7"
     image_zap: str = "zaproxy/zap-stable:2.15.0"
+    image_trivy: str = "aquasec/trivy:0.74.0"
+    image_semgrep: str = "semgrep/semgrep:1.159.0"
+    image_gitleaks: str = "ghcr.io/gitleaks/gitleaks:v8.24.2"
+    image_syft: str = "ghcr.io/anchore/syft:v1.54.0"
+    image_prowler: str = "prowlercloud/prowler:5.43.0"
 
     @property
     def allowed_images(self) -> frozenset[str]:
         """Only configured scanner images may be started by the worker."""
-        return frozenset({self.image_reconftw, self.image_nmap, self.image_nuclei, self.image_zap})
+        return frozenset(
+            {
+                self.image_reconftw,
+                self.image_nmap,
+                self.image_nuclei,
+                self.image_zap,
+                self.image_trivy,
+                self.image_semgrep,
+                self.image_gitleaks,
+                self.image_syft,
+                self.image_prowler,
+            }
+        )
 
 
 class TargetPolicySettings(BaseSettings):
@@ -311,6 +341,7 @@ class IntelSettings(BaseSettings):
 
     epss_base_url: str = "https://api.first.org/data/v1/epss"
     epss_cache_ttl_seconds: int = 86_400
+    canonical_refresh_seconds: int = 86_400
 
     misp_base_url: str | None = None
     misp_api_key: SecretStr | None = None
@@ -430,6 +461,19 @@ class GitLabSettings(BaseSettings):
     @property
     def configured(self) -> bool:
         return bool(self.api_token)
+
+
+class BitbucketSettings(BaseSettings):
+    model_config = _cfg("CYNUX_BITBUCKET__")
+
+    api_token: SecretStr | None = None
+    account_email: str | None = None
+    workspace: str | None = None
+    repository: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token and self.account_email and self.workspace and self.repository)
 
 
 class SonarQubeSettings(BaseSettings):
@@ -600,6 +644,7 @@ class Settings(BaseSettings):
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     gitlab: GitLabSettings = Field(default_factory=GitLabSettings)
+    bitbucket: BitbucketSettings = Field(default_factory=BitbucketSettings)
     sonarqube: SonarQubeSettings = Field(default_factory=SonarQubeSettings)
     snyk: SnykSettings = Field(default_factory=SnykSettings)
     tenable: TenableSettings = Field(default_factory=TenableSettings)
@@ -763,6 +808,7 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
 __all__ = [
     "REQUIRED_LLM_ROLES",
     "AgentSettings",
+    "BitbucketSettings",
     "DatabaseSettings",
     "DefectDojoSettings",
     "DifySettings",

@@ -77,6 +77,7 @@ AgentActionName = Literal[
     "update_github_alert",
     "create_jira_ticket",
     "update_canonical_work",
+    "start_assessment",
 ]
 
 
@@ -99,12 +100,28 @@ class AgentActionResolveIn(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class AssessmentWorkOut(BaseModel):
+    id: uuid.UUID
+    status: str
+    current_stage: str
+    progress_percent: int
+    findings_total: int
+    findings_critical: int
+    findings_high: int
+    assets_discovered: int
+    coverage_gap_count: int = 0
+    failure_reason: str = ""
+
+
 class AgentActionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     session_id: uuid.UUID
     run_id: uuid.UUID | None = None
+    depends_on_action_id: uuid.UUID | None = None
+    run_status: str | None = None
+    assessment: AssessmentWorkOut | None = None
     action: AgentActionName
     label: str
     rationale: str | None = None

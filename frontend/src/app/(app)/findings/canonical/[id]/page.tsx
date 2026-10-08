@@ -18,6 +18,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { buildCanonicalWorkUpdate, toLocalDateTimeInput } from "@/lib/canonical-work";
 import { canCreateCanonicalTicket } from "@/lib/canonical-ticket";
+import { parseCustomFields } from "@/lib/custom-fields";
 import { formatDateTime, humanize } from "@/lib/format";
 import { safeExternalUrl } from "@/lib/safe-external-url";
 
@@ -36,6 +37,7 @@ export default function CanonicalFindingPage() {
   const [assignee, setAssignee] = React.useState("");
   const [dueLocal, setDueLocal] = React.useState("");
   const [plan, setPlan] = React.useState("");
+  const [customFieldsText, setCustomFieldsText] = React.useState("{}");
   const { data, error, loading, refetch } = useApiResource(
     () => api.canonicalFindings.get(id), [id], { enabled: canRead && !!id },
   );
@@ -48,6 +50,7 @@ export default function CanonicalFindingPage() {
     setAssignee(data.assignee_user_id ?? "");
     setDueLocal(toLocalDateTimeInput(data.due_at));
     setPlan(data.remediation_plan ?? "");
+    setCustomFieldsText(JSON.stringify(data.custom_fields ?? {}, null, 2));
   }, [data]);
   const mutation = useMutation(
     (status: "open" | "accepted_risk" | "false_positive", rationale: string, version: number) =>
@@ -65,6 +68,13 @@ export default function CanonicalFindingPage() {
       refetch();
       toast({ title: "Jira ticket linked", description: ticket.external_key, tone: "ok" });
     } },
+  );
+  const customFieldsMutation = useMutation(
+    () => api.canonicalFindings.updateWork(id, {
+      expected_version: data!.status_version,
+      custom_fields: parseCustomFields(customFieldsText),
+    }),
+    { onSuccess: () => { refetch(); toast({ title: "Finding custom fields saved", tone: "ok" }); } },
   );
   if (!canRead) return <EmptyState title="No access" description="You don't have permission to view this." />;
   if (loading && !data) return <LoadingState label="Loading canonical finding…" />;
@@ -150,6 +160,21 @@ export default function CanonicalFindingPage() {
             </Button>
           )}
           {ticketMutation.errorMessage && <p role="alert" className="text-danger">{ticketMutation.errorMessage}</p>}
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Custom fields</CardTitle></CardHeader>
+        <CardBody className="space-y-3 text-sm">
+          <pre className="whitespace-pre-wrap break-words text-xs text-muted">{JSON.stringify(data.custom_fields ?? {}, null, 2)}</pre>
+          {canRemediate && data.status !== "closed" && data.status !== "false_positive" && (
+            <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); void customFieldsMutation.run(); }}>
+              <Field label="Custom fields (JSON, non-sensitive metadata only)" htmlFor="finding-custom-fields">
+                <Textarea id="finding-custom-fields" value={customFieldsText} onChange={(event) => setCustomFieldsText(event.target.value)} rows={4} />
+              </Field>
+              {customFieldsMutation.errorMessage && <p role="alert" className="text-danger">{customFieldsMutation.errorMessage}</p>}
+              <Button type="submit" size="sm" loading={customFieldsMutation.loading}>Save custom fields</Button>
+            </form>
+          )}
         </CardBody>
       </Card>
       <Card>

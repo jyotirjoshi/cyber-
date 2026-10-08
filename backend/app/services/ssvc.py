@@ -30,25 +30,29 @@ log = structlog.get_logger(__name__)
 
 class ExploitationStatus(str, Enum):
     """SSVC Exploitation decision point."""
-    NONE = "none"               # No public exploit or KEV entry
-    POC = "poc"                 # Proof-of-concept only
-    ACTIVE = "active"           # In CISA KEV or confirmed in the wild
+
+    NONE = "none"  # No public exploit or KEV entry
+    POC = "poc"  # Proof-of-concept only
+    ACTIVE = "active"  # In CISA KEV or confirmed in the wild
 
 
 class Automatable(str, Enum):
     """Can the vulnerability be exploited at scale with automated tools?"""
+
     YES = "yes"
     NO = "no"
 
 
 class TechnicalImpact(str, Enum):
     """SSVC Technical Impact decision point."""
-    PARTIAL = "partial"         # Limited access, not full takeover
-    TOTAL = "total"             # Full system compromise, root/admin, unrestricted data
+
+    PARTIAL = "partial"  # Limited access, not full takeover
+    TOTAL = "total"  # Full system compromise, root/admin, unrestricted data
 
 
 class MissionPrevalence(str, Enum):
     """How critical is the affected system to the organization's mission?"""
+
     MINIMAL = "minimal"
     SUPPORT = "support"
     CRITICAL = "critical"
@@ -56,15 +60,17 @@ class MissionPrevalence(str, Enum):
 
 class SSVCOutcome(str, Enum):
     """SSVC recommended action."""
-    TRACK = "track"             # Monitor, no immediate action required
-    TRACK_STAR = "track*"       # Track but be prepared to act quickly
-    ATTEND = "attend"           # Address within 1 week
-    ACT = "act"                 # Immediate action required
+
+    TRACK = "track"  # Monitor, no immediate action required
+    TRACK_STAR = "track*"  # Track but be prepared to act quickly
+    ATTEND = "attend"  # Address within 1 week
+    ACT = "act"  # Immediate action required
 
 
 @dataclasses.dataclass(frozen=True)
 class SSVCResult:
     """The full SSVC evaluation for one finding."""
+
     exploitation: ExploitationStatus
     automatable: Automatable
     technical_impact: TechnicalImpact
@@ -186,13 +192,13 @@ def _automatable(
     # CWE-based heuristics for common web vulnerabilities
     cwe = str(finding.cwe or "")
     automatable_cwes = {
-        "CWE-79",    # XSS - automated scanners detect these
-        "CWE-89",    # SQL injection
-        "CWE-611",   # XXE
-        "CWE-918",   # SSRF
-        "CWE-502",   # Deserialization
-        "CWE-22",    # Path traversal
-        "CWE-78",    # OS Command injection
+        "CWE-79",  # XSS - automated scanners detect these
+        "CWE-89",  # SQL injection
+        "CWE-611",  # XXE
+        "CWE-918",  # SSRF
+        "CWE-502",  # Deserialization
+        "CWE-22",  # Path traversal
+        "CWE-78",  # OS Command injection
     }
     if any(cwe.startswith(c) for c in automatable_cwes):
         return Automatable.YES
@@ -288,12 +294,19 @@ def _decision_tree(
             and mission_prevalence in (MissionPrevalence.CRITICAL, MissionPrevalence.SUPPORT)
         ):
             return SSVCOutcome.ATTEND
-        if technical_impact == TechnicalImpact.TOTAL and mission_prevalence == MissionPrevalence.CRITICAL:
+        if (
+            technical_impact == TechnicalImpact.TOTAL
+            and mission_prevalence == MissionPrevalence.CRITICAL
+        ):
             return SSVCOutcome.ATTEND
         return SSVCOutcome.TRACK_STAR
 
     # Exploitation=None
-    if automatable == Automatable.YES and technical_impact == TechnicalImpact.TOTAL and mission_prevalence == MissionPrevalence.CRITICAL:
+    if (
+        automatable == Automatable.YES
+        and technical_impact == TechnicalImpact.TOTAL
+        and mission_prevalence == MissionPrevalence.CRITICAL
+    ):
         return SSVCOutcome.ATTEND
         return SSVCOutcome.TRACK_STAR
 

@@ -77,22 +77,38 @@ async def test_external_alert_inbox_filters_and_paginates_with_tenant_on_both_qu
     org_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.VIEWER)
     row = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=org_id, provider="gitlab", external_id="a",
-        category="sast", title="SQL injection", severity="high", status="open",
-        cve_ids=["CVE-2026-1234"], evidence={"token": "secret"},
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        provider="gitlab",
+        external_id="a",
+        category="sast",
+        title="SQL injection",
+        severity="high",
+        status="open",
+        cve_ids=["CVE-2026-1234"],
+        evidence={"token": "secret"},
         raw_payload={"secret": "never-return"},
     )
     session = _Session([row])
 
     rows, total = await list_external_alerts(
-        session, principal, provider="gitlab", severity="high", status="open",
-        triage_status="new", q="SQL", pagination=PaginationParams(limit=10, offset=20),
+        session,
+        principal,
+        provider="gitlab",
+        severity="high",
+        status="open",
+        triage_status="new",
+        q="SQL",
+        pagination=PaginationParams(limit=10, offset=20),
     )
 
     assert total == 1
     assert rows == [row]
     assert len(session.statements) == 2
-    sql = [str(s.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})) for s in session.statements]
+    sql = [
+        str(s.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for s in session.statements
+    ]
     for statement in sql:
         assert f"organization_id = '{org_id}'" in statement
         assert "provider = 'gitlab'" in statement
@@ -108,12 +124,20 @@ def test_external_alert_public_projection_excludes_sensitive_payloads() -> None:
     from app.schemas.external_alert import ExternalAlertOut
 
     row = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=uuid.uuid4(), provider="github",
-        external_id="secret-scanning:7", category="secret_scanning",
-        title="Exposed token", severity="critical", status="open",
-        triage_status="new", triage_version=0,
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        provider="github",
+        external_id="secret-scanning:7",
+        category="secret_scanning",
+        title="Exposed token",
+        severity="critical",
+        status="open",
+        triage_status="new",
+        triage_version=0,
         missing_sync_count=0,
-        cve_ids=[], evidence={"token": "secret"}, raw_payload={"secret": "never-return"},
+        cve_ids=[],
+        evidence={"token": "secret"},
+        raw_payload={"secret": "never-return"},
     )
     payload = ExternalAlertOut.model_validate(row).model_dump(mode="json")
 
@@ -127,10 +151,20 @@ def test_external_alert_projection_exposes_freshness_without_sensitive_evidence(
     from app.schemas.external_alert import ExternalAlertOut
 
     row = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=uuid.uuid4(), provider="github",
-        external_id="dependabot:acme/api:7", category="dependabot", title="Vulnerable package",
-        severity="high", status="open", triage_status="new", triage_version=0,
-        missing_sync_count=2, cve_ids=[], evidence={"token": "hidden"}, raw_payload={},
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        provider="github",
+        external_id="dependabot:acme/api:7",
+        category="dependabot",
+        title="Vulnerable package",
+        severity="high",
+        status="open",
+        triage_status="new",
+        triage_version=0,
+        missing_sync_count=2,
+        cve_ids=[],
+        evidence={"token": "hidden"},
+        raw_payload={},
     )
     payload = ExternalAlertOut.model_validate(row).model_dump(mode="json")
     assert payload["missing_sync_count"] == 2
@@ -144,14 +178,26 @@ async def test_external_alert_detail_lookup_is_tenant_scoped() -> None:
     alert_id = uuid.uuid4()
     principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.VIEWER)
     row = ExternalSecurityAlert(
-        id=alert_id, organization_id=org_id, provider="gitlab", external_id="finding:1",
-        category="sast", title="Injection", severity="high", status="open",
-        cve_ids=[], evidence={}, raw_payload={},
+        id=alert_id,
+        organization_id=org_id,
+        provider="gitlab",
+        external_id="finding:1",
+        category="sast",
+        title="Injection",
+        severity="high",
+        status="open",
+        cve_ids=[],
+        evidence={},
+        raw_payload={},
     )
     session = _LookupSession(row)
 
     assert await get_external_alert(session, principal, alert_id) is row
-    sql = str(session.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    sql = str(
+        session.statement.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
     assert f"organization_id = '{org_id}'" in sql
     assert f"external_security_alerts.id = '{alert_id}'" in sql
 
@@ -162,22 +208,37 @@ async def test_external_alert_detail_lookup_is_tenant_scoped() -> None:
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
-        ("https://gitlab.example.test/acme/app/-/security/vulnerability/1", "https://gitlab.example.test/acme/app/-/security/vulnerability/1"),
+        (
+            "https://gitlab.example.test/acme/app/-/security/vulnerability/1",
+            "https://gitlab.example.test/acme/app/-/security/vulnerability/1",
+        ),
         ("javascript:alert(1)", None),
         ("https://user:secret@gitlab.example.test/alert", None),
         ("https://gitlab.example.test\\@evil.example/alert", None),
     ],
 )
-def test_external_alert_detail_only_exposes_safe_source_links(url: str, expected: str | None) -> None:
+def test_external_alert_detail_only_exposes_safe_source_links(
+    url: str, expected: str | None
+) -> None:
     """A provider-controlled URL must not become an executable or credential-bearing href."""
     from app.schemas.external_alert import ExternalAlertDetailOut
 
     row = ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=uuid.uuid4(), provider="gitlab",
-        external_id="finding:1", category="sast", title="Injection", severity="high",
-        status="open", triage_status="new", triage_version=0,
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        provider="gitlab",
+        external_id="finding:1",
+        category="sast",
+        title="Injection",
+        severity="high",
+        status="open",
+        triage_status="new",
+        triage_version=0,
         missing_sync_count=0,
-        cve_ids=[], source_url=url, evidence={}, raw_payload={},
+        cve_ids=[],
+        source_url=url,
+        evidence={},
+        raw_payload={},
     )
 
     payload = ExternalAlertDetailOut.model_validate(row).model_dump(mode="json")

@@ -44,6 +44,7 @@ logs -- summaries and degradation notes carry counts only (SEC-002).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Literal
@@ -56,7 +57,7 @@ from app.agent.registry import AgentDeps
 from app.agent.state import AssessmentState, state_uuid
 from app.core.config import Settings, TargetPolicySettings
 from app.core.errors import InvalidTargetError, ScannerError, TargetDeniedError
-from app.core.targets import validate_target
+from app.core.targets import TargetType, classify, validate_target
 from app.db.enums import (
     AssessmentStage,
     AssessmentStatus,
@@ -101,6 +102,14 @@ _ACTIVE_SCANNERS: tuple[ScannerName, ...] = (
     ScannerName.NMAP,
     ScannerName.NUCLEI,
     ScannerName.ZAP,
+    ScannerName.TRIVY_REPO,
+    ScannerName.SEMGREP_REPO,
+    ScannerName.GITLEAKS_REPO,
+    ScannerName.TRIVY_IMAGE,
+    ScannerName.SYFT_IMAGE,
+    ScannerName.PROWLER_AWS,
+    ScannerName.PROWLER_AZURE,
+    ScannerName.PROWLER_GCP,
 )
 
 #: The progress stage each scanner reports under. :mod:`app.services.progress` indexes the
@@ -109,6 +118,14 @@ _SCAN_STAGE: dict[ScannerName, AssessmentStage] = {
     ScannerName.NMAP: AssessmentStage.SCAN_NMAP,
     ScannerName.NUCLEI: AssessmentStage.SCAN_NUCLEI,
     ScannerName.ZAP: AssessmentStage.SCAN_ZAP,
+    ScannerName.TRIVY_REPO: AssessmentStage.SCAN_TRIVY_REPO,
+    ScannerName.SEMGREP_REPO: AssessmentStage.SCAN_SEMGREP_REPO,
+    ScannerName.GITLEAKS_REPO: AssessmentStage.SCAN_GITLEAKS_REPO,
+    ScannerName.TRIVY_IMAGE: AssessmentStage.SCAN_TRIVY_IMAGE,
+    ScannerName.SYFT_IMAGE: AssessmentStage.SCAN_SYFT_IMAGE,
+    ScannerName.PROWLER_AWS: AssessmentStage.SCAN_PROWLER_AWS,
+    ScannerName.PROWLER_AZURE: AssessmentStage.SCAN_PROWLER_AZURE,
+    ScannerName.PROWLER_GCP: AssessmentStage.SCAN_PROWLER_GCP,
 }
 
 #: Operator-facing scanner names for labels, summaries and degradation notes.
@@ -116,6 +133,14 @@ _SCANNER_LABELS: dict[ScannerName, str] = {
     ScannerName.NMAP: "Nmap",
     ScannerName.NUCLEI: "Nuclei",
     ScannerName.ZAP: "OWASP ZAP",
+    ScannerName.TRIVY_REPO: "Trivy repository",
+    ScannerName.SEMGREP_REPO: "Semgrep source code",
+    ScannerName.GITLEAKS_REPO: "Gitleaks secrets",
+    ScannerName.TRIVY_IMAGE: "Trivy container image",
+    ScannerName.SYFT_IMAGE: "Syft SBOM",
+    ScannerName.PROWLER_AWS: "Prowler AWS",
+    ScannerName.PROWLER_AZURE: "Prowler Azure",
+    ScannerName.PROWLER_GCP: "Prowler GCP",
 }
 
 #: FR-002 risk badge per scanner. ZAP crawls and submits forms, so it is the highest-risk of
@@ -124,6 +149,14 @@ _RISK_LEVEL: dict[ScannerName, RiskLevel] = {
     ScannerName.NMAP: RiskLevel.MEDIUM,
     ScannerName.NUCLEI: RiskLevel.MEDIUM,
     ScannerName.ZAP: RiskLevel.HIGH,
+    ScannerName.TRIVY_REPO: RiskLevel.MEDIUM,
+    ScannerName.SEMGREP_REPO: RiskLevel.MEDIUM,
+    ScannerName.GITLEAKS_REPO: RiskLevel.MEDIUM,
+    ScannerName.TRIVY_IMAGE: RiskLevel.MEDIUM,
+    ScannerName.SYFT_IMAGE: RiskLevel.MEDIUM,
+    ScannerName.PROWLER_AWS: RiskLevel.LOW,
+    ScannerName.PROWLER_AZURE: RiskLevel.LOW,
+    ScannerName.PROWLER_GCP: RiskLevel.LOW,
 }
 
 # -- user-safe degradation notes and impacts (SEC-002: counts and names only, never hosts) ---
@@ -144,6 +177,7 @@ _NO_TARGETS_NOTE = (
     "None of the approved targets are permitted by the current target policy, so no active "
     "scanning was performed."
 )
+_NO_COMPATIBLE_TARGETS_NOTE = "The approved scanners have no compatible targets in scope."
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +193,116 @@ class _ScanPlan:
     skip: bool
     jobs: list[tuple[ScannerName, list[str]]]
     no_scan_reason: str
+
+
+def _jobs_for_scope(
+    targets: list[str],
+    scanners: list[ScannerName],
+) -> list[tuple[ScannerName, list[str]]]:
+    """Produce compatible jobs per target where attribution requires it."""
+    types = [(target, classify(target)) for target in targets]
+    network = [
+        target
+        for target, kind in types
+        if kind
+        in {
+            TargetType.DOMAIN,
+            TargetType.IP,
+            TargetType.URL,
+            TargetType.CIDR,
+        }
+    ]
+    web = [
+        target
+        for target, kind in types
+        if kind
+        in {
+            TargetType.DOMAIN,
+            TargetType.IP,
+            TargetType.URL,
+        }
+    ]
+    repositories = [target for target, kind in types if kind is TargetType.REPOSITORY]
+    images = [target for target, kind in types if kind is TargetType.CONTAINER_IMAGE]
+    aws_accounts = [
+        target
+        for target, kind in types
+        if kind is TargetType.CLOUD_ACCOUNT and target.startswith("aws:")
+    ]
+    azure_accounts = [
+        target
+        for target, kind in types
+        if kind is TargetType.CLOUD_ACCOUNT and target.startswith("azure:")
+    ]
+    gcp_projects = [
+        target
+        for target, kind in types
+        if kind is TargetType.CLOUD_ACCOUNT and target.startswith("gcp:")
+    ]
+    jobs: list[tuple[ScannerName, list[str]]] = []
+    for scanner in scanners:
+        if scanner is ScannerName.NMAP and network:
+            jobs.append((scanner, network))
+        elif scanner is ScannerName.NUCLEI or scanner is ScannerName.ZAP:
+            jobs.extend((scanner, [target]) for target in web)
+        elif scanner is ScannerName.TRIVY_REPO:
+            jobs.extend((scanner, [target]) for target in repositories)
+        elif scanner is ScannerName.SEMGREP_REPO or scanner is ScannerName.GITLEAKS_REPO:
+            jobs.extend(
+                (scanner, [target])
+                for target in repositories
+                if target.startswith(
+                    ("https://github.com/", "https://gitlab.com/", "https://bitbucket.org/")
+                )
+            )
+        elif scanner is ScannerName.TRIVY_IMAGE or scanner is ScannerName.SYFT_IMAGE:
+            jobs.extend((scanner, [target]) for target in images)
+        elif scanner is ScannerName.PROWLER_AWS:
+            jobs.extend((scanner, [target]) for target in aws_accounts)
+        elif scanner is ScannerName.PROWLER_AZURE:
+            jobs.extend((scanner, [target]) for target in azure_accounts)
+        elif scanner is ScannerName.PROWLER_GCP:
+            jobs.extend((scanner, [target]) for target in gcp_projects)
+    return jobs
+
+
+def _job_idempotency_key(
+    run_id: uuid.UUID,
+    scanner: ScannerName,
+    targets: list[str],
+) -> str:
+    base = f"agent:{run_id}:{scanner.value}"
+    if scanner in {
+        ScannerName.NUCLEI,
+        ScannerName.ZAP,
+        ScannerName.TRIVY_REPO,
+        ScannerName.SEMGREP_REPO,
+        ScannerName.GITLEAKS_REPO,
+        ScannerName.TRIVY_IMAGE,
+        ScannerName.SYFT_IMAGE,
+        ScannerName.PROWLER_AWS,
+        ScannerName.PROWLER_AZURE,
+        ScannerName.PROWLER_GCP,
+    }:
+        digest = hashlib.sha256("\x1f".join(targets).encode("utf-8")).hexdigest()[:16]
+        return f"{base}:{digest}"
+    return base
+
+
+def _job_matches_approval(
+    scanner: ScannerName,
+    job_targets: list[str],
+    approved_targets: list[str],
+    approved_scanners: list[ScannerName],
+) -> bool:
+    if len(job_targets) != len(set(job_targets)):
+        return False
+    return any(
+        scanner is planned_scanner
+        and len(job_targets) == len(planned_targets)
+        and set(job_targets) == set(planned_targets)
+        for planned_scanner, planned_targets in _jobs_for_scope(approved_targets, approved_scanners)
+    )
 
 
 async def execute_scanners(state: AssessmentState, *, deps: AgentDeps) -> dict[str, object]:
@@ -248,10 +392,11 @@ async def _authorize_and_plan(deps: AgentDeps, state: AssessmentState) -> _ScanP
         # The same re-validated target set goes to every approved scanner; each adapter
         # reshapes it to its own needs (Nmap to bare hosts, ZAP to web origins) and refuses if
         # nothing usable remains, which surfaces here as a per-scanner degradation.
+        jobs = _jobs_for_scope(targets, scanners)
         return _ScanPlan(
             skip=False,
-            jobs=[(scanner, targets) for scanner in scanners],
-            no_scan_reason="",
+            jobs=jobs,
+            no_scan_reason="" if jobs else _NO_COMPATIBLE_TARGETS_NOTE,
         )
 
 
@@ -431,8 +576,11 @@ async def _enqueue_and_execute(
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
         job = await enqueue_job(
-            session, assessment, scanner=scanner, targets=targets,
-            idempotency_key=f"agent:{state_uuid(state, 'run_id')}:{scanner.value}",
+            session,
+            assessment,
+            scanner=scanner,
+            targets=targets,
+            idempotency_key=_job_idempotency_key(state_uuid(state, "run_id"), scanner, targets),
         )
         job_id = job.id
 
@@ -458,8 +606,7 @@ async def _enqueue_and_execute(
         )
         if (
             current_assessment.status_enum is not AssessmentStatus.SCANNING
-            or scanner not in allowed_scanners
-            or set(row.targets) != set(allowed_targets)
+            or not _job_matches_approval(scanner, row.targets, allowed_targets, allowed_scanners)
         ):
             row.status = JobStatus.CANCELLED.value
             row.failure_code = "scan_authorization_changed"
@@ -498,9 +645,7 @@ async def _acquire_slot(deps: AgentDeps, org_id: uuid.UUID) -> bool:
             org_limit = await organization_scanner_limit(session, org_id, deps.settings)
         if org_limit < 1:
             return False
-        if await claim_slot(
-            deps.redis, deps.settings, org_id, organization_limit=org_limit
-        ):
+        if await claim_slot(deps.redis, deps.settings, org_id, organization_limit=org_limit):
             return True
         if attempt + 1 < attempts:
             await asyncio.sleep(_SLOT_POLL_SECONDS)

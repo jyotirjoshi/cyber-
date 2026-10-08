@@ -88,6 +88,7 @@ class Asset(Base, TenantMixin, TimestampMixin):
         String(20), nullable=False, default=AssetEnvironment.UNKNOWN.value
     )
     groups: Mapped[list[str]] = mapped_column(default=list, nullable=False)
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
 
     # --- FR-010 scope selection -------------------------------------------
     #: 0-1 ranking produced by the asset-analysis node.
@@ -139,7 +140,7 @@ class Asset(Base, TenantMixin, TimestampMixin):
         # curated tag from a keyword guess, and an unrecognized source would render as
         # neither.
         CheckConstraint(
-            "criticality_source IN ('operator_tag','inferred_keyword','inferred_exposure',"
+            "criticality_source IN ('operator_tag','cmdb','inferred_keyword','inferred_exposure',"
             "'default')",
             name="valid_criticality_source",
         ),
@@ -197,4 +198,31 @@ class AssetTag(Base, TenantMixin, TimestampMixin):
     )
 
 
-__all__ = ["Asset", "AssetTag"]
+class AssetChange(Base, TenantMixin, TimestampMixin):
+    """One first observation or material recon change, durable across rescans."""
+
+    __tablename__ = "asset_changes"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="SET NULL")
+    )
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    change_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    changes: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("change_type IN ('discovered','changed')", name="valid_asset_change_type"),
+        UniqueConstraint(
+            "organization_id",
+            "assessment_id",
+            "asset_id",
+            name="unique_asset_change_per_assessment",
+        ),
+        Index("ix_asset_changes_org_time", "organization_id", "created_at"),
+    )
+
+
+__all__ = ["Asset", "AssetTag", "AssetChange"]

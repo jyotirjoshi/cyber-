@@ -110,7 +110,10 @@ async def related_external_alerts_for_alert(
             candidate.provider != alert.provider,
             or_(
                 and_(candidate.provider == "github", candidate.resource == repository),
-                and_(candidate.provider == "gitlab", candidate.evidence["project"].astext == repository),
+                and_(
+                    candidate.provider == "gitlab",
+                    candidate.evidence["project"].astext == repository,
+                ),
             ),
             or_(*(candidate.cve_ids.contains([cve]) for cve in cves)),
         )
@@ -172,20 +175,35 @@ async def triage_external_alert(
 
 
 async def set_github_alert_state(
-    session: AsyncSession, principal: Principal, alert_id: uuid.UUID, *,
-    decision: str, reason: str | None, comment: str | None,
-    settings: Settings, redis: Any | None = None,
+    session: AsyncSession,
+    principal: Principal,
+    alert_id: uuid.UUID,
+    *,
+    decision: str,
+    reason: str | None,
+    comment: str | None,
+    settings: Settings,
+    redis: Any | None = None,
 ) -> ExternalSecurityAlert:
     """Write one tenant-owned GitHub alert decision and retain provider-confirmed status."""
     principal.require(Permission.INTEGRATION_MANAGE, Permission.FINDING_VALIDATE)
     from app.services import integration as integration_service
 
-    integration = await integration_service.find_integration(session, principal, IntegrationKind.GITHUB)
-    credential_names = {credential.name for credential in integration.credentials} if integration else set()
-    if (integration is None or not integration.is_usable
-            or not integration.config.get("organization") or "api_token" not in credential_names):
+    integration = await integration_service.find_integration(
+        session, principal, IntegrationKind.GITHUB
+    )
+    credential_names = (
+        {credential.name for credential in integration.credentials} if integration else set()
+    )
+    if (
+        integration is None
+        or not integration.is_usable
+        or not integration.config.get("organization")
+        or "api_token" not in credential_names
+    ):
         raise IntegrationNotConfiguredError(
-            "GitHub", hint="Save the organization and API token in this organization's connection first."
+            "GitHub",
+            hint="Save the organization and API token in this organization's connection first.",
         )
     row = (
         await session.execute(
@@ -197,21 +215,36 @@ async def set_github_alert_state(
     if row is None or row.provider != "github":
         raise TenantIsolationError("GitHub alert not found in this organization")
     if decision == "dismiss" and row.status != "open":
-        raise ConflictError("GitHub alert is not open", user_message="Refresh this alert before changing its source status.")
+        raise ConflictError(
+            "GitHub alert is not open",
+            user_message="Refresh this alert before changing its source status.",
+        )
     if decision == "reopen" and row.status not in {"dismissed", "resolved"}:
-        raise ConflictError("GitHub alert is not dismissed", user_message="Refresh this alert before reopening it.")
+        raise ConflictError(
+            "GitHub alert is not dismissed", user_message="Refresh this alert before reopening it."
+        )
     evidence = row.evidence or {}
     number_text = str(evidence.get("alert_number") or "")
-    if (not number_text.isdecimal() or row.external_id != f"{row.category}:{row.resource}:{number_text}"):
-        raise ConflictError("GitHub alert identity is inconsistent", user_message="This alert needs a fresh GitHub sync before it can be changed.")
+    if (
+        not number_text.isdecimal()
+        or row.external_id != f"{row.category}:{row.resource}:{number_text}"
+    ):
+        raise ConflictError(
+            "GitHub alert identity is inconsistent",
+            user_message="This alert needs a fresh GitHub sync before it can be changed.",
+        )
     scoped = await integration_service.resolve_settings(
         session, principal, IntegrationKind.GITHUB, settings=settings, require=True
     )
     client = GitHubClient(scoped, redis)
     try:
         provider_state = await client.set_alert_state(
-            row.category, row.resource or "", int(number_text), decision=decision,
-            reason=reason, comment=comment,
+            row.category,
+            row.resource or "",
+            int(number_text),
+            decision=decision,
+            reason=reason,
+            comment=comment,
         )
     finally:
         await client.aclose()
@@ -221,10 +254,19 @@ async def set_github_alert_state(
     row.last_seen_at = utcnow()
     row.missing_sync_count = 0
     await audit_service.record(
-        session, action=AuditAction.EXTERNAL_ALERT_SOURCE_UPDATE,
-        principal=principal, resource_type="external_security_alert", resource_id=row.id,
-        detail={"provider": "github", "category": row.category, "decision": decision,
-                "reason": reason, "from": previous, "to": provider_state},
+        session,
+        action=AuditAction.EXTERNAL_ALERT_SOURCE_UPDATE,
+        principal=principal,
+        resource_type="external_security_alert",
+        resource_id=row.id,
+        detail={
+            "provider": "github",
+            "category": row.category,
+            "decision": decision,
+            "reason": reason,
+            "from": previous,
+            "to": provider_state,
+        },
     )
     return row
 
@@ -267,7 +309,9 @@ async def list_external_alerts(
             await session.execute(
                 select(func.count())
                 .select_from(ExternalSecurityAlert)
-                .where(ExternalSecurityAlert.organization_id == principal.organization_id, *conditions)
+                .where(
+                    ExternalSecurityAlert.organization_id == principal.organization_id, *conditions
+                )
             )
         ).scalar_one()
     )
@@ -331,19 +375,20 @@ def normalize_github_alert(category: str, alert: dict[str, Any]) -> NormalizedEx
     number = str(alert.get("number") or alert.get("id") or "")
     if not number:
         raise ValueError("GitHub security alert has no stable identifier")
-    resource = str(repository.get("full_name") or "").strip() if isinstance(repository, dict) else ""
+    resource = (
+        str(repository.get("full_name") or "").strip() if isinstance(repository, dict) else ""
+    )
     if not resource or "/" not in resource:
         raise ValueError("GitHub security alert has no repository identity")
     external_id = f"{category}:{resource}:{number}"
     if len(external_id) > 300:
         raise ValueError("GitHub security alert identity exceeds storage limit")
     title = (
-        advisory.get("summary")
-        if isinstance(advisory, dict)
-        else None
-    ) or (rule.get("description") if isinstance(rule, dict) else None) or alert.get(
-        "secret_type_display_name"
-    ) or f"GitHub {category.replace('_', ' ')} alert"
+        (advisory.get("summary") if isinstance(advisory, dict) else None)
+        or (rule.get("description") if isinstance(rule, dict) else None)
+        or alert.get("secret_type_display_name")
+        or f"GitHub {category.replace('_', ' ')} alert"
+    )
     severity = _severity(
         (advisory.get("severity") if isinstance(advisory, dict) else None)
         or (rule.get("security_severity_level") if isinstance(rule, dict) else None)
@@ -378,9 +423,7 @@ def normalize_gitlab_alert(project: str, alert: dict[str, Any]) -> NormalizedExt
 
     project_data = alert.get("project")
     project_path = (
-        str(project_data.get("full_path") or "").strip()
-        if isinstance(project_data, dict)
-        else ""
+        str(project_data.get("full_path") or "").strip() if isinstance(project_data, dict) else ""
     ) or project.strip()
     if not project_path:
         raise ValueError("GitLab security finding has no project identity")
@@ -460,13 +503,10 @@ def normalize_wazuh_alert(hit: dict[str, Any]) -> NormalizedExternalAlert:
         else "info"
     )
 
-
     agent_name = str(agent_data.get("name") or "").strip()
     agent_id = str(agent_data.get("id") or "").strip()
     resource = (
-        f"{agent_name} ({agent_id})"
-        if agent_name and agent_id
-        else agent_name or agent_id or None
+        f"{agent_name} ({agent_id})" if agent_name and agent_id else agent_name or agent_id or None
     )
     description = str(rule_data.get("description") or "Wazuh security alert").strip()
 
@@ -491,7 +531,9 @@ def normalize_wazuh_alert(hit: dict[str, Any]) -> NormalizedExternalAlert:
     )
 
 
-def normalize_sonarqube_issue(base_url: str, project: str, issue: dict[str, Any]) -> NormalizedExternalAlert:
+def normalize_sonarqube_issue(
+    base_url: str, project: str, issue: dict[str, Any]
+) -> NormalizedExternalAlert:
     """Keep SonarQube's stable issue identity and code location without inventing CVEs."""
     key = str(issue.get("key") or "").strip()
     if not key:
@@ -500,25 +542,42 @@ def normalize_sonarqube_issue(base_url: str, project: str, issue: dict[str, Any]
     if issue_project != project:
         raise ValueError("SonarQube issue project does not match the requested scope")
     severity_map = {
-        "BLOCKER": "critical", "CRITICAL": "high", "HIGH": "high",
-        "MAJOR": "medium", "MEDIUM": "medium",
-        "MINOR": "low", "LOW": "low", "INFO": "info",
+        "BLOCKER": "critical",
+        "CRITICAL": "high",
+        "HIGH": "high",
+        "MAJOR": "medium",
+        "MEDIUM": "medium",
+        "MINOR": "low",
+        "LOW": "low",
+        "INFO": "info",
     }
     impacts = issue.get("impacts")
-    security_impacts = [
-        impact for impact in impacts
-        if isinstance(impact, dict) and impact.get("softwareQuality") == "SECURITY"
-    ] if isinstance(impacts, list) else []
-    severity_source = security_impacts[0].get("severity") if security_impacts else issue.get("severity")
+    security_impacts = (
+        [
+            impact
+            for impact in impacts
+            if isinstance(impact, dict) and impact.get("softwareQuality") == "SECURITY"
+        ]
+        if isinstance(impacts, list)
+        else []
+    )
+    severity_source = (
+        security_impacts[0].get("severity") if security_impacts else issue.get("severity")
+    )
     severity = severity_map.get(str(severity_source or "").upper(), "info")
     status = {
-        "RESOLVED": "resolved", "CLOSED": "resolved", "FIXED": "resolved",
-        "FALSE-POSITIVE": "dismissed", "FALSE_POSITIVE": "dismissed",
+        "RESOLVED": "resolved",
+        "CLOSED": "resolved",
+        "FIXED": "resolved",
+        "FALSE-POSITIVE": "dismissed",
+        "FALSE_POSITIVE": "dismissed",
     }.get(str(issue.get("issueStatus") or issue.get("status") or "").upper(), "open")
     component = str(issue.get("component") or project).strip()
     line = issue.get("line")
     resource = f"{component}:{line}" if isinstance(line, int) and line > 0 else component
-    source_url = f"{base_url.rstrip('/')}/project/issues?{urlencode({'issues': key, 'id': project})}"
+    source_url = (
+        f"{base_url.rstrip('/')}/project/issues?{urlencode({'issues': key, 'id': project})}"
+    )
     return NormalizedExternalAlert(
         external_id=f"{project}:{key}",
         category="vulnerability",
@@ -528,7 +587,12 @@ def normalize_sonarqube_issue(base_url: str, project: str, issue: dict[str, Any]
         resource=resource[:1000],
         source_url=source_url[:2000],
         cve_ids=[],
-        evidence={"provider": "sonarqube", "project": project, "rule": issue.get("rule"), "line": line},
+        evidence={
+            "provider": "sonarqube",
+            "project": project,
+            "rule": issue.get("rule"),
+            "line": line,
+        },
         raw_payload=issue,
     )
 
@@ -545,12 +609,19 @@ def normalize_snyk_issue(organization_id: str, issue: dict[str, Any]) -> Normali
     relationships = issue.get("relationships") or {}
     scan_item = relationships.get("scan_item") if isinstance(relationships, dict) else None
     scan_item_data = scan_item.get("data") if isinstance(scan_item, dict) else None
-    resource = str(scan_item_data.get("id"))[:1000] if isinstance(scan_item_data, dict) and scan_item_data.get("id") else None
+    resource = (
+        str(scan_item_data.get("id"))[:1000]
+        if isinstance(scan_item_data, dict) and scan_item_data.get("id")
+        else None
+    )
     problems = attributes.get("problems")
     if not isinstance(problems, list):
         problems = []
-    cves = [str(problem["id"]).upper() for problem in problems
-            if isinstance(problem, dict) and str(problem.get("id", "")).upper().startswith("CVE-")]
+    cves = [
+        str(problem["id"]).upper()
+        for problem in problems
+        if isinstance(problem, dict) and str(problem.get("id", "")).upper().startswith("CVE-")
+    ]
     status = str(attributes.get("status") or "open").lower()
     normalized_status = {**_STATUS, "ignored": "dismissed"}.get(status)
     if normalized_status is None:
@@ -559,7 +630,9 @@ def normalize_snyk_issue(organization_id: str, issue: dict[str, Any]) -> Normali
         external_id=external_id,
         category=str(issue.get("type") or "vulnerability")[:80],
         title=str(attributes.get("title") or "Snyk issue")[:1000],
-        severity=_severity(attributes.get("effective_severity_level") or attributes.get("severity")),
+        severity=_severity(
+            attributes.get("effective_severity_level") or attributes.get("severity")
+        ),
         status=normalized_status,
         resource=resource,
         source_url=None,
@@ -582,7 +655,8 @@ def normalize_tenable_vulnerability(vuln: dict[str, Any]) -> NormalizedExternalA
     severity_code = vuln.get("severity")
     severity = (
         {0: "info", 1: "low", 2: "medium", 3: "high", 4: "critical"}.get(severity_code)
-        if isinstance(severity_code, int) else None
+        if isinstance(severity_code, int)
+        else None
     )
     if severity is None:
         raise ValueError("Unsupported Tenable vulnerability severity")
@@ -601,7 +675,12 @@ def normalize_tenable_vulnerability(vuln: dict[str, Any]) -> NormalizedExternalA
         resource=str(vuln.get("hostname") or host_uuid)[:1000],
         source_url=f"https://cloud.tenable.com/scans/{scan_id}/hosts/{vuln.get('host_id')}",
         cve_ids=cve_ids,
-        evidence={"provider": "tenable", "scan_id": scan_id, "host_uuid": host_uuid, "plugin_id": plugin_id},
+        evidence={
+            "provider": "tenable",
+            "scan_id": scan_id,
+            "host_uuid": host_uuid,
+            "plugin_id": plugin_id,
+        },
         raw_payload=vuln,
     )
 
@@ -611,6 +690,8 @@ def _integer(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
 async def stage_github_alerts(
     session: AsyncSession,
     *,
@@ -695,8 +776,7 @@ async def stage_sonarqube_issues(
         integration_id=integration_id,
         provider="sonarqube",
         alerts=(
-            normalize_sonarqube_issue(base_url, str(issue["project"]), issue)
-            for issue in issues
+            normalize_sonarqube_issue(base_url, str(issue["project"]), issue) for issue in issues
         ),
     )
     return GitHubSyncResult(total=total)
@@ -722,12 +802,18 @@ async def stage_snyk_issues(
 
 
 async def stage_tenable_vulnerabilities(
-    session: AsyncSession, *, organization_id: Any, integration_id: Any | None,
+    session: AsyncSession,
+    *,
+    organization_id: Any,
+    integration_id: Any | None,
     vulnerabilities: list[dict[str, Any]],
 ) -> GitHubSyncResult:
     total = await _stage_normalized_alerts(
-        session, organization_id=organization_id, integration_id=integration_id,
-        provider="tenable", alerts=(normalize_tenable_vulnerability(v) for v in vulnerabilities),
+        session,
+        organization_id=organization_id,
+        integration_id=integration_id,
+        provider="tenable",
+        alerts=(normalize_tenable_vulnerability(v) for v in vulnerabilities),
     )
     return GitHubSyncResult(total=total)
 
@@ -825,15 +911,21 @@ async def reconcile_missing_sonarqube_issues(
     from app.services.canonical_ingest import reconcile_absent_observations
 
     await reconcile_absent_observations(
-        session, organization_id, provider="sonarqube", scope_keys=project_keys,
+        session,
+        organization_id,
+        provider="sonarqube",
+        scope_keys=project_keys,
         observed_external_ids=observed_external_ids,
     )
     return int(result.rowcount or 0)
 
 
 async def reconcile_missing_tenable_vulnerabilities(
-    session: AsyncSession, *, organization_id: Any,
-    scan_ids: list[str], observed_external_ids: list[str],
+    session: AsyncSession,
+    *,
+    organization_id: Any,
+    scan_ids: list[str],
+    observed_external_ids: list[str],
 ) -> int:
     """Resolve only after two complete missing observations in the selected scans."""
     if not scan_ids:
@@ -855,7 +947,10 @@ async def reconcile_missing_tenable_vulnerabilities(
     from app.services.canonical_ingest import reconcile_absent_observations
 
     await reconcile_absent_observations(
-        session, organization_id, provider="tenable", scope_keys=scan_ids,
+        session,
+        organization_id,
+        provider="tenable",
+        scope_keys=scan_ids,
         observed_external_ids=observed_external_ids,
     )
     return int(result.rowcount or 0)
@@ -936,8 +1031,11 @@ async def sync_github_alerts(
         principal=principal,
         resource_type="integration",
         resource_id=integration.id if integration else None,
-        detail={"provider": "github", "alerts_staged": result.total,
-                "missing_candidates": missing_candidates},
+        detail={
+            "provider": "github",
+            "alerts_staged": result.total,
+            "missing_candidates": missing_candidates,
+        },
     )
     return result
 
@@ -986,8 +1084,11 @@ async def sync_gitlab_alerts(
         principal=principal,
         resource_type="integration",
         resource_id=integration.id if integration else None,
-        detail={"provider": "gitlab", "alerts_staged": result.total,
-                "missing_candidates": missing_candidates},
+        detail={
+            "provider": "gitlab",
+            "alerts_staged": result.total,
+            "missing_candidates": missing_candidates,
+        },
     )
     return result
 
@@ -1066,8 +1167,11 @@ async def sync_sonarqube_alerts(
             principal=principal,
             resource_type="integration",
             resource_id=integration.id if integration else None,
-            detail={"provider": "sonarqube", "alerts_staged": result.total,
-                    "absence_candidates": absence_candidates},
+            detail={
+                "provider": "sonarqube",
+                "alerts_staged": result.total,
+                "absence_candidates": absence_candidates,
+            },
         )
         return result
     finally:
@@ -1115,7 +1219,11 @@ async def sync_snyk_issues(
 
 
 async def sync_tenable_vulnerabilities(
-    session: AsyncSession, principal: Principal, *, settings: Settings, redis: Any | None = None,
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    settings: Settings,
+    redis: Any | None = None,
 ) -> GitHubSyncResult:
     """Read selected, completed Tenable scans into this tenant's exposure ledger."""
     principal.require(Permission.INTEGRATION_MANAGE)
@@ -1129,20 +1237,30 @@ async def sync_tenable_vulnerabilities(
     try:
         vulnerabilities = await client.list_vulnerabilities()
         result = await stage_tenable_vulnerabilities(
-            session, organization_id=principal.organization_id,
+            session,
+            organization_id=principal.organization_id,
             integration_id=integration.id if integration else None,
             vulnerabilities=vulnerabilities,
         )
         absence_candidates = await reconcile_missing_tenable_vulnerabilities(
-            session, organization_id=principal.organization_id,
+            session,
+            organization_id=principal.organization_id,
             scan_ids=list(scoped.tenable.scan_ids),
-            observed_external_ids=[normalize_tenable_vulnerability(v).external_id for v in vulnerabilities],
+            observed_external_ids=[
+                normalize_tenable_vulnerability(v).external_id for v in vulnerabilities
+            ],
         )
         await audit_service.record(
-            session, action=AuditAction.INTEGRATION_SYNC, principal=principal,
-            resource_type="integration", resource_id=integration.id if integration else None,
-            detail={"provider": "tenable", "alerts_staged": result.total,
-                    "absence_candidates": absence_candidates},
+            session,
+            action=AuditAction.INTEGRATION_SYNC,
+            principal=principal,
+            resource_type="integration",
+            resource_id=integration.id if integration else None,
+            detail={
+                "provider": "tenable",
+                "alerts_staged": result.total,
+                "absence_candidates": absence_candidates,
+            },
         )
         return result
     finally:

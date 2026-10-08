@@ -40,8 +40,10 @@ async def backfill_organization_page(
         if after_id is not None:
             statement = statement.where(ExternalSecurityAlert.id > after_id)
         external_rows = (
-            await session.execute(statement.order_by(ExternalSecurityAlert.id).limit(limit))
-        ).scalars().all()
+            (await session.execute(statement.order_by(ExternalSecurityAlert.id).limit(limit)))
+            .scalars()
+            .all()
+        )
         if not external_rows:
             return None, 0, 0
         projected = await ingest_external_alerts(session, organization_id, list(external_rows))
@@ -51,8 +53,8 @@ async def backfill_organization_page(
     if after_id is not None:
         native_statement = native_statement.where(Finding.id > after_id)
     native_rows = (
-        await session.execute(native_statement.order_by(Finding.id).limit(limit))
-    ).scalars().all()
+        (await session.execute(native_statement.order_by(Finding.id).limit(limit))).scalars().all()
+    )
     if not native_rows:
         return None, 0, 0
     projected = await ingest_native_findings(session, organization_id, list(native_rows))

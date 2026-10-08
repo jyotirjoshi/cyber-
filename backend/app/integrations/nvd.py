@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -66,6 +67,7 @@ class NVDRecord:
     metrics: list[CVSSMetric] = field(default_factory=list)
     cwes: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
+    exploit_references: list[str] = field(default_factory=list)
 
     @property
     def primary_metric(self) -> CVSSMetric | None:
@@ -181,6 +183,24 @@ def parse_cve(payload: dict[str, Any]) -> NVDRecord | None:
         for ref in cve.get("references") or []
         if isinstance(ref, dict) and ref.get("url")
     ]
+    exploit_references: list[str] = []
+    for ref in cve.get("references") or []:
+        if not isinstance(ref, dict) or "Exploit" not in (ref.get("tags") or []):
+            continue
+        url = ref.get("url")
+        if not isinstance(url, str) or len(url) > 2000:
+            continue
+        try:
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme in {"http", "https"}
+                and parsed.hostname
+                and not parsed.username
+                and not parsed.password
+            ):
+                exploit_references.append(url)
+        except ValueError:
+            continue
 
     return NVDRecord(
         cve_id=normalize_cve(str(cve["id"])),
@@ -191,6 +211,7 @@ def parse_cve(payload: dict[str, Any]) -> NVDRecord | None:
         metrics=_parse_metrics(cve.get("metrics") or {}),
         cwes=sorted(set(cwes)),
         references=references[:20],
+        exploit_references=exploit_references[:20],
     )
 
 

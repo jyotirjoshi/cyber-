@@ -30,10 +30,18 @@ def test_canonical_findings_list_and_detail_are_mounted() -> None:
 def test_canonical_response_exposes_score_and_explanation() -> None:
     now = dt.datetime.now(dt.UTC)
     finding = SimpleNamespace(
-        id=uuid.uuid4(), asset_id=uuid.uuid4(), title="Risk", severity="high",
-        status="open", cve_ids=["CVE-2024-12345"], first_seen_at=now,
-        last_seen_at=now, closed_at=None, status_version=1,
-        risk_score=67.5, risk_factors={"inputs": {"in_kev": True}},
+        id=uuid.uuid4(),
+        asset_id=uuid.uuid4(),
+        title="Risk",
+        severity="high",
+        status="open",
+        cve_ids=["CVE-2024-12345"],
+        first_seen_at=now,
+        last_seen_at=now,
+        closed_at=None,
+        status_version=1,
+        risk_score=67.5,
+        risk_factors={"inputs": {"in_kev": True}},
     )
 
     payload = CanonicalFindingOut.model_validate(finding)
@@ -45,7 +53,9 @@ def test_canonical_response_exposes_score_and_explanation() -> None:
 @pytest.mark.asyncio
 async def test_my_overdue_queue_filters_count_and_rows() -> None:
     principal = Principal(
-        user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.SECURITY_ENGINEER,
+        user_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        role=Role.SECURITY_ENGINEER,
     )
     session = AsyncMock()
     count = MagicMock()
@@ -55,7 +65,11 @@ async def test_my_overdue_queue_filters_count_and_rows() -> None:
     session.execute.side_effect = [count, rows]
 
     await list_canonical_findings(
-        session, principal, PaginationParams(limit=25, offset=0), mine=True, overdue=True,
+        session,
+        principal,
+        PaginationParams(limit=25, offset=0),
+        mine=True,
+        overdue=True,
     )
 
     for call in session.execute.call_args_list:

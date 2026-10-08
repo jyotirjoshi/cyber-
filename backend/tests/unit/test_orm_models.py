@@ -202,6 +202,7 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
         ("external_security_alerts", "severity"),
         ("external_security_alerts", "status"),
         ("run_dispatches", "status"),
+        ("asset_changes", "change_type"),
     }
 )
 

@@ -74,8 +74,9 @@ from app.db.models.agent import AgentRun
 from app.db.models.assessment import Assessment
 from app.db.repository import tenant_select
 from app.db.session import session_scope
-from app.services.agent_action import execute_approved_batch
+from app.services.agent_action import execute_approved_batch, settle_assessment_action_receipt
 from app.services.assessment import transition
+from app.services.canonical_intel_refresh import refresh_stale_intel_batch
 from app.services.canonical_risk_refresh import refresh_stale_risk_batch
 from app.services.context import Principal
 from app.services.job import cancel_jobs_for_assessment, reclaim_orphans
@@ -427,7 +428,9 @@ class AgentWorker:
                 log.debug("worker.retry_deferred", run_id=str(run_id), message_id=message_id)
                 return
             if not await self._claim_run_slot(ctx.organization_id, run_id):
-                log.info("worker.tenant_capacity_deferred", organization_id=str(ctx.organization_id))
+                log.info(
+                    "worker.tenant_capacity_deferred", organization_id=str(ctx.organization_id)
+                )
                 return
         except RedisError as exc:
             log.warning("worker.run_admission_failed", run_id=str(run_id), error=type(exc).__name__)
@@ -436,7 +439,9 @@ class AgentWorker:
             try:
                 attempts = await self._begin_attempt(message_id)
             except RedisError as exc:
-                log.warning("worker.retry_state_failed", run_id=str(run_id), error=type(exc).__name__)
+                log.warning(
+                    "worker.retry_state_failed", run_id=str(run_id), error=type(exc).__name__
+                )
                 return
             if attempts > _MAX_RUN_ATTEMPTS:
                 if await self._dead_letter(message_id, "retry_exhausted"):
@@ -445,7 +450,8 @@ class AgentWorker:
                     except Exception as exc:
                         log.warning(
                             "worker.retry_settle_failed",
-                            run_id=str(run_id), error=type(exc).__name__,
+                            run_id=str(run_id),
+                            error=type(exc).__name__,
                         )
                         return
                     await self._ack(message_id)
@@ -466,31 +472,49 @@ class AgentWorker:
 
     async def _claim_run_slot(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> bool:
         now_ms = int(_now().timestamp() * 1000)
-        accepted = await cast(Awaitable[int], self._redis.eval(
-            _RUN_SLOT_CLAIM_LUA, 2, self._run_slot_key(organization_id),
-            self._run_lock_key(organization_id, run_id),
-            now_ms, _RUN_SLOT_LEASE_MS,
-            self._settings.agent.max_concurrent_runs_per_org,
-            self._run_slot_member(run_id),
-        ))
+        accepted = await cast(
+            Awaitable[int],
+            self._redis.eval(
+                _RUN_SLOT_CLAIM_LUA,
+                2,
+                self._run_slot_key(organization_id),
+                self._run_lock_key(organization_id, run_id),
+                now_ms,
+                _RUN_SLOT_LEASE_MS,
+                self._settings.agent.max_concurrent_runs_per_org,
+                self._run_slot_member(run_id),
+            ),
+        )
         return int(accepted) == 1
 
     async def _release_run_slot(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> None:
         try:
-            await cast(Awaitable[int], self._redis.eval(
-                _RUN_SLOT_RELEASE_LUA, 2, self._run_slot_key(organization_id),
-                self._run_lock_key(organization_id, run_id), self._run_slot_member(run_id),
-            ))
+            await cast(
+                Awaitable[int],
+                self._redis.eval(
+                    _RUN_SLOT_RELEASE_LUA,
+                    2,
+                    self._run_slot_key(organization_id),
+                    self._run_lock_key(organization_id, run_id),
+                    self._run_slot_member(run_id),
+                ),
+            )
         except RedisError as exc:
             log.warning("worker.run_slot_release_failed", error=type(exc).__name__)
 
     async def _renew_run_slot(self, organization_id: uuid.UUID, run_id: uuid.UUID) -> bool:
-        renewed = await cast(Awaitable[int], self._redis.eval(
-            _RUN_SLOT_RENEW_LUA, 2, self._run_slot_key(organization_id),
-            self._run_lock_key(organization_id, run_id),
-            int(_now().timestamp() * 1000), _RUN_SLOT_LEASE_MS,
-            self._run_slot_member(run_id),
-        ))
+        renewed = await cast(
+            Awaitable[int],
+            self._redis.eval(
+                _RUN_SLOT_RENEW_LUA,
+                2,
+                self._run_slot_key(organization_id),
+                self._run_lock_key(organization_id, run_id),
+                int(_now().timestamp() * 1000),
+                _RUN_SLOT_LEASE_MS,
+                self._run_slot_member(run_id),
+            ),
+        )
         return int(renewed) == 1
 
     async def _run(
@@ -556,7 +580,8 @@ class AgentWorker:
                 except Exception as settle_exc:
                     log.warning(
                         "worker.unprocessable_settle_failed",
-                        run_id=str(run_id), error=type(settle_exc).__name__,
+                        run_id=str(run_id),
+                        error=type(settle_exc).__name__,
                     )
                     return
                 await self._ack(message_id)
@@ -582,7 +607,27 @@ class AgentWorker:
             self._current_advance = None
 
         log.info("worker.run_settled", run_id=str(run_id), status=outcome.status.value)
+        if outcome.status in {AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
+            await self._record_terminal_action_receipt(ctx, run_id, outcome.status.value)
         await self._ack(message_id)
+
+    async def _record_terminal_action_receipt(
+        self, ctx: _RunContext, run_id: uuid.UUID, outcome: str,
+    ) -> None:
+        """Report a settled run without re-running its assessment on transcript failure."""
+        try:
+            async with session_scope(self._settings) as session:
+                await settle_assessment_action_receipt(
+                    session,
+                    organization_id=ctx.organization_id,
+                    run_id=run_id,
+                    outcome=outcome,
+                )
+        except Exception as exc:
+            log.warning(
+                "worker.action_receipt_failed",
+                run_id=str(run_id), error_type=type(exc).__name__,
+            )
 
     async def _monitor(
         self,
@@ -655,6 +700,11 @@ class AgentWorker:
         """
         async with session_scope(self._settings) as session:
             run = await session.get(AgentRun, run_id)
+            if run is None or run.organization_id != ctx.organization_id:
+                return
+            receipt_eligible = run.status_enum not in {
+                AgentRunStatus.COMPLETED, AgentRunStatus.FAILED,
+            }
             assessment = None
             if ctx.assessment_id is not None:
                 assessment = await self._load_assessment(
@@ -669,12 +719,16 @@ class AgentWorker:
                         AssessmentStatus.CANCELLED,
                         reason="Cancelled by operator.",
                     )
-            if run is not None and run.status_enum not in _TERMINAL_RUN_STATUSES:
+            if assessment is not None and assessment.status_enum is AssessmentStatus.COMPLETED:
+                receipt_eligible = False
+            if run.status_enum not in _TERMINAL_RUN_STATUSES:
                 now = _now()
                 run.status = AgentRunStatus.CANCELLED.value
                 run.completed_at = now
                 run.heartbeat_at = now
 
+        if receipt_eligible:
+            await self._record_terminal_action_receipt(ctx, run_id, "cancelled")
         if ctx.session_id is not None:
             emitter = self._deps.emitter(
                 session_id=ctx.session_id, assessment_id=ctx.assessment_id, run_id=run_id
@@ -716,6 +770,9 @@ class AgentWorker:
             run = await session.get(AgentRun, run_id)
             if run is None or run.organization_id != ctx.organization_id:
                 return
+            receipt_eligible = run.status_enum not in {
+                AgentRunStatus.COMPLETED, AgentRunStatus.CANCELLED,
+            }
             if run.status_enum not in _TERMINAL_RUN_STATUSES:
                 now = _now()
                 run.status = AgentRunStatus.FAILED.value
@@ -728,6 +785,10 @@ class AgentWorker:
                 )
                 if assessment is not None and not assessment.status_enum.is_terminal:
                     await transition(session, assessment, AssessmentStatus.FAILED, reason=reason)
+                if assessment is not None and assessment.status_enum is AssessmentStatus.COMPLETED:
+                    receipt_eligible = False
+        if receipt_eligible:
+            await self._record_terminal_action_receipt(ctx, run_id, "failed")
         log.error("worker.run_retry_exhausted", run_id=str(run_id))
 
     # -- data access ---------------------------------------------------------
@@ -867,14 +928,23 @@ class AgentWorker:
                 raise
             except Exception as exc:
                 log.warning("worker.canonical_risk_refresh_failed", error=type(exc).__name__)
+            try:
+                async with session_scope(self._settings) as session:
+                    refreshed = await refresh_stale_intel_batch(
+                        session, settings=self._settings, redis=self._redis
+                    )
+                if refreshed:
+                    log.info("worker.canonical_intel_refreshed", count=refreshed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.canonical_intel_refresh_failed", error=type(exc).__name__)
 
     async def _pulse_liveness(self, *, now: dt.datetime | None = None) -> None:
         score = (now or _now()).timestamp()
         key = worker_liveness_key(self._stream)
         await self._redis.zadd(key, {self._worker_id: score})
-        await self._redis.zremrangebyscore(
-            key, "-inf", score - WORKER_LIVENESS_MAX_AGE_SECONDS
-        )
+        await self._redis.zremrangebyscore(key, "-inf", score - WORKER_LIVENESS_MAX_AGE_SECONDS)
 
     async def _remove_liveness(self) -> None:
         await self._redis.zrem(worker_liveness_key(self._stream), self._worker_id)

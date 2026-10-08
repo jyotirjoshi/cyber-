@@ -38,6 +38,8 @@ class CanonicalFinding(Base, TenantMixin, TimestampMixin):
     cve_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     risk_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     risk_factors: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    intel_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    intel_refreshed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     risk_policy_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -50,6 +52,7 @@ class CanonicalFinding(Base, TenantMixin, TimestampMixin):
     )
     due_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     remediation_plan: Mapped[str | None] = mapped_column(Text)
+    custom_fields: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("organization_id", "fingerprint", name="unique_canonical_fingerprint"),
@@ -65,8 +68,18 @@ class CanonicalFinding(Base, TenantMixin, TimestampMixin):
         CheckConstraint("risk_policy_version >= 0", name="valid_canonical_risk_policy_version"),
         Index("ix_canonical_findings_org_asset_status", "organization_id", "asset_id", "status"),
         Index("ix_canonical_findings_org_status_risk", "organization_id", "status", "risk_score"),
-        Index("ix_canonical_findings_org_risk_policy_version", "organization_id", "risk_policy_version"),
-        Index("ix_canonical_findings_org_assignee_due", "organization_id", "assignee_user_id", "due_at"),
+        Index("ix_canonical_findings_org_intel_refresh", "organization_id", "intel_refreshed_at"),
+        Index(
+            "ix_canonical_findings_org_risk_policy_version",
+            "organization_id",
+            "risk_policy_version",
+        ),
+        Index(
+            "ix_canonical_findings_org_assignee_due",
+            "organization_id",
+            "assignee_user_id",
+            "due_at",
+        ),
     )
 
 
@@ -75,7 +88,9 @@ class FindingObservation(Base, TenantMixin, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     canonical_finding_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("canonical_findings.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("canonical_findings.id", ondelete="CASCADE"),
+        nullable=False,
     )
     provider: Mapped[str] = mapped_column(String(40), nullable=False)
     external_id: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -92,7 +107,11 @@ class FindingObservation(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "organization_id", "provider", "external_id", "cve_id", name="unique_finding_observation_source"
+            "organization_id",
+            "provider",
+            "external_id",
+            "cve_id",
+            name="unique_finding_observation_source",
         ),
         CheckConstraint("missing_sync_count >= 0", name="valid_observation_missing_count"),
         Index("ix_finding_observations_org_finding", "organization_id", "canonical_finding_id"),
@@ -104,7 +123,9 @@ class FindingHistory(Base, TenantMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     canonical_finding_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("canonical_findings.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("canonical_findings.id", ondelete="CASCADE"),
+        nullable=False,
     )
     previous_status: Mapped[str | None] = mapped_column(String(30))
     new_status: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -115,5 +136,46 @@ class FindingHistory(Base, TenantMixin):
     occurred_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        Index("ix_finding_history_org_finding_time", "organization_id", "canonical_finding_id", "occurred_at"),
+        Index(
+            "ix_finding_history_org_finding_time",
+            "organization_id",
+            "canonical_finding_id",
+            "occurred_at",
+        ),
+    )
+
+
+class AssessmentCanonicalFinding(Base, TenantMixin):
+    """Stable assessment-to-finding membership, independent of later rescans."""
+
+    __tablename__ = "assessment_canonical_findings"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False
+    )
+    canonical_finding_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("canonical_findings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scanner_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("scanner_jobs.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "assessment_id",
+            "canonical_finding_id",
+            name="unique_assessment_canonical_finding",
+        ),
+        Index(
+            "ix_assessment_canonical_findings_org_assessment",
+            "organization_id",
+            "assessment_id",
+        ),
     )

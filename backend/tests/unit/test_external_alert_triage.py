@@ -42,18 +42,28 @@ class _Session:
 
 def _principal(role: Role = Role.SECURITY_ENGINEER) -> Principal:
     return Principal(
-        user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=role,
+        user_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        role=role,
         email="analyst@example.test",
     )
 
 
 def _alert(principal: Principal) -> ExternalSecurityAlert:
     return ExternalSecurityAlert(
-        id=uuid.uuid4(), organization_id=principal.organization_id,
-        provider="github", external_id="dependabot:7", category="dependabot",
-        title="Vulnerable package", severity="high", status="open",
-        triage_status="new", triage_version=0,
-        cve_ids=["CVE-2026-1234"], evidence={}, raw_payload={},
+        id=uuid.uuid4(),
+        organization_id=principal.organization_id,
+        provider="github",
+        external_id="dependabot:7",
+        category="dependabot",
+        title="Vulnerable package",
+        severity="high",
+        status="open",
+        triage_status="new",
+        triage_version=0,
+        cve_ids=["CVE-2026-1234"],
+        evidence={},
+        raw_payload={},
     )
 
 
@@ -78,8 +88,12 @@ async def test_triage_updates_local_state_and_audits_without_changing_provider_s
     session = _Session(row)
 
     result = await triage_external_alert(
-        session, principal, row.id,
-        status="risk_accepted", note="Mitigated by network isolation.", expected_version=0,
+        session,
+        principal,
+        row.id,
+        status="risk_accepted",
+        note="Mitigated by network isolation.",
+        expected_version=0,
     )
 
     assert result is row
@@ -89,7 +103,11 @@ async def test_triage_updates_local_state_and_audits_without_changing_provider_s
     assert row.triage_version == 1
     assert row.triaged_by_user_id == principal.user_id
     assert row.triaged_at is not None
-    sql = str(session.statements[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
     assert f"organization_id = '{principal.organization_id}'" in sql
     assert f"external_security_alerts.id = '{row.id}'" in sql
     assert "FOR UPDATE" in sql
@@ -109,16 +127,24 @@ async def test_triage_rejects_stale_edits_and_other_tenant_ids() -> None:
     session = _Session(row)
     with pytest.raises(ConflictError):
         await triage_external_alert(
-            session, principal, row.id,
-            status="investigating", note=None, expected_version=2,
+            session,
+            principal,
+            row.id,
+            status="investigating",
+            note=None,
+            expected_version=2,
         )
     assert row.triage_status == "new"
     assert session.added == []
 
     with pytest.raises(TenantIsolationError):
         await triage_external_alert(
-            _Session(None), principal, uuid.uuid4(),
-            status="investigating", note=None, expected_version=0,
+            _Session(None),
+            principal,
+            uuid.uuid4(),
+            status="investigating",
+            note=None,
+            expected_version=0,
         )
 
 
@@ -131,7 +157,11 @@ async def test_viewer_cannot_triage_an_external_alert() -> None:
     session = _Session(_alert(principal))
     with pytest.raises(PermissionDeniedError):
         await triage_external_alert(
-            session, principal, session.row.id,  # type: ignore[union-attr]
-            status="investigating", note=None, expected_version=0,
+            session,
+            principal,
+            session.row.id,  # type: ignore[union-attr]
+            status="investigating",
+            note=None,
+            expected_version=0,
         )
     assert session.statements == []

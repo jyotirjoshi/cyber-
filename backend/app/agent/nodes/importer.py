@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import structlog
+from sqlalchemy.orm import selectinload
 
 from app.agent.nodes._common import (
     StepHandle,
@@ -67,9 +68,11 @@ from app.db.enums import (
 )
 from app.db.models.identity import Organization
 from app.db.models.scanner import ScannerJob
+from app.db.repository import tenant_select
 from app.db.session import session_scope
 from app.integrations.defectdojo import DDImportResult, DefectDojoClient, scan_type_for
-from app.services.assessment import record_degradation, transition
+from app.services.assessment import record_degradation, refresh_counters, transition
+from app.services.file_intake import import_prowler_artifact
 from app.services.finding import import_from_defectdojo
 from app.services.integration import resolve_settings
 from app.services.job import jobs_for_assessment
@@ -86,7 +89,26 @@ _TOOL = "defectdojo"
 #: DefectDojo scan-type mapping (``scan_type_for`` raises for it), because recon is asset
 #: discovery, not vulnerability detection. This is the allow-list the job worklist is filtered by.
 _ACTIVE_SCANNERS: frozenset[ScannerName] = frozenset(
-    {ScannerName.NMAP, ScannerName.NUCLEI, ScannerName.ZAP}
+    {
+        ScannerName.NMAP,
+        ScannerName.NUCLEI,
+        ScannerName.ZAP,
+        ScannerName.TRIVY_REPO,
+        ScannerName.SEMGREP_REPO,
+        ScannerName.GITLEAKS_REPO,
+        ScannerName.TRIVY_IMAGE,
+        ScannerName.SYFT_IMAGE,
+        ScannerName.PROWLER_AWS,
+        ScannerName.PROWLER_AZURE,
+        ScannerName.PROWLER_GCP,
+    }
+)
+_CLOUD_SCANNERS = frozenset(
+    {
+        ScannerName.PROWLER_AWS,
+        ScannerName.PROWLER_AZURE,
+        ScannerName.PROWLER_GCP,
+    }
 )
 
 #: Operator-facing scanner names for labels, summaries and degradation notes.
@@ -94,6 +116,14 @@ _SCANNER_LABELS: dict[ScannerName, str] = {
     ScannerName.NMAP: "Nmap",
     ScannerName.NUCLEI: "Nuclei",
     ScannerName.ZAP: "OWASP ZAP",
+    ScannerName.TRIVY_REPO: "Trivy repository",
+    ScannerName.SEMGREP_REPO: "Semgrep source code",
+    ScannerName.GITLEAKS_REPO: "Gitleaks secrets",
+    ScannerName.TRIVY_IMAGE: "Trivy container image",
+    ScannerName.SYFT_IMAGE: "Syft SBOM",
+    ScannerName.PROWLER_AWS: "Prowler AWS",
+    ScannerName.PROWLER_AZURE: "Prowler Azure",
+    ScannerName.PROWLER_GCP: "Prowler GCP",
 }
 
 # -- user-safe degradation impacts (SEC-002: counts and scanner names only, never hosts) ------
@@ -165,32 +195,36 @@ async def import_findings(state: AssessmentState, *, deps: AgentDeps) -> dict[st
     """Upload each scanner's output to DefectDojo and project the findings back (FR-016..018)."""
     org_id = state_uuid(state, "organization_id")
 
-    # 1. Resolve the tenant's DefectDojo client and ensure the product/engagement exist. A
-    #    DefectDojoError or a missing-configuration error here is fatal and propagates.
-    prep = await _prepare(state, deps=deps)
-    product = await prep.client.ensure_product(
-        prep.product_name, description=prep.product_description
-    )
-    engagement = await prep.client.ensure_engagement(
-        product_id=product.id,
-        name=prep.engagement_name,
-        target_start=prep.target_start,
-        target_end=prep.target_end,
-        tags=["cynux"],
-    )
-
-    # 2. Persist the DefectDojo linkage and advance scanning -> analyzing (idempotent on resume).
-    await _persist_context(state, deps=deps, product_id=product.id, engagement_id=engagement.id)
-
-    # 3. Import each completed scanner's artifact. Nothing to import is a normal outcome when
-    #    every scanner degraded during the scan phase.
     plans = await _plan_imports(state, deps=deps, org_id=org_id)
+    dd_plans = [plan for plan in plans if plan.scanner not in _CLOUD_SCANNERS]
+    ctx: _DDContext | None = None
+    if dd_plans:
+        prep = await _prepare(state, deps=deps)
+        product = await prep.client.ensure_product(
+            prep.product_name, description=prep.product_description
+        )
+        engagement = await prep.client.ensure_engagement(
+            product_id=product.id,
+            name=prep.engagement_name,
+            target_start=prep.target_start,
+            target_end=prep.target_end,
+            tags=["cynux"],
+        )
+        await _persist_context(
+            state,
+            deps=deps,
+            product_id=product.id,
+            engagement_id=engagement.id,
+        )
+        ctx = _DDContext(client=prep.client, engagement_id=engagement.id)
+    else:
+        await _advance_without_defectdojo(state, deps=deps)
+
     if not plans:
         await _record_empty(state, deps=deps)
         total = await _final_total(state, deps=deps)
         return {"findings_total": total, "stage": AssessmentStage.IMPORT.value}
 
-    ctx = _DDContext(client=prep.client, engagement_id=engagement.id)
     for plan in plans:
         async with record_step(
             deps,
@@ -203,7 +237,24 @@ async def import_findings(state: AssessmentState, *, deps: AgentDeps) -> dict[st
         ) as step:
             # A DefectDojoError inside here is *meant* to escape: record_step marks the step
             # failed and re-raises, and the runner fails the run (FR-040 boundary).
-            await _import_job(state, deps=deps, ctx=ctx, plan=plan, step=step, org_id=org_id)
+            if plan.scanner in _CLOUD_SCANNERS:
+                await _import_cloud_job(
+                    state,
+                    deps=deps,
+                    plan=plan,
+                    step=step,
+                    org_id=org_id,
+                )
+            else:
+                assert ctx is not None  # noqa: S101 - dd_plans established it above
+                await _import_job(
+                    state,
+                    deps=deps,
+                    ctx=ctx,
+                    plan=plan,
+                    step=step,
+                    org_id=org_id,
+                )
 
     total = await _final_total(state, deps=deps)
     return {"findings_total": total, "stage": AssessmentStage.IMPORT.value}
@@ -272,6 +323,17 @@ async def _persist_context(
         )
 
 
+async def _advance_without_defectdojo(state: AssessmentState, *, deps: AgentDeps) -> None:
+    async with session_scope(deps.settings) as session:
+        assessment = await load_assessment(session, state)
+        await transition(
+            session,
+            assessment,
+            AssessmentStatus.ANALYZING,
+            stage=AssessmentStage.IMPORT,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Planning: the completed active-scanner jobs whose output is importable
 # ---------------------------------------------------------------------------
@@ -316,6 +378,50 @@ def _importable_artifact(job: ScannerJob) -> _Artifact | None:
         if artifact.kind == ArtifactKind.RAW_OUTPUT.value and (artifact.size_bytes or 0) > 0:
             return _Artifact(storage_key=artifact.storage_key, filename=artifact.filename)
     return None
+
+
+async def _import_cloud_job(
+    state: AssessmentState,
+    *,
+    deps: AgentDeps,
+    plan: _JobPlan,
+    step: StepHandle,
+    org_id: uuid.UUID,
+) -> None:
+    if plan.artifact is None:
+        reason = "Prowler completed but left no sanitized report to import."
+        step.degrade(reason)
+        await _degrade(
+            state,
+            deps=deps,
+            component=plan.scanner.value,
+            reason=reason,
+            impact=_IMPACT_NO_OUTPUT,
+        )
+        step.record_output({"scanner": plan.scanner.value, "imported": 0})
+        return
+    async with session_scope(deps.settings) as session:
+        result = await session.execute(
+            tenant_select(
+                ScannerJob,
+                org_id,
+                selectinload(ScannerJob.artifacts),
+            ).where(ScannerJob.id == plan.job_id)
+        )
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise ResourceNotFoundError(
+                "scanner job not found for cloud import",
+                context={"job_id": str(plan.job_id)},
+            )
+        count = await import_prowler_artifact(
+            session,
+            principal_from(state),
+            job,
+            deps.storage,
+        )
+    step.relabel(f"Imported {_SCANNER_LABELS[plan.scanner]} findings")
+    step.record_output({"scanner": plan.scanner.value, "imported": count})
 
 
 # ---------------------------------------------------------------------------
@@ -466,14 +572,10 @@ async def _record_empty(state: AssessmentState, *, deps: AgentDeps) -> None:
 
 
 async def _final_total(state: AssessmentState, *, deps: AgentDeps) -> int:
-    """Read the assessment's authoritative finding total after all imports.
-
-    Uses the counter :func:`app.services.finding.import_from_defectdojo` refreshed on each import
-    rather than summing per-test counts: a finding seen by two scanners is one row, so summing
-    the tests would over-count it.
-    """
+    """Reconcile the completed native and canonical scan finding count."""
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
+        await refresh_counters(session, assessment)
         return int(assessment.findings_total)
 
 

@@ -109,10 +109,7 @@ def assert_active_assessment_capacity(
     entitlements: OrganizationEntitlements,
 ) -> None:
     """Prevent an organization from queueing more live engagements than its plan allows."""
-    if (
-        current_active_assessments + new_active_assessments
-        <= entitlements.max_active_assessments
-    ):
+    if current_active_assessments + new_active_assessments <= entitlements.max_active_assessments:
         return
     raise QuotaExceededError(
         "organization active assessment capacity reached",

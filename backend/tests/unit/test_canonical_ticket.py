@@ -32,14 +32,21 @@ def test_canonical_ticket_description_preserves_source_and_marks_ai_plan() -> No
     from app.services.ticket import build_canonical_description
 
     finding = SimpleNamespace(
-        id=uuid.uuid4(), title="Vulnerable package", severity="high", risk_score=81.5,
-        cve_ids=["CVE-2026-1234"], remediation_plan="Upgrade dependency and rescan.",
+        id=uuid.uuid4(),
+        title="Vulnerable package",
+        severity="high",
+        risk_score=81.5,
+        cve_ids=["CVE-2026-1234"],
+        remediation_plan="Upgrade dependency and rescan.",
     )
     observation = SimpleNamespace(
         provider="snyk", external_id="issue-42", source_status="open", source_url=None
     )
     body = build_canonical_description(
-        finding, asset_name="api.example.org", observations=[observation], settings=Settings(),
+        finding,
+        asset_name="api.example.org",
+        observations=[observation],
+        settings=Settings(),
     )
     assert "api.example.org" in body
     assert "CVE-2026-1234" in body
@@ -48,8 +55,11 @@ def test_canonical_ticket_description_preserves_source_and_marks_ai_plan() -> No
     assert "AI-generated" in body
     assert f"/findings/canonical/{finding.id}" in body
     without_plan = build_canonical_description(
-        finding, asset_name="api.example.org", observations=[observation],
-        settings=Settings(), include_remediation=False,
+        finding,
+        asset_name="api.example.org",
+        observations=[observation],
+        settings=Settings(),
+        include_remediation=False,
     )
     assert "Upgrade dependency" not in without_plan
 
@@ -64,9 +74,15 @@ async def test_canonical_only_finding_creates_one_jira_link_with_stable_remote_i
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
     finding_id = uuid.uuid4()
     finding = SimpleNamespace(
-        id=finding_id, organization_id=principal.organization_id, asset_id=uuid.uuid4(),
-        title="Vulnerable dependency", severity="high", status="open", risk_score=88.0,
-        cve_ids=["CVE-2026-1234"], remediation_plan="Upgrade and verify the dependency.",
+        id=finding_id,
+        organization_id=principal.organization_id,
+        asset_id=uuid.uuid4(),
+        title="Vulnerable dependency",
+        severity="high",
+        status="open",
+        risk_score=88.0,
+        cve_ids=["CVE-2026-1234"],
+        remediation_plan="Upgrade and verify the dependency.",
     )
     statements = []
     added = []
@@ -113,8 +129,13 @@ async def test_canonical_only_finding_creates_one_jira_link_with_stable_remote_i
 
         async def create_issue(self, **kwargs):
             remote_calls.append(kwargs)
-            return JiraIssue(key="SEC-42", id="42", url="https://jira.example/browse/SEC-42",
-                             summary="Vulnerable dependency", status="Open")
+            return JiraIssue(
+                key="SEC-42",
+                id="42",
+                url="https://jira.example/browse/SEC-42",
+                summary="Vulnerable dependency",
+                status="Open",
+            )
 
         async def aclose(self):
             return None
@@ -124,8 +145,13 @@ async def test_canonical_only_finding_creates_one_jira_link_with_stable_remote_i
     monkeypatch.setattr(ticket, "JiraClient", _Jira)
     monkeypatch.setattr(ticket.audit_service, "record", audit)
     link = await ticket.create_canonical_ticket(
-        _Session(), principal, finding_id, settings=Settings(), by_agent=True,
-        project_key="P" * 50, issue_type="T" * 70,
+        _Session(),
+        principal,
+        finding_id,
+        settings=Settings(),
+        by_agent=True,
+        project_key="P" * 50,
+        issue_type="T" * 70,
     )
     assert link is added[0]
     assert link.canonical_finding_id == finding_id
@@ -140,7 +166,9 @@ async def test_canonical_only_finding_creates_one_jira_link_with_stable_remote_i
 
 
 @pytest.mark.asyncio
-async def test_canonical_ticket_list_includes_direct_and_native_links_without_crossing_tenants() -> None:
+async def test_canonical_ticket_list_includes_direct_and_native_links_without_crossing_tenants() -> (
+    None
+):
     from app.services.ticket import list_canonical_tickets
 
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
@@ -222,9 +250,15 @@ async def test_canonical_ticket_creation_reuses_ticket_on_any_native_observation
 
     monkeypatch.setattr(ticket.TenantRepository, "get_or_404", get_finding)
     monkeypatch.setattr(ticket, "resolve_settings", no_remote)
-    assert await ticket.create_canonical_ticket(
-        _Session(), principal, canonical_id, settings=Settings(),
-    ) is older_native_link
+    assert (
+        await ticket.create_canonical_ticket(
+            _Session(),
+            principal,
+            canonical_id,
+            settings=Settings(),
+        )
+        is older_native_link
+    )
 
 
 @pytest.mark.asyncio
@@ -239,9 +273,12 @@ async def test_assessment_ticket_candidates_exclude_already_ticketed_canonical_e
             return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
 
     session = _Session()
-    assert await ticket_candidates(
-        session, principal, uuid.uuid4(), organization_policy_floor=Severity.HIGH
-    ) == []
+    assert (
+        await ticket_candidates(
+            session, principal, uuid.uuid4(), organization_policy_floor=Severity.HIGH
+        )
+        == []
+    )
     sql = str(session.statement.compile(dialect=postgresql.dialect()))
     assert "finding_observations" in sql
     assert "ticket_links.canonical_finding_id" in sql

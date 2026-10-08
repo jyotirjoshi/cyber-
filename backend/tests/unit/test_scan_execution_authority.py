@@ -16,7 +16,8 @@ from app.services.approval import granted_approval
 @pytest.mark.asyncio
 async def test_latest_rejected_decision_revokes_older_grant() -> None:
     rejected = SimpleNamespace(
-        decision=ApprovalDecision.REJECTED.value, resolved_by_id=uuid.uuid4(),
+        decision=ApprovalDecision.REJECTED.value,
+        resolved_by_id=uuid.uuid4(),
         is_granted=False,
     )
 
@@ -33,7 +34,8 @@ async def test_latest_rejected_decision_revokes_older_grant() -> None:
 @pytest.mark.asyncio
 async def test_unresolved_latest_approval_does_not_authorize() -> None:
     pending = SimpleNamespace(
-        decision=ApprovalDecision.PENDING.value, resolved_by_id=None,
+        decision=ApprovalDecision.PENDING.value,
+        resolved_by_id=None,
         is_granted=False,
     )
 
@@ -48,7 +50,8 @@ async def test_unresolved_latest_approval_does_not_authorize() -> None:
 async def test_latest_resolved_grant_still_authorizes() -> None:
     granted = SimpleNamespace(
         decision=ApprovalDecision.APPROVED.value,
-        resolved_by_id=uuid.uuid4(), is_granted=True,
+        resolved_by_id=uuid.uuid4(),
+        is_granted=True,
     )
 
     class Session:
@@ -64,16 +67,20 @@ async def test_authority_revoked_after_enqueue_prevents_container_start(monkeypa
 
     org_id, assessment_id, run_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     state = {
-        "organization_id": str(org_id), "assessment_id": str(assessment_id),
+        "organization_id": str(org_id),
+        "assessment_id": str(assessment_id),
         "run_id": str(run_id),
     }
     assessment = SimpleNamespace(
-        id=assessment_id, organization_id=org_id,
+        id=assessment_id,
+        organization_id=org_id,
         status_enum=AssessmentStatus.SCANNING,
     )
     job = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=org_id,
-        status=JobStatus.QUEUED.value, targets=["example.com"],
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        status=JobStatus.QUEUED.value,
+        targets=["example.com"],
     )
 
     class Session:
@@ -115,8 +122,10 @@ async def test_authority_revoked_after_enqueue_prevents_container_start(monkeypa
     monkeypatch.setattr(scan.audit_service, "record", record)
 
     status, duration = await _enqueue_and_execute(
-        SimpleNamespace(settings=SimpleNamespace()), state,
-        ScannerName.NMAP, ["example.com"],
+        SimpleNamespace(settings=SimpleNamespace()),
+        state,
+        ScannerName.NMAP,
+        ["example.com"],
     )
     assert (status, duration) == (JobStatus.CANCELLED.value, None)
     assert job.status == JobStatus.CANCELLED.value
@@ -130,16 +139,20 @@ async def test_current_grant_starts_one_scanner_job(monkeypatch) -> None:
 
     org_id, assessment_id, run_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     state = {
-        "organization_id": str(org_id), "assessment_id": str(assessment_id),
+        "organization_id": str(org_id),
+        "assessment_id": str(assessment_id),
         "run_id": str(run_id),
     }
     assessment = SimpleNamespace(
-        id=assessment_id, organization_id=org_id,
+        id=assessment_id,
+        organization_id=org_id,
         status_enum=AssessmentStatus.SCANNING,
     )
     job = SimpleNamespace(
-        id=uuid.uuid4(), organization_id=org_id,
-        status=JobStatus.QUEUED.value, targets=["example.com"],
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        status=JobStatus.QUEUED.value,
+        targets=["example.com"],
     )
     executed = []
 
@@ -178,7 +191,9 @@ async def test_current_grant_starts_one_scanner_job(monkeypatch) -> None:
 
     status, duration = await _enqueue_and_execute(
         SimpleNamespace(settings=SimpleNamespace(), runner=object(), storage=object()),
-        state, ScannerName.NMAP, ["example.com"],
+        state,
+        ScannerName.NMAP,
+        ["example.com"],
     )
     assert (status, duration) == (JobStatus.COMPLETED.value, 2_000)
     assert executed == [job.id]
