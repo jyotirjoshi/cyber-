@@ -14,5 +14,5 @@ it("loads a bounded asset-change page through the authenticated API client", asy
   const page = await api.assets.changes({ limit: 20, offset: 0 });
 
   expect(page.total).toBe(0);
-  expect(urls).toEqual(["http://localhost:8000/api/v1/assets/changes?limit=20&offset=0"]);
+  expect(urls).toEqual(["/api/v1/assets/changes?limit=20&offset=0"]);
 });

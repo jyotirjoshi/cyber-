@@ -100,12 +100,28 @@ import type {
 
 const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, "");
 
-const API_BASE = stripTrailingSlash(
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000",
-);
-const WS_BASE = stripTrailingSlash(
-  process.env.NEXT_PUBLIC_WS_BASE_URL ?? "ws://localhost:8000",
-);
+type LocationLike = Pick<Location, "protocol" | "host">;
+
+/** Empty in production means Firebase Hosting's current origin. */
+export function apiOrigin(
+  configured = process.env.NEXT_PUBLIC_API_BASE_URL ??
+    (process.env.NODE_ENV === "development" ? "http://localhost:8000" : ""),
+): string {
+  return stripTrailingSlash(configured);
+}
+
+/** Derive WS/WSS from the browser origin unless an explicit development endpoint is set. */
+export function websocketOrigin(
+  locationLike: LocationLike = globalThis.location,
+  configured = process.env.NEXT_PUBLIC_WS_BASE_URL ??
+    (process.env.NODE_ENV === "development" ? "ws://localhost:8000" : ""),
+): string {
+  const override = stripTrailingSlash(configured);
+  if (override) return override;
+  return `${locationLike.protocol === "https:" ? "wss" : "ws"}://${locationLike.host}`;
+}
+
+const API_BASE = apiOrigin();
 
 const API_PREFIX = "/api/v1";
 
@@ -619,5 +635,5 @@ export const api = {
 export function agentSocketUrl(sessionId: string, afterSeq?: number): string {
   const suffix =
     afterSeq !== undefined && afterSeq > 0 ? `?after_seq=${afterSeq}` : "";
-  return `${WS_BASE}/ws/agent/${sessionId}${suffix}`;
+  return `${websocketOrigin()}/ws/agent/${sessionId}${suffix}`;
 }

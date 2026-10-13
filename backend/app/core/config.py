@@ -752,6 +752,14 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
             fatal.append("CYNUX_ALLOWED_HOSTS must not contain '*' in production.")
         if not settings.public_base_url.startswith("https://"):
             fatal.append("CYNUX_PUBLIC_BASE_URL must be https:// in production (SEC-001).")
+        if (
+            role == "worker"
+            and settings.storage.endpoint_url
+            and not settings.storage.endpoint_url.startswith("https://")
+        ):
+            fatal.append(
+                "CYNUX_STORAGE__ENDPOINT_URL must be https:// for production workers."
+            )
         if not settings.defectdojo.verify_tls:
             fatal.append("CYNUX_DEFECTDOJO__VERIFY_TLS must be true in production.")
         if not settings.langsmith.enabled:
