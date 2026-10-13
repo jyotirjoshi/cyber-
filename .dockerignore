@@ -38,3 +38,8 @@ docs/
 !backend/README.md
 install.cmd
 .claude/
+.superpowers/
+infra/gcp/.deployment.env
+infra/gcp/.last-deployment.json
+infra/gcp/terraform/.terraform/
+infra/gcp/terraform/*.tfstate*

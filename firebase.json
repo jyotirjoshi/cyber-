@@ -1,0 +1,81 @@
+{
+  "hosting": {
+    "public": "infra/firebase-public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "/_next/static/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=31536000,immutable"
+          }
+        ]
+      },
+      {
+        "source": "/api/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "private,no-store,max-age=0"
+          }
+        ]
+      },
+      {
+        "source": "/ws/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "private,no-store,max-age=0"
+          }
+        ]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "cynux-api",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      },
+      {
+        "source": "/ws/**",
+        "run": {
+          "serviceId": "cynux-api",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      },
+      {
+        "source": "/docs",
+        "run": {
+          "serviceId": "cynux-api",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      },
+      {
+        "source": "/openapi.json",
+        "run": {
+          "serviceId": "cynux-api",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      },
+      {
+        "source": "**",
+        "run": {
+          "serviceId": "cynux-web",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      }
+    ]
+  }
+}

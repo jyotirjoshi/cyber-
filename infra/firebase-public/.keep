@@ -1,0 +1,1 @@
+Firebase Hosting routes all requests to Cloud Run; this directory intentionally has no static payload.
