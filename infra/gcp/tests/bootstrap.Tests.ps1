@@ -51,4 +51,13 @@ Describe "Cynux GCP bootstrap" {
         $output | Should Not Match "PRIVATE KEY"
         $output | Should Not Match "api[_-]?key="
     }
+
+    It "writes the resolved Firebase alias before invoking Firebase CLI" {
+        $source = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "bootstrap.ps1")
+        $aliasWrite = $source.IndexOf('Set-FirebaseProjectAlias -Path $FirebaseRc -ResolvedProjectId $resolved')
+        $firebaseLookup = $source.IndexOf('$firebaseProjects = (Invoke-Firebase')
+
+        $aliasWrite | Should BeGreaterThan -1
+        $firebaseLookup | Should BeGreaterThan $aliasWrite
+    }
 }

@@ -185,6 +185,9 @@ function Invoke-CynuxBootstrap {
     )
     $null = Invoke-Gcloud -Arguments (@("services", "enable", "--project=$resolved") + $applicationApis)
 
+    # Replace the repository placeholder before any Firebase CLI invocation;
+    # Firebase validates .firebaserc even for account/project discovery commands.
+    Set-FirebaseProjectAlias -Path $FirebaseRc -ResolvedProjectId $resolved
     $firebaseProjects = (Invoke-Firebase -Arguments @("projects:list", "--json", "--account", $Account) | Out-String)
     if ($firebaseProjects -notmatch ('"projectId"\s*:\s*"' + [regex]::Escape($resolved) + '"')) {
         $null = Invoke-Firebase -Arguments @("projects:addfirebase", $resolved, "--account", $Account, "--non-interactive")
@@ -208,7 +211,6 @@ function Invoke-CynuxBootstrap {
         "CYNUX_GCP_ZONE=$Zone",
         "CYNUX_GCP_TERRAFORM_STATE_BUCKET=$stateBucket"
     ) | Set-Content -LiteralPath $DeploymentFile -Encoding utf8
-    Set-FirebaseProjectAlias -Path $FirebaseRc -ResolvedProjectId $resolved
 
     Write-Host "Cynux cloud bootstrap complete for project $resolved."
     return $resolved
