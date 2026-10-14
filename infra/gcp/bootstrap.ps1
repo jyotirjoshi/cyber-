@@ -105,6 +105,22 @@ function Set-FirebaseProjectAlias {
     $document | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8
 }
 
+function Write-DeploymentConfig {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ProjectId,
+        [Parameter(Mandatory)][string]$Region,
+        [Parameter(Mandatory)][string]$Zone,
+        [Parameter(Mandatory)][string]$StateBucket
+    )
+    @(
+        "CYNUX_GCP_PROJECT_ID=$ProjectId",
+        "CYNUX_GCP_REGION=$Region",
+        "CYNUX_GCP_ZONE=$Zone",
+        "CYNUX_GCP_TERRAFORM_STATE_BUCKET=$StateBucket"
+    ) | Set-Content -LiteralPath $Path -Encoding utf8
+}
+
 function Invoke-CynuxBootstrap {
     [CmdletBinding()]
     param(
@@ -144,11 +160,15 @@ function Invoke-CynuxBootstrap {
     $stages.Add("terraform-state-create")
     if ($DryRun) { return $stages.ToArray() }
 
+    $stateBucket = "$resolved-tfstate"
     if (-not (Test-GcloudProjectExists -Candidate $resolved)) {
         $null = Invoke-Gcloud -Arguments @(
             "projects", "create", $resolved, "--name=Cynux Security Production", "--labels=application=cynux,environment=production"
         )
     }
+    # Record ownership immediately so an interrupted first run can safely resume
+    # without adopting an unrelated pre-existing project.
+    Write-DeploymentConfig -Path $DeploymentFile -ProjectId $resolved -Region $Region -Zone $Zone -StateBucket $stateBucket
     $null = Invoke-Gcloud -Arguments @("billing", "projects", "link", $resolved, "--billing-account=$BillingAccountId")
     $null = Invoke-Gcloud -Arguments @("config", "set", "project", $resolved)
 
@@ -193,7 +213,6 @@ function Invoke-CynuxBootstrap {
         $null = Invoke-Firebase -Arguments @("projects:addfirebase", $resolved, "--account", $Account, "--non-interactive")
     }
 
-    $stateBucket = "$resolved-tfstate"
     try {
         $null = Invoke-Gcloud -Arguments @("storage", "buckets", "describe", "gs://$stateBucket", "--project=$resolved")
     }
@@ -204,13 +223,6 @@ function Invoke-CynuxBootstrap {
         )
         $null = Invoke-Gcloud -Arguments @("storage", "buckets", "update", "gs://$stateBucket", "--versioning")
     }
-
-    @(
-        "CYNUX_GCP_PROJECT_ID=$resolved",
-        "CYNUX_GCP_REGION=$Region",
-        "CYNUX_GCP_ZONE=$Zone",
-        "CYNUX_GCP_TERRAFORM_STATE_BUCKET=$stateBucket"
-    ) | Set-Content -LiteralPath $DeploymentFile -Encoding utf8
 
     Write-Host "Cynux cloud bootstrap complete for project $resolved."
     return $resolved

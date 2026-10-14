@@ -60,4 +60,13 @@ Describe "Cynux GCP bootstrap" {
         $aliasWrite | Should BeGreaterThan -1
         $firebaseLookup | Should BeGreaterThan $aliasWrite
     }
+
+    It "checkpoints the project before linking billing so interrupted bootstraps resume safely" {
+        $source = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "bootstrap.ps1")
+        $checkpoint = $source.IndexOf('Write-DeploymentConfig -Path $DeploymentFile')
+        $billingLink = $source.IndexOf('"billing", "projects", "link"')
+
+        $checkpoint | Should BeGreaterThan -1
+        $billingLink | Should BeGreaterThan $checkpoint
+    }
 }
