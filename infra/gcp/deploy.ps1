@@ -87,7 +87,8 @@ function Write-DeploymentRecord {
 function Invoke-ReleasePipeline {
     param([Parameter(Mandatory)][scriptblock]$RunStage)
     foreach ($stage in @(
-        "preflight", "billing-budget", "terraform-plan", "apply-approval", "build-push",
+        "preflight", "billing-budget", "terraform-plan", "apply-approval",
+        "artifact-foundation", "terraform-replan", "build-push",
         "terraform-apply", "private-host-bootstrap", "secret-check", "migration", "cloud-run-readiness",
         "firebase-deploy", "smoke-tests"
     )) {
@@ -167,6 +168,24 @@ function Invoke-CynuxDeploy {
             }
             "apply-approval" {
                 if (-not $ApproveApply) { throw "Terraform plan is ready. Re-run with -ApproveApply to create or update paid resources." }
+            }
+            "artifact-foundation" {
+                # Cloud Build must push the release images before Cloud Run can
+                # consume them. Apply only the repository, then re-plan so the
+                # final plan is based on the updated remote state.
+                $null = Invoke-Checked $terraform @(
+                    "-chdir=$terraformDir", "apply", "-auto-approve",
+                    "-target=google_artifact_registry_repository.cynux",
+                    "-var=project_id=$project", "-var=region=$region",
+                    "-var=zone=$zone", "-var=image_tag=$imageTag"
+                )
+            }
+            "terraform-replan" {
+                $null = Invoke-Checked $terraform @(
+                    "-chdir=$terraformDir", "plan", "-out=$planFile",
+                    "-var=project_id=$project", "-var=region=$region",
+                    "-var=zone=$zone", "-var=image_tag=$imageTag"
+                )
             }
             "terraform-apply" {
                 $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "apply", "-auto-approve", $planFile)

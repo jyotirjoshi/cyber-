@@ -37,10 +37,16 @@ Describe "Cynux production release orchestration" {
         Invoke-ReleasePipeline -RunStage { param($Stage) $seen.Add($Stage) | Out-Null }
 
         ($seen -join ",") | Should Be (
-            "preflight,billing-budget,terraform-plan,apply-approval,build-push," +
+            "preflight,billing-budget,terraform-plan,apply-approval,artifact-foundation,terraform-replan,build-push," +
             "terraform-apply,private-host-bootstrap,secret-check,migration,cloud-run-readiness," +
             "firebase-deploy,smoke-tests"
         )
+    }
+
+    It "creates only the image repository before the build and then replans" {
+        $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
+        $deploy | Should Match '-target=google_artifact_registry_repository\.cynux'
+        $deploy | Should Match '"terraform-replan"'
     }
 
     It "uses the stable account-currency budget guardrail name" {
