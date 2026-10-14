@@ -117,7 +117,7 @@ resource "google_compute_instance" "defectdojo" {
   project                   = var.project_id
   zone                      = var.zone
   machine_type              = "e2-standard-2"
-  desired_status            = "TERMINATED"
+  desired_status            = "RUNNING"
   allow_stopping_for_update = true
   deletion_protection       = true
   can_ip_forward            = false
@@ -182,7 +182,7 @@ resource "google_compute_instance" "scanner" {
   project                   = var.project_id
   zone                      = var.zone
   machine_type              = "e2-standard-4"
-  desired_status            = "TERMINATED"
+  desired_status            = "RUNNING"
   allow_stopping_for_update = true
   deletion_protection       = true
   can_ip_forward            = false
@@ -193,7 +193,7 @@ resource "google_compute_instance" "scanner" {
     auto_delete = false
     initialize_params {
       image  = local.ubuntu_image
-      size   = 40
+      size   = var.scanner_boot_disk_size_gb
       type   = "pd-balanced"
       labels = local.common_labels
     }

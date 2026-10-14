@@ -5,12 +5,16 @@ param(
     [switch]$SkipBuild,
     [string]$ExistingImageTag,
     [string]$FirebaseAccount,
-    [string]$DeploymentFile = (Join-Path $PSScriptRoot ".deployment.env"),
-    [string]$LastDeploymentFile = (Join-Path $PSScriptRoot ".last-deployment.json")
+    [string]$MigrationImageTag = "",
+    [switch]$StopPrivateHostsAfterDeploy,
+    [string]$DeploymentFile = "",
+    [string]$LastDeploymentFile = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if (-not $DeploymentFile) { $DeploymentFile = Join-Path $PSScriptRoot ".deployment.env" }
+if (-not $LastDeploymentFile) { $LastDeploymentFile = Join-Path $PSScriptRoot ".last-deployment.json" }
 . (Join-Path $PSScriptRoot "tooling.ps1")
 
 function Invoke-Checked {
@@ -128,9 +132,13 @@ function Invoke-CynuxDeploy {
         [switch]$SkipBuild,
         [string]$ExistingImageTag,
         [string]$FirebaseAccount,
-        [string]$DeploymentFile = (Join-Path $PSScriptRoot ".deployment.env"),
-        [string]$LastDeploymentFile = (Join-Path $PSScriptRoot ".last-deployment.json")
+        [string]$MigrationImageTag = "",
+        [switch]$StopPrivateHostsAfterDeploy,
+        [string]$DeploymentFile = "",
+        [string]$LastDeploymentFile = ""
     )
+    if (-not $DeploymentFile) { $DeploymentFile = Join-Path $PSScriptRoot ".deployment.env" }
+    if (-not $LastDeploymentFile) { $LastDeploymentFile = Join-Path $PSScriptRoot ".last-deployment.json" }
 
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     Initialize-CynuxGcloudEnvironment -RepoRoot $repoRoot
@@ -193,7 +201,7 @@ function Invoke-CynuxDeploy {
             }
             "terraform-plan" {
                 $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "init", "-reconfigure", "-backend-config=bucket=$stateBucket", "-backend-config=prefix=cynux/production")
-                $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "plan", "-out=$planFile", "-var=project_id=$project", "-var=region=$region", "-var=zone=$zone", "-var=image_tag=$imageTag")
+                $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "plan", "-out=$planFile", "-var=project_id=$project", "-var=region=$region", "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag")
             }
             "apply-approval" {
                 if (-not $ApproveApply) { throw "Terraform plan is ready. Re-run with -ApproveApply to create or update paid resources." }
@@ -206,14 +214,14 @@ function Invoke-CynuxDeploy {
                     "-chdir=$terraformDir", "apply", "-auto-approve",
                     "-target=google_artifact_registry_repository.cynux",
                     "-var=project_id=$project", "-var=region=$region",
-                    "-var=zone=$zone", "-var=image_tag=$imageTag"
+                    "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag"
                 )
             }
             "terraform-replan" {
                 $null = Invoke-Checked $terraform @(
                     "-chdir=$terraformDir", "plan", "-out=$planFile",
                     "-var=project_id=$project", "-var=region=$region",
-                    "-var=zone=$zone", "-var=image_tag=$imageTag"
+                    "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag"
                 )
             }
             "terraform-apply" {
@@ -224,8 +232,12 @@ function Invoke-CynuxDeploy {
                 $releaseState.PrivateHostsStarted = $true
                 $null = Invoke-Checked $gcloud @("compute", "instances", "start", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--quiet")
                 $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
+                # Recover interrupted first-boot setup only when the managed
+                # service is absent. Repeated releases leave healthy hosts alone.
+                $null = Invoke-Checked python @((Join-Path $repoRoot ".tools/gcloud/google-cloud-sdk/lib/gcloud.py"), "compute", "ssh", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo test -f /etc/systemd/system/cynux-defectdojo.service || sudo /usr/local/sbin/cynux-defectdojo-bootstrap")
                 $null = Invoke-Checked $gcloud @("compute", "instances", "start", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--quiet")
                 $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
+                $null = Invoke-Checked python @((Join-Path $repoRoot ".tools/gcloud/google-cloud-sdk/lib/gcloud.py"), "compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo test -f /etc/systemd/system/cynux-worker.service || sudo /usr/local/sbin/cynux-worker-bootstrap")
             }
             "secret-check" {
                 foreach ($secretId in $releaseState.TerraformOutputs.secret_resource_ids.value.PSObject.Properties.Value) {
@@ -253,7 +265,7 @@ function Invoke-CynuxDeploy {
     }
     }
     finally {
-        if ($releaseState.PrivateHostsStarted) {
+        if ($StopPrivateHostsAfterDeploy -and $releaseState.PrivateHostsStarted) {
             foreach ($vm in @("cynux-scanner-01", "cynux-defectdojo-01")) {
                 try {
                     $null = Invoke-Checked $gcloud @("compute", "instances", "stop", $vm, "--project=$project", "--zone=$zone", "--quiet")
@@ -283,5 +295,7 @@ function Invoke-CynuxDeploy {
 if ($MyInvocation.InvocationName -ne ".") {
     Invoke-CynuxDeploy -ApproveApply:$ApproveApply -AllowDirtySnapshot:$AllowDirtySnapshot `
         -SkipBuild:$SkipBuild -ExistingImageTag $ExistingImageTag -FirebaseAccount $FirebaseAccount `
+        -MigrationImageTag $MigrationImageTag `
+        -StopPrivateHostsAfterDeploy:$StopPrivateHostsAfterDeploy `
         -DeploymentFile $DeploymentFile -LastDeploymentFile $LastDeploymentFile
 }

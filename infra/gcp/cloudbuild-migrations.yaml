@@ -1,0 +1,13 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=infra/gcp/migration-repair.Dockerfile
+      - --build-arg=BASE_IMAGE=${_BASE_IMAGE}
+      - --tag=asia-south1-docker.pkg.dev/$PROJECT_ID/cynux/api:${_IMAGE_TAG}
+      - .
+images:
+  - asia-south1-docker.pkg.dev/$PROJECT_ID/cynux/api:${_IMAGE_TAG}
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 600s

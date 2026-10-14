@@ -25,7 +25,7 @@ resource "google_cloud_run_v2_job" "migrate" {
 
       containers {
         name    = "migrate"
-        image   = local.backend_image
+        image   = var.migration_image_tag == "" ? local.backend_image : "${var.region}-docker.pkg.dev/${var.project_id}/cynux/api:${var.migration_image_tag}"
         command = ["python"]
         args    = ["-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
 

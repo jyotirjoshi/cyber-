@@ -116,16 +116,23 @@ Describe "Cynux production release orchestration" {
         $content | Should Match "cynux-test.web.app"
     }
 
-    It "verifies connected transports and always contains private-host cleanup" {
+    It "verifies connected transports" {
         $verify = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "verify.ps1")
-        $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
 
         $verify | Should Match "ClientWebSocket"
-        $verify | Should Match "gcloud storage cp"
+        $verify | Should Match 'storage", "cp"'
+        $verify | Should Match 'wss://cynux-api-\$projectNumber\.\$region\.run\.app'
         $verify | Should Match "systemctl is-active cynux-worker"
         $verify | Should Match 'networkInterfaces\[0\].networkIP'
-        $deploy | Should Match "finally"
-        $deploy | Should Match "compute.*instances.*stop"
+    }
+
+    It "keeps private hosts running by default and makes cleanup explicit" {
+        $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
+        $compute = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "terraform\compute.tf")
+
+        $deploy | Should Match '\[switch\]\$StopPrivateHostsAfterDeploy'
+        $deploy | Should Match 'if \(\$StopPrivateHostsAfterDeploy -and \$releaseState\.PrivateHostsStarted\)'
+        ([regex]::Matches($compute, 'desired_status\s*=\s*"RUNNING"')).Count | Should Be 2
     }
 
     It "keeps local deployment state and verification artifacts out of git" {

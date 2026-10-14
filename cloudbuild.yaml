@@ -17,7 +17,7 @@ steps:
       - build
       - --file=docker/frontend.Dockerfile
       - --build-arg=NEXT_PUBLIC_API_BASE_URL=
-      - --build-arg=NEXT_PUBLIC_WS_BASE_URL=
+      - --build-arg=NEXT_PUBLIC_WS_BASE_URL=wss://cynux-api-$PROJECT_NUMBER.asia-south1.run.app
       - --tag=asia-south1-docker.pkg.dev/$PROJECT_ID/cynux/frontend:${_IMAGE_TAG}
       - .
 

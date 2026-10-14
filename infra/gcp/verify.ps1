@@ -1,12 +1,29 @@
 [CmdletBinding()]
 param(
-    [string]$DeploymentFile = (Join-Path $PSScriptRoot ".deployment.env"),
-    [string]$OutputFile = (Join-Path $PSScriptRoot ".verification.json")
+    [string]$DeploymentFile = "",
+    [string]$OutputFile = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if (-not $DeploymentFile) { $DeploymentFile = Join-Path $PSScriptRoot ".deployment.env" }
+if (-not $OutputFile) { $OutputFile = Join-Path $PSScriptRoot ".verification.json" }
 . (Join-Path $PSScriptRoot "tooling.ps1")
+
+function Invoke-VerificationCommand {
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$Arguments = @())
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object { $_.ToString() })
+        $commandExitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousErrorPreference }
+    if ($commandExitCode -ne 0) {
+        throw "Command failed ($commandExitCode): $FilePath $($Arguments -join ' ')`n$($output -join [Environment]::NewLine)"
+    }
+    return @($output)
+}
 
 function Invoke-CynuxVerification {
     param([Parameter(Mandatory)][string]$DeploymentFile, [Parameter(Mandatory)][string]$OutputFile)
@@ -40,7 +57,7 @@ function Invoke-CynuxVerification {
         if (-not $response.Headers["strict-transport-security"]) { throw "HSTS header missing" }
     }
     Add-Check "api-health" {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "$base/healthz" -TimeoutSec 60
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "$base/health" -TimeoutSec 60
         if ($response.StatusCode -ne 200 -or $response.Headers["content-type"] -notmatch "json") { throw "API liveness response unavailable" }
     }
     Add-Check "api-data-connectivity" {
@@ -62,7 +79,9 @@ function Invoke-CynuxVerification {
         $socket = [System.Net.WebSockets.ClientWebSocket]::new()
         $deadline = [Threading.CancellationTokenSource]::new(20000)
         try {
-            $uri = [Uri]("wss://$project.web.app/ws/agent/00000000-0000-0000-0000-000000000000")
+            $projectNumber = (Invoke-VerificationCommand $gcloud @("projects", "describe", $project, "--format=value(projectNumber)") | Select-Object -First 1).Trim()
+            if ($projectNumber -notmatch '^[0-9]+$') { throw "project number lookup failed" }
+            $uri = [Uri]("wss://cynux-api-$projectNumber.$region.run.app/ws/agent/00000000-0000-0000-0000-000000000000")
             $socket.ConnectAsync($uri, $deadline.Token).GetAwaiter().GetResult()
             if ($socket.State -ne [System.Net.WebSockets.WebSocketState]::Open) { throw "WebSocket did not upgrade" }
             $payload = [Text.Encoding]::UTF8.GetBytes('{"type":"auth","token":"verification-invalid"}')
@@ -99,13 +118,12 @@ function Invoke-CynuxVerification {
         try {
             $expected = [guid]::NewGuid().ToString("N")
             Set-Content -LiteralPath $temporary -Value $expected -NoNewline
-            $null = & $gcloud storage cp $temporary "gs://$bucket/$object" --quiet
-            if ($LASTEXITCODE -ne 0) { throw "artifact upload failed" }
-            $actual = (& $gcloud storage cat "gs://$bucket/$object" | Out-String).Trim()
-            if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) { throw "artifact roundtrip mismatch" }
+            $null = Invoke-VerificationCommand $gcloud @("storage", "cp", $temporary, "gs://$bucket/$object", "--quiet")
+            $actual = (Invoke-VerificationCommand $gcloud @("storage", "cat", "gs://$bucket/$object") | Out-String).Trim()
+            if ($actual -ne $expected) { throw "artifact roundtrip mismatch" }
         }
         finally {
-            $null = & $gcloud storage rm "gs://$bucket/$object" --quiet 2>$null
+            $null = Invoke-VerificationCommand $gcloud @("storage", "rm", "gs://$bucket/$object", "--quiet")
             Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         }
     }

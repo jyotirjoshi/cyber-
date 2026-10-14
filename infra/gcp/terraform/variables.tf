@@ -41,6 +41,16 @@ variable "image_tag" {
   }
 }
 
+variable "migration_image_tag" {
+  description = "Optional immutable migration-only repair image; empty uses the application release."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.migration_image_tag == "" || (can(regex("^[a-zA-Z0-9][a-zA-Z0-9._-]{6,127}$", var.migration_image_tag)) && lower(var.migration_image_tag) != "latest")
+    error_message = "Migration repair tags must be immutable and cannot be latest."
+  }
+}
+
 variable "network_cidr" {
   description = "RFC1918 subnet used by private application resources."
   type        = string
@@ -66,6 +76,17 @@ variable "sql_disk_size_gb" {
   validation {
     condition     = var.sql_disk_size_gb >= 10
     error_message = "Cloud SQL requires at least 10 GiB."
+  }
+}
+
+variable "scanner_boot_disk_size_gb" {
+  description = "Scanner worker boot disk capacity for pinned tool images and transient assessment artifacts."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.scanner_boot_disk_size_gb >= 80
+    error_message = "The scanner worker needs at least 80 GiB for the production toolchain."
   }
 }
 

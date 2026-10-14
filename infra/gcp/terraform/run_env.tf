@@ -22,7 +22,7 @@ locals {
     CYNUX_EXPOSE_API_DOCS           = "true"
     CYNUX_PUBLIC_BASE_URL           = local.firebase_url
     CYNUX_CORS_ORIGINS              = local.firebase_url
-    CYNUX_ALLOWED_HOSTS             = "${var.project_id}.web.app,${var.project_id}.firebaseapp.com,cynux-api-${data.google_project.deployment.number}.${var.region}.run.app"
+    CYNUX_ALLOWED_HOSTS             = "${var.project_id}.web.app,${var.project_id}.firebaseapp.com,cynux-api-${data.google_project.deployment.number}.${var.region}.run.app,*.a.run.app,*.${var.region}.run.app"
     CYNUX_STORAGE__ENDPOINT_URL     = "https://storage.googleapis.com"
     CYNUX_STORAGE__REGION           = var.region
     CYNUX_STORAGE__BUCKET           = google_storage_bucket.artifacts.name

@@ -17,9 +17,8 @@ def test_firebase_rewrites_are_ordered_before_frontend_catch_all() -> None:
 
     assert [rule["source"] for rule in rewrites] == [
         "/readyz",
-        "/healthz",
+        "/health",
         "/api/**",
-        "/ws/**",
         "/docs",
         "/openapi.json",
         "**",
@@ -30,11 +29,19 @@ def test_firebase_rewrites_are_ordered_before_frontend_catch_all() -> None:
         "cynux-api",
         "cynux-api",
         "cynux-api",
-        "cynux-api",
         "cynux-web",
     ]
     assert all(rule["run"]["region"] == "asia-south1" for rule in rewrites)
-    assert all(rule["run"]["pinTag"] is True for rule in rewrites)
+    assert all("pinTag" not in rule["run"] for rule in rewrites)
+
+
+def test_cloud_run_allows_firebase_revision_tag_hosts() -> None:
+    run_env = (ROOT / "infra" / "gcp" / "terraform" / "run_env.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert "*.a.run.app" in run_env
+    assert "*.${var.region}.run.app" in run_env
 
 
 def test_firebase_alias_cannot_accidentally_target_an_existing_project() -> None:
@@ -53,8 +60,30 @@ def test_cloud_build_produces_immutable_api_and_frontend_images() -> None:
     ]
     rendered = (ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
     assert "NEXT_PUBLIC_API_BASE_URL=" in rendered
-    assert "NEXT_PUBLIC_WS_BASE_URL=" in rendered
+    assert (
+        "NEXT_PUBLIC_WS_BASE_URL=wss://cynux-api-$PROJECT_NUMBER.asia-south1.run.app"
+        in rendered
+    )
     assert ".env" not in rendered
+
+
+def test_frontend_only_build_preserves_the_production_websocket_route() -> None:
+    config = yaml.safe_load(
+        (ROOT / "infra" / "gcp" / "cloudbuild-frontend.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert config["images"] == [
+        "asia-south1-docker.pkg.dev/$PROJECT_ID/cynux/frontend:${_IMAGE_TAG}"
+    ]
+    rendered = (ROOT / "infra" / "gcp" / "cloudbuild-frontend.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "NEXT_PUBLIC_WS_BASE_URL=wss://cynux-api-$PROJECT_NUMBER.asia-south1.run.app"
+        in rendered
+    )
 
 
 def test_container_context_excludes_secrets_and_frontend_defaults_to_cloud_run_port() -> None:
