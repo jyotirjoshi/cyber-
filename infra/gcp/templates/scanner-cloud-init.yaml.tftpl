@@ -1,0 +1,111 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - jq
+
+write_files:
+  - path: /usr/local/sbin/cynux-worker-bootstrap
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      PROJECT_ID='${project_id}'
+      REGION='${region}'
+      BACKEND_IMAGE='${backend_image}'
+      METADATA='http://metadata.google.internal/computeMetadata/v1'
+      HEADER='Metadata-Flavor: Google'
+
+      token() {
+        curl -fsS -H "$HEADER" "$METADATA/instance/service-accounts/default/token" | jq -r .access_token
+      }
+      secret() {
+        curl -fsS -H "Authorization: Bearer $(token)" \
+          "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$1/versions/latest:access" \
+          | jq -r .payload.data | base64 -d
+      }
+
+      install -d -m 0700 /etc/cynux
+      install -d -o 1000 -g 1000 -m 0750 /var/lib/cynux/artifacts
+      ENV_FILE=/etc/cynux/worker.env
+      umask 077
+      {
+        printf 'CYNUX_ENVIRONMENT=production\n'
+        printf 'CYNUX_DEBUG=false\n'
+        printf 'CYNUX_PUBLIC_BASE_URL=https://${project_id}.web.app\n'
+        printf 'CYNUX_CORS_ORIGINS=https://${project_id}.web.app\n'
+        printf 'CYNUX_ALLOWED_HOSTS=${project_id}.web.app,${project_id}.firebaseapp.com\n'
+        printf 'CYNUX_DB__HOST=${database_host}\n'
+        printf 'CYNUX_DB__PORT=5432\n'
+        printf 'CYNUX_DB__NAME=${database_name}\n'
+        printf 'CYNUX_DB__USER=${database_user}\n'
+        printf 'CYNUX_DB__PASSWORD=%s\n' "$(secret cynux-database-password)"
+        printf 'CYNUX_REDIS__URL=%s\n' "$(secret cynux-redis-url)"
+        printf 'CYNUX_SECURITY__JWT_SECRET=%s\n' "$(secret cynux-jwt-secret)"
+        printf 'CYNUX_SECURITY__CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(secret cynux-fernet-key)"
+        printf 'CYNUX_STORAGE__ENDPOINT_URL=https://storage.googleapis.com\n'
+        printf 'CYNUX_STORAGE__REGION=${region}\n'
+        printf 'CYNUX_STORAGE__BUCKET=${artifact_bucket}\n'
+        printf 'CYNUX_STORAGE__ACCESS_KEY_ID=%s\n' "$(secret cynux-gcs-access-key)"
+        printf 'CYNUX_STORAGE__SECRET_ACCESS_KEY=%s\n' "$(secret cynux-gcs-secret-key)"
+        printf 'CYNUX_STORAGE__FORCE_PATH_STYLE=false\n'
+        printf 'CYNUX_DEFECTDOJO__BASE_URL=${defectdojo_private_url}\n'
+        printf 'CYNUX_DEFECTDOJO__API_TOKEN=%s\n' "$(secret ${defectdojo_token_secret})"
+        printf 'CYNUX_DEFECTDOJO__VERIFY_TLS=true\n'
+        printf 'CYNUX_SCANNER__NETWORK=cynux_scanner_net\n'
+        printf 'CYNUX_SCANNER__ARTIFACT_WORKDIR=/var/lib/cynux/artifacts\n'
+      } > "$ENV_FILE"
+      chmod 0600 "$ENV_FILE"
+
+      curl -fsSLo /tmp/add-google-cloud-ops-agent-repo.sh \
+        https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+      bash /tmp/add-google-cloud-ops-agent-repo.sh --also-install
+      rm -f /tmp/add-google-cloud-ops-agent-repo.sh
+
+      systemctl enable --now docker
+      docker network inspect cynux_scanner_net >/dev/null 2>&1 || \
+        docker network create --driver bridge cynux_scanner_net
+
+      ACCESS_TOKEN=$(token)
+      printf '%s' "$ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://$REGION-docker.pkg.dev"
+      docker pull "$BACKEND_IMAGE"
+      docker pull six2dez/reconftw:main
+      docker pull instrumentisto/nmap:7.95
+      docker pull projectdiscovery/nuclei:v3.3.7
+      docker pull zaproxy/zap-stable:2.15.0
+      docker pull aquasec/trivy:0.74.0
+      docker pull semgrep/semgrep:1.159.0
+      docker pull ghcr.io/gitleaks/gitleaks:v8.24.2
+      docker pull ghcr.io/anchore/syft:v1.54.0
+      docker pull prowlercloud/prowler:5.43.0
+
+      cat >/etc/systemd/system/cynux-worker.service <<UNIT
+      [Unit]
+      Description=Cynux isolated assessment worker
+      Wants=network-online.target docker.service
+      After=network-online.target docker.service
+      StartLimitIntervalSec=300
+      StartLimitBurst=5
+
+      [Service]
+      Type=simple
+      Restart=on-failure
+      RestartSec=15
+      ExecStartPre=-/usr/bin/docker rm -f cynux-worker
+      ExecStart=/usr/bin/docker run --name cynux-worker --rm --env-file /etc/cynux/worker.env --network bridge -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/cynux/artifacts:/var/lib/cynux/artifacts $BACKEND_IMAGE python -m app.worker
+      ExecStop=/usr/bin/docker stop -t 30 cynux-worker
+      TimeoutStartSec=180
+      TimeoutStopSec=45
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+      systemctl daemon-reload
+      systemctl enable --now cynux-worker.service
+
+runcmd:
+  - [bash, /usr/local/sbin/cynux-worker-bootstrap]

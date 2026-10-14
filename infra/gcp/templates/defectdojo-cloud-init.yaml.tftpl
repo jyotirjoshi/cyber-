@@ -1,0 +1,123 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - docker-compose-v2
+  - docker.io
+  - jq
+
+write_files:
+  - path: /opt/defectdojo/docker-compose.yml
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: ${compose_b64}
+  - path: /usr/local/sbin/cynux-defectdojo-bootstrap
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      PROJECT_ID='${project_id}'
+      PRIVATE_IP='${private_ip}'
+      TOKEN_SECRET='${api_token_secret}'
+      METADATA='http://metadata.google.internal/computeMetadata/v1'
+      HEADER='Metadata-Flavor: Google'
+
+      token() {
+        curl -fsS -H "$HEADER" "$METADATA/instance/service-accounts/default/token" | jq -r .access_token
+      }
+      secret() {
+        curl -fsS -H "Authorization: Bearer $(token)" \
+          "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$1/versions/latest:access" \
+          | jq -r .payload.data | base64 -d
+      }
+
+      DATA_DEVICE=/dev/disk/by-id/google-defectdojo-data
+      if ! blkid "$DATA_DEVICE" >/dev/null 2>&1; then
+        mkfs.ext4 -F "$DATA_DEVICE"
+      fi
+      install -d -m 0750 /var/lib/defectdojo
+      grep -q 'google-defectdojo-data' /etc/fstab || \
+        echo "$DATA_DEVICE /var/lib/defectdojo ext4 defaults,nofail 0 2" >> /etc/fstab
+      mountpoint -q /var/lib/defectdojo || mount /var/lib/defectdojo
+      install -d -m 0710 /var/lib/defectdojo/docker
+
+      systemctl stop docker || true
+      install -d -m 0755 /etc/docker
+      cat >/etc/docker/daemon.json <<'JSON'
+      {
+        "data-root": "/var/lib/defectdojo/docker",
+        "log-driver": "local",
+        "log-opts": {"max-size": "20m", "max-file": "5"}
+      }
+      JSON
+
+      curl -fsSLo /tmp/add-google-cloud-ops-agent-repo.sh \
+        https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+      bash /tmp/add-google-cloud-ops-agent-repo.sh --also-install
+      rm -f /tmp/add-google-cloud-ops-agent-repo.sh
+
+      install -d -m 0700 /opt/defectdojo
+      ENV_FILE=/opt/defectdojo/.env
+      umask 077
+      {
+        printf 'DD_DATABASE_URL=postgresql://defectdojo:%s@postgres:5432/defectdojo\n' "$(secret cynux-defectdojo-database-password)"
+        printf 'DD_DATABASE_PASSWORD=%s\n' "$(secret cynux-defectdojo-database-password)"
+        printf 'DD_CELERY_BROKER_URL=redis://valkey:6379/0\n'
+        printf 'DD_CACHE_URL=redis://valkey:6379/1\n'
+        printf 'DD_SECRET_KEY=%s\n' "$(secret cynux-defectdojo-secret-key)"
+        printf 'DD_CREDENTIAL_AES_256_KEY=%s\n' "$(secret cynux-defectdojo-credential-key)"
+        printf 'DD_ADMIN_USER=admin\n'
+        printf 'DD_ADMIN_MAIL=admin@cynux.local\n'
+        printf 'DD_ADMIN_PASSWORD=%s\n' "$(secret cynux-defectdojo-admin-password)"
+        printf 'DD_ALLOWED_HOSTS=%s,localhost,127.0.0.1\n' "$PRIVATE_IP"
+        printf 'DD_INITIALIZE=%s\n' "$([ -f /var/lib/defectdojo/.initialized ] && echo false || echo true)"
+        printf 'DD_DATABASE_READINESS_TIMEOUT=120\n'
+      } > "$ENV_FILE"
+      chmod 0600 "$ENV_FILE"
+
+      systemctl enable --now docker
+      cd /opt/defectdojo
+      docker compose pull
+      docker compose up -d
+      timeout 900 bash -c 'until curl -fsS http://${private_ip}:8080/login >/dev/null; do sleep 10; done'
+      touch /var/lib/defectdojo/.initialized
+      sed -i 's/^DD_INITIALIZE=.*/DD_INITIALIZE=false/' "$ENV_FILE"
+
+      API_TOKEN=$(docker compose exec -T uwsgi python manage.py shell -c \
+        "from dojo.models import User; from rest_framework.authtoken.models import Token; print(Token.objects.get_or_create(user=User.objects.get(username='admin'))[0].key)" \
+        | tail -n 1 | tr -d '\r\n')
+      test -n "$API_TOKEN"
+      API_TOKEN_B64=$(printf '%s' "$API_TOKEN" | base64 -w0)
+      jq -n --arg data "$API_TOKEN_B64" '{payload:{data:$data}}' | curl -fsS -X POST \
+        -H "Authorization: Bearer $(token)" \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
+        "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$TOKEN_SECRET:addVersion"
+
+      cat >/etc/systemd/system/cynux-defectdojo.service <<UNIT
+      [Unit]
+      Description=Cynux private DefectDojo stack
+      Wants=network-online.target docker.service
+      After=network-online.target docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/defectdojo
+      ExecStart=/usr/bin/docker compose up -d
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=900
+      TimeoutStopSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+      systemctl daemon-reload
+      systemctl enable cynux-defectdojo.service
+
+runcmd:
+  - [bash, /usr/local/sbin/cynux-defectdojo-bootstrap]

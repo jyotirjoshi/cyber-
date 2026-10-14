@@ -18,6 +18,38 @@ override_resource {
   }
 }
 
+override_resource {
+  target          = google_service_account.worker
+  override_during = plan
+  values = {
+    email = "cynux-worker@cynux-security-test.iam.gserviceaccount.com"
+  }
+}
+
+override_resource {
+  target          = google_service_account.defectdojo
+  override_during = plan
+  values = {
+    email = "cynux-defectdojo@cynux-security-test.iam.gserviceaccount.com"
+  }
+}
+
+override_resource {
+  target          = google_compute_address.defectdojo
+  override_during = plan
+  values = {
+    address = "10.42.0.10"
+  }
+}
+
+override_resource {
+  target          = google_sql_database_instance.cynux
+  override_during = plan
+  values = {
+    private_ip_address = "10.50.0.2"
+  }
+}
+
 run "managed_foundation" {
   command = plan
 
@@ -130,5 +162,52 @@ run "managed_foundation" {
   assert {
     condition     = length(google_cloud_run_v2_service.web.template[0].containers[0].env) == 0
     error_message = "The same-origin frontend must not receive runtime data-plane configuration or secrets."
+  }
+
+  assert {
+    condition     = length(google_compute_instance.scanner.network_interface[0].access_config) == 0 && length(google_compute_instance.defectdojo.network_interface[0].access_config) == 0
+    error_message = "Scanner and DefectDojo hosts must not have public IP addresses."
+  }
+
+  assert {
+    condition     = google_compute_instance.scanner.metadata["enable-oslogin"] == "TRUE" && google_compute_instance.defectdojo.metadata["enable-oslogin"] == "TRUE"
+    error_message = "OS Login must be enabled on both compute hosts."
+  }
+
+  assert {
+    condition = alltrue([
+      google_compute_instance.scanner.shielded_instance_config[0].enable_secure_boot,
+      google_compute_instance.scanner.shielded_instance_config[0].enable_vtpm,
+      google_compute_instance.scanner.shielded_instance_config[0].enable_integrity_monitoring,
+      google_compute_instance.defectdojo.shielded_instance_config[0].enable_secure_boot,
+      google_compute_instance.defectdojo.shielded_instance_config[0].enable_vtpm,
+      google_compute_instance.defectdojo.shielded_instance_config[0].enable_integrity_monitoring,
+    ])
+    error_message = "Secure Boot, vTPM, and integrity monitoring must be enabled."
+  }
+
+  assert {
+    condition     = google_compute_instance.scanner.deletion_protection && google_compute_instance.defectdojo.deletion_protection && !google_compute_instance.scanner.boot_disk[0].auto_delete && !google_compute_instance.defectdojo.boot_disk[0].auto_delete
+    error_message = "Compute hosts and their boot disks must be protected from accidental deletion."
+  }
+
+  assert {
+    condition     = google_compute_instance.scanner.service_account[0].email == "cynux-worker@cynux-security-test.iam.gserviceaccount.com" && google_compute_instance.defectdojo.service_account[0].email == "cynux-defectdojo@cynux-security-test.iam.gserviceaccount.com"
+    error_message = "Scanner and DefectDojo hosts must bind their separate service identities."
+  }
+
+  assert {
+    condition     = google_compute_instance.scanner.desired_status == "TERMINATED" && google_compute_instance.defectdojo.desired_status == "TERMINATED"
+    error_message = "Cost-controlled worker hosts must be provisioned stopped until explicitly needed."
+  }
+
+  assert {
+    condition     = toset(google_compute_firewall.iap_ssh.source_ranges) == toset(["35.235.240.0/20"]) && toset(one(google_compute_firewall.iap_ssh.allow).ports) == toset(["22"]) && toset(google_compute_firewall.private_defectdojo.source_ranges) == toset([var.network_cidr]) && toset(one(google_compute_firewall.private_defectdojo.allow).ports) == toset(["8080"])
+    error_message = "Host ingress must be limited to SSH through IAP and DefectDojo from the private subnet."
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.scanner.metadata["user-data"], "python -m app.worker") && strcontains(google_compute_instance.scanner.metadata["user-data"], "cynux_scanner_net")
+    error_message = "Scanner bootstrap must run the worker on its isolated scanner network."
   }
 }

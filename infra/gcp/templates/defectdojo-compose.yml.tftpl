@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:16.10-alpine
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: defectdojo
+      POSTGRES_USER: defectdojo
+      POSTGRES_PASSWORD: $${DD_DATABASE_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - defectdojo_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U defectdojo -d defectdojo"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  valkey:
+    image: valkey/valkey:9.1.2-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - defectdojo_valkey:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  initializer:
+    image: defectdojo/defectdojo-django:${defectdojo_version}
+    env_file: .env
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "120", "--", "/entrypoint-initializer.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  uwsgi:
+    image: defectdojo/defectdojo-django:${defectdojo_version}
+    restart: unless-stopped
+    env_file: .env
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "120", "--", "/entrypoint-uwsgi.sh"]
+    depends_on:
+      initializer:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    volumes:
+      - defectdojo_media:/app/media
+
+  celerybeat:
+    image: defectdojo/defectdojo-django:${defectdojo_version}
+    restart: unless-stopped
+    env_file: .env
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "120", "--", "/entrypoint-celery-beat.sh"]
+    depends_on:
+      initializer:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+
+  celeryworker:
+    image: defectdojo/defectdojo-django:${defectdojo_version}
+    restart: unless-stopped
+    env_file: .env
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "120", "--", "/entrypoint-celery-worker.sh"]
+    depends_on:
+      initializer:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    volumes:
+      - defectdojo_media:/app/media
+
+  nginx:
+    image: defectdojo/defectdojo-nginx:${defectdojo_version}
+    restart: unless-stopped
+    environment:
+      DD_UWSGI_HOST: uwsgi
+      DD_UWSGI_PORT: 3031
+    depends_on:
+      - uwsgi
+    ports:
+      - "${private_ip}:8080:8080"
+    volumes:
+      - defectdojo_media:/usr/share/nginx/html/media:ro
+
+volumes:
+  defectdojo_postgres:
+  defectdojo_valkey:
+  defectdojo_media:

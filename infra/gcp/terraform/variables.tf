@@ -69,6 +69,17 @@ variable "sql_disk_size_gb" {
   }
 }
 
+variable "defectdojo_version" {
+  description = "Pinned upstream DefectDojo Open Source release tag."
+  type        = string
+  default     = "3.3.300"
+
+  validation {
+    condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.defectdojo_version))
+    error_message = "defectdojo_version must be a pinned semantic release tag."
+  }
+}
+
 variable "labels" {
   description = "Additional labels applied to supported resources."
   type        = map(string)

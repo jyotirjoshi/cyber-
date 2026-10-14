@@ -48,9 +48,10 @@ output "runtime_service_accounts" {
 }
 
 output "secret_resource_ids" {
-  value = {
-    for name, resource in google_secret_manager_secret.cynux : name => resource.id
-  }
+  value = merge(
+    { for name, resource in google_secret_manager_secret.cynux : name => resource.id },
+    { defectdojo-api-token = google_secret_manager_secret.defectdojo_api_token.id },
+  )
 }
 
 output "api_service_uri" {
@@ -63,4 +64,16 @@ output "web_service_uri" {
 
 output "migration_job_name" {
   value = google_cloud_run_v2_job.migrate.name
+}
+
+output "scanner_instance_name" {
+  value = google_compute_instance.scanner.name
+}
+
+output "defectdojo_instance_name" {
+  value = google_compute_instance.defectdojo.name
+}
+
+output "defectdojo_private_ip" {
+  value = google_compute_address.defectdojo.address
 }

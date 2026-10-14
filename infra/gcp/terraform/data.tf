@@ -24,6 +24,17 @@ resource "random_password" "defectdojo_secret" {
   special = false
 }
 
+resource "random_password" "defectdojo_database" {
+  length           = 40
+  special          = true
+  override_special = "-_~"
+}
+
+resource "random_password" "defectdojo_credential" {
+  length  = 32
+  special = false
+}
+
 resource "google_sql_database_instance" "cynux" {
   name                = "cynux-postgres"
   project             = var.project_id
@@ -175,15 +186,17 @@ resource "google_storage_hmac_key" "artifacts" {
 
 locals {
   secret_payloads = {
-    database-url              = "postgresql+asyncpg://cynux:${urlencode(random_password.database.result)}@${google_sql_database_instance.cynux.private_ip_address}:5432/${google_sql_database.cynux.name}"
-    database-password         = random_password.database.result
-    redis-url                 = "rediss://:${urlencode(google_redis_instance.cynux.auth_string)}@${google_redis_instance.cynux.host}:${google_redis_instance.cynux.port}/0"
-    gcs-access-key            = google_storage_hmac_key.artifacts.access_id
-    gcs-secret-key            = google_storage_hmac_key.artifacts.secret
-    jwt-secret                = random_password.jwt.result
-    fernet-key                = random_id.fernet.b64_url
-    defectdojo-admin-password = random_password.defectdojo_admin.result
-    defectdojo-secret-key     = random_password.defectdojo_secret.result
+    database-url                 = "postgresql+asyncpg://cynux:${urlencode(random_password.database.result)}@${google_sql_database_instance.cynux.private_ip_address}:5432/${google_sql_database.cynux.name}"
+    database-password            = random_password.database.result
+    redis-url                    = "rediss://:${urlencode(google_redis_instance.cynux.auth_string)}@${google_redis_instance.cynux.host}:${google_redis_instance.cynux.port}/0"
+    gcs-access-key               = google_storage_hmac_key.artifacts.access_id
+    gcs-secret-key               = google_storage_hmac_key.artifacts.secret
+    jwt-secret                   = random_password.jwt.result
+    fernet-key                   = random_id.fernet.b64_url
+    defectdojo-admin-password    = random_password.defectdojo_admin.result
+    defectdojo-secret-key        = random_password.defectdojo_secret.result
+    defectdojo-database-password = random_password.defectdojo_database.result
+    defectdojo-credential-key    = random_password.defectdojo_credential.result
   }
 
   secret_access_pairs = {
@@ -200,6 +213,8 @@ locals {
     worker_gcs_secret = { account = "worker", secret = "gcs-secret-key" }
     dojo_admin        = { account = "defectdojo", secret = "defectdojo-admin-password" }
     dojo_secret       = { account = "defectdojo", secret = "defectdojo-secret-key" }
+    dojo_database     = { account = "defectdojo", secret = "defectdojo-database-password" }
+    dojo_credential   = { account = "defectdojo", secret = "defectdojo-credential-key" }
   }
 }
 
@@ -235,4 +250,34 @@ resource "google_secret_manager_secret_iam_member" "accessors" {
   secret_id = google_secret_manager_secret.cynux[each.value.secret].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${local.service_account_emails[each.value.account]}"
+}
+
+resource "google_secret_manager_secret" "defectdojo_api_token" {
+  project   = var.project_id
+  secret_id = "cynux-defectdojo-api-token"
+  labels    = local.common_labels
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_secret_manager_secret_iam_member" "defectdojo_can_publish_api_token" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.defectdojo_api_token.secret_id
+  role      = "roles/secretmanager.secretVersionAdder"
+  member    = "serviceAccount:${google_service_account.defectdojo.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "worker_can_read_defectdojo_api_token" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.defectdojo_api_token.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.worker.email}"
 }
