@@ -13,6 +13,13 @@ Describe "Cynux GCP bootstrap" {
         $source | Should Not Match '--filter-projects=projects/\$projectNumber'
     }
 
+    It "recognizes an already linked billing account on resume" {
+        Test-CynuxBillingLinked -Current "billingAccounts/01DDF8-F4B349-0D3C22" `
+            -Expected "01DDF8-F4B349-0D3C22" | Should Be $true
+        Test-CynuxBillingLinked -Current "billingAccounts/other" `
+            -Expected "01DDF8-F4B349-0D3C22" | Should Be $false
+    }
+
     It "refuses an explicitly requested project id that already exists" {
         $threw = $false
         try {

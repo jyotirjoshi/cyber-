@@ -110,6 +110,14 @@ function Get-CynuxBudgetAmount {
     }
 }
 
+function Test-CynuxBillingLinked {
+    param(
+        [string]$Current,
+        [Parameter(Mandatory)][string]$Expected
+    )
+    return $Current.Trim().Replace("billingAccounts/", "") -eq $Expected.Trim().Replace("billingAccounts/", "")
+}
+
 function Set-FirebaseProjectAlias {
     param([string]$Path, [string]$ResolvedProjectId)
     $document = [ordered]@{ projects = [ordered]@{ production = $ResolvedProjectId } }
@@ -180,7 +188,12 @@ function Invoke-CynuxBootstrap {
     # Record ownership immediately so an interrupted first run can safely resume
     # without adopting an unrelated pre-existing project.
     Write-DeploymentConfig -Path $DeploymentFile -ProjectId $resolved -Region $Region -Zone $Zone -StateBucket $stateBucket
-    $null = Invoke-Gcloud -Arguments @("billing", "projects", "link", $resolved, "--billing-account=$BillingAccountId")
+    $currentBilling = (Invoke-Gcloud -Arguments @(
+        "billing", "projects", "describe", $resolved, "--format=value(billingAccountName)"
+    ) | Select-Object -First 1).Trim()
+    if (-not (Test-CynuxBillingLinked -Current $currentBilling -Expected $BillingAccountId)) {
+        $null = Invoke-Gcloud -Arguments @("billing", "projects", "link", $resolved, "--billing-account=$BillingAccountId")
+    }
     $null = Invoke-Gcloud -Arguments @("config", "set", "project", $resolved)
 
     $foundationApis = @(
