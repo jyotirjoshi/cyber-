@@ -2,6 +2,15 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path (Split-Path -Parent $here) "deploy.ps1")
 
 Describe "Cynux production release orchestration" {
+    It "prefers the repository-local Google Cloud CLI when available" {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
+        $portable = Join-Path $repoRoot ".tools\gcloud\google-cloud-sdk\bin\gcloud.cmd"
+
+        Resolve-CynuxCli -Name "gcloud" -RepoRoot $repoRoot `
+            -PathExists { param($Path) $Path -eq $portable } `
+            -CommandLookup { param($Name) throw "PATH lookup must not run" } | Should Be $portable
+    }
+
     It "keeps the irreversible release stages in the required order" {
         $seen = [System.Collections.Generic.List[string]]::new()
         Invoke-ReleasePipeline -RunStage { param($Stage) $seen.Add($Stage) | Out-Null }

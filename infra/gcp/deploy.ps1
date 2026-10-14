@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "tooling.ps1")
 
 function Invoke-Checked {
     param([Parameter(Mandatory)][string]$FilePath, [string[]]$Arguments = @())
@@ -105,6 +106,8 @@ function Invoke-CynuxDeploy {
     )
 
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    Initialize-CynuxGcloudEnvironment -RepoRoot $repoRoot
+    $gcloud = Resolve-CynuxCli -Name "gcloud" -RepoRoot $repoRoot
     $terraformDir = Join-Path $PSScriptRoot "terraform"
     $terraform = Join-Path $repoRoot ".tools\terraform\terraform.exe"
     $verify = Join-Path $PSScriptRoot "verify.ps1"
@@ -136,12 +139,12 @@ function Invoke-CynuxDeploy {
                 if ($firebaseConfig -match '__PROJECT_ID__' -or $firebaseConfig -notmatch [regex]::Escape($project)) {
                     throw ".firebaserc does not target the recorded production project."
                 }
-                $null = Invoke-Checked gcloud @("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+                $null = Invoke-Checked $gcloud @("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
             }
             "billing-budget" {
-                $billing = (Invoke-Checked gcloud @("billing", "projects", "describe", $project, "--format=value(billingEnabled)") | Select-Object -First 1).Trim()
+                $billing = (Invoke-Checked $gcloud @("billing", "projects", "describe", $project, "--format=value(billingEnabled)") | Select-Object -First 1).Trim()
                 if ($billing.ToLowerInvariant() -ne "true") { throw "Billing is disabled for $project." }
-                $budgets = Invoke-Checked gcloud @("billing", "budgets", "list", "--filter=displayName='Cynux production USD 300'", "--format=value(displayName)")
+                $budgets = Invoke-Checked $gcloud @("billing", "budgets", "list", "--filter=displayName='Cynux production USD 300'", "--format=value(displayName)")
                 if (-not ($budgets -match 'Cynux production USD 300')) { throw "The USD 300 production budget is missing." }
             }
             "build-push" {
@@ -150,11 +153,11 @@ function Invoke-CynuxDeploy {
                 $webImage = "$region-docker.pkg.dev/$project/cynux/frontend:$imageTag"
                 $bothExist = $true
                 foreach ($image in @($apiImage, $webImage)) {
-                    try { $null = Invoke-Checked gcloud @("artifacts", "docker", "images", "describe", $image, "--project=$project") }
+                    try { $null = Invoke-Checked $gcloud @("artifacts", "docker", "images", "describe", $image, "--project=$project") }
                     catch { $bothExist = $false }
                 }
                 if (-not $bothExist) {
-                    $null = Invoke-Checked gcloud @("builds", "submit", $repoRoot, "--project=$project", "--config=$repoRoot\cloudbuild.yaml", "--substitutions=_IMAGE_TAG=$imageTag")
+                    $null = Invoke-Checked $gcloud @("builds", "submit", $repoRoot, "--project=$project", "--config=$repoRoot\cloudbuild.yaml", "--substitutions=_IMAGE_TAG=$imageTag")
                 }
             }
             "terraform-plan" {
@@ -170,23 +173,23 @@ function Invoke-CynuxDeploy {
             }
             "private-host-bootstrap" {
                 $releaseState.PrivateHostsStarted = $true
-                $null = Invoke-Checked gcloud @("compute", "instances", "start", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--quiet")
-                $null = Invoke-Checked gcloud @("compute", "ssh", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
-                $null = Invoke-Checked gcloud @("compute", "instances", "start", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--quiet")
-                $null = Invoke-Checked gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
+                $null = Invoke-Checked $gcloud @("compute", "instances", "start", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--quiet")
+                $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-defectdojo-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
+                $null = Invoke-Checked $gcloud @("compute", "instances", "start", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--quiet")
+                $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
             }
             "secret-check" {
                 foreach ($secretId in $releaseState.TerraformOutputs.secret_resource_ids.value.PSObject.Properties.Value) {
-                    $state = (Invoke-Checked gcloud @("secrets", "versions", "list", $secretId, "--project=$project", "--filter=state=enabled", "--format=value(state)") | Select-Object -First 1)
+                    $state = (Invoke-Checked $gcloud @("secrets", "versions", "list", $secretId, "--project=$project", "--filter=state=enabled", "--format=value(state)") | Select-Object -First 1)
                     if (-not $state) { throw "Secret $secretId has no enabled version." }
                 }
             }
             "migration" {
-                $null = Invoke-Checked gcloud @("run", "jobs", "execute", "cynux-migrate", "--project=$project", "--region=$region", "--wait")
+                $null = Invoke-Checked $gcloud @("run", "jobs", "execute", "cynux-migrate", "--project=$project", "--region=$region", "--wait")
             }
             "cloud-run-readiness" {
                 foreach ($service in @("cynux-api", "cynux-web")) {
-                    $ready = (Invoke-Checked gcloud @("run", "services", "describe", $service, "--project=$project", "--region=$region", "--format=value(status.conditions[0].status)") | Select-Object -First 1).Trim()
+                    $ready = (Invoke-Checked $gcloud @("run", "services", "describe", $service, "--project=$project", "--region=$region", "--format=value(status.conditions[0].status)") | Select-Object -First 1).Trim()
                     if ($ready.ToLowerInvariant() -ne "true") { throw "Cloud Run service $service is not ready." }
                 }
             }
@@ -204,7 +207,7 @@ function Invoke-CynuxDeploy {
         if ($releaseState.PrivateHostsStarted) {
             foreach ($vm in @("cynux-scanner-01", "cynux-defectdojo-01")) {
                 try {
-                    $null = Invoke-Checked gcloud @("compute", "instances", "stop", $vm, "--project=$project", "--zone=$zone", "--quiet")
+                    $null = Invoke-Checked $gcloud @("compute", "instances", "stop", $vm, "--project=$project", "--zone=$zone", "--quiet")
                 }
                 catch { Write-Warning "Failed to stop $vm; stop it manually to avoid compute charges." }
             }

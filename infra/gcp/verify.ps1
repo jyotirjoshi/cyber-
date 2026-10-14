@@ -6,9 +6,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "tooling.ps1")
 
 function Invoke-CynuxVerification {
     param([Parameter(Mandatory)][string]$DeploymentFile, [Parameter(Mandatory)][string]$OutputFile)
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    Initialize-CynuxGcloudEnvironment -RepoRoot $repoRoot
+    $gcloud = Resolve-CynuxCli -Name "gcloud" -RepoRoot $repoRoot
     $config = @{}
     foreach ($line in Get-Content -LiteralPath $DeploymentFile) {
         $parts = $line -split '=', 2
@@ -61,21 +65,21 @@ function Invoke-CynuxVerification {
     }
     Add-Check "cloud-run-ready" {
         foreach ($service in @("cynux-api", "cynux-web")) {
-            $ready = (& gcloud run services describe $service --project=$project --region=$region --format="value(status.conditions[0].status)").Trim()
+            $ready = (& $gcloud run services describe $service --project=$project --region=$region --format="value(status.conditions[0].status)").Trim()
             if ($LASTEXITCODE -ne 0 -or $ready -ne "True") { throw "$service is not ready" }
         }
     }
     Add-Check "migration" {
-        $result = (& gcloud run jobs executions list --job=cynux-migrate --project=$project --region=$region --limit=1 --format="value(status.conditions[0].type)").Trim()
+        $result = (& $gcloud run jobs executions list --job=cynux-migrate --project=$project --region=$region --limit=1 --format="value(status.conditions[0].type)").Trim()
         if ($LASTEXITCODE -ne 0 -or $result -ne "Completed") { throw "latest migration did not complete" }
     }
     Add-Check "sql-redis" {
-        $sql = (& gcloud sql instances describe cynux-postgres --project=$project --format="value(state)").Trim()
-        $redis = (& gcloud redis instances describe cynux-redis --project=$project --region=$region --format="value(state)").Trim()
+        $sql = (& $gcloud sql instances describe cynux-postgres --project=$project --format="value(state)").Trim()
+        $redis = (& $gcloud redis instances describe cynux-redis --project=$project --region=$region --format="value(state)").Trim()
         if ($sql -ne "RUNNABLE" -or $redis -ne "READY") { throw "managed data service is not ready" }
     }
     Add-Check "budget" {
-        $budget = (& gcloud billing budgets list --filter="displayName='Cynux production USD 300'" --format="value(displayName)" | Out-String).Trim()
+        $budget = (& $gcloud billing budgets list --filter="displayName='Cynux production USD 300'" --format="value(displayName)" | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or -not $budget) { throw "budget missing" }
     }
     Add-Check "artifact-bucket-roundtrip" {
@@ -85,22 +89,22 @@ function Invoke-CynuxVerification {
         try {
             $expected = [guid]::NewGuid().ToString("N")
             Set-Content -LiteralPath $temporary -Value $expected -NoNewline
-            $null = & gcloud storage cp $temporary "gs://$bucket/$object" --quiet
+            $null = & $gcloud storage cp $temporary "gs://$bucket/$object" --quiet
             if ($LASTEXITCODE -ne 0) { throw "artifact upload failed" }
-            $actual = (& gcloud storage cat "gs://$bucket/$object" | Out-String).Trim()
+            $actual = (& $gcloud storage cat "gs://$bucket/$object" | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) { throw "artifact roundtrip mismatch" }
         }
         finally {
-            $null = & gcloud storage rm "gs://$bucket/$object" --quiet 2>$null
+            $null = & $gcloud storage rm "gs://$bucket/$object" --quiet 2>$null
             Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
         }
     }
     Add-Check "worker-systemd" {
-        $state = (& gcloud compute ssh cynux-scanner-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "sudo systemctl is-active cynux-worker" | Out-String).Trim()
+        $state = (& $gcloud compute ssh cynux-scanner-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "sudo systemctl is-active cynux-worker" | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $state -ne "active") { throw "worker service is not active" }
     }
     Add-Check "defectdojo-private-health" {
-        $status = (& gcloud compute ssh cynux-defectdojo-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "curl -fsS http://127.0.0.1:8080/login >/dev/null && echo healthy" | Out-String).Trim()
+        $status = (& $gcloud compute ssh cynux-defectdojo-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "curl -fsS http://127.0.0.1:8080/login >/dev/null && echo healthy" | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $status -ne "healthy") { throw "DefectDojo private health check failed" }
     }
 

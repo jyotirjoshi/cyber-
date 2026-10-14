@@ -12,10 +12,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "tooling.ps1")
+Initialize-CynuxGcloudEnvironment -RepoRoot $script:RepoRoot
+$script:GcloudCommand = Resolve-CynuxCli -Name "gcloud" -RepoRoot $script:RepoRoot
 
 function Invoke-Gcloud {
     param([Parameter(Mandatory)][string[]]$Arguments)
-    $output = & gcloud @Arguments 2>&1
+    $output = & $script:GcloudCommand @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "gcloud command failed: gcloud $($Arguments -join ' ')`n$($output -join [Environment]::NewLine)"
     }
