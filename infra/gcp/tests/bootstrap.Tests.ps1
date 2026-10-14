@@ -7,6 +7,12 @@ Describe "Cynux GCP bootstrap" {
         Get-CynuxBudgetAmount -CurrencyCode "INR" | Should Be "28500INR"
     }
 
+    It "filters the budget by project id as required by the current CLI" {
+        $source = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "bootstrap.ps1")
+        $source | Should Match '--filter-projects=projects/\$resolved'
+        $source | Should Not Match '--filter-projects=projects/\$projectNumber'
+    }
+
     It "refuses an explicitly requested project id that already exists" {
         $threw = $false
         try {

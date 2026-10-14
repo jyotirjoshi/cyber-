@@ -190,7 +190,6 @@ function Invoke-CynuxBootstrap {
     )
     $null = Invoke-Gcloud -Arguments (@("services", "enable", "--project=$resolved") + $foundationApis)
 
-    $projectNumber = (Invoke-Gcloud -Arguments @("projects", "describe", $resolved, "--format=value(projectNumber)") | Select-Object -First 1).Trim()
     $budgetName = "Cynux production credit guardrail"
     $currencyCode = (Invoke-Gcloud -Arguments @(
         "billing", "accounts", "describe", $BillingAccountId, "--format=value(currencyCode)"
@@ -204,7 +203,7 @@ function Invoke-CynuxBootstrap {
         $null = Invoke-Gcloud -Arguments @(
             "billing", "budgets", "create", "--billing-account=$BillingAccountId",
             "--display-name=$budgetName", "--budget-amount=$budgetAmount", "--calendar-period=year",
-            "--filter-projects=projects/$projectNumber",
+            "--filter-projects=projects/$resolved",
             "--threshold-rule=percent=0.25", "--threshold-rule=percent=0.50",
             "--threshold-rule=percent=0.75", "--threshold-rule=percent=0.90",
             "--threshold-rule=percent=1.00", "--threshold-rule=percent=0.90,basis=forecasted-spend"
