@@ -2,6 +2,14 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path (Split-Path -Parent $here) "deploy.ps1")
 
 Describe "Cynux production release orchestration" {
+    It "accepts CLI progress on stderr when the command succeeds" {
+        $output = Invoke-Checked python @("-c", "import sys; print('progress', file=sys.stderr); print('complete')")
+        ($output -join " ") | Should Match "complete"
+    }
+
+    It "still fails when a native command returns a nonzero exit code" {
+        { Invoke-Checked python @("-c", "import sys; sys.exit(7)") } | Should Throw
+    }
     It "requires an explicit immutable tag to skip a rebuild" {
         { Resolve-ReleaseImageTag -GitSha ("a" * 40) -SkipBuild } | Should Throw
         Resolve-ReleaseImageTag -GitSha ("b" * 40) -ExistingImageTag "abc123-dirty-456" -SkipBuild | Should Be "abc123-dirty-456"

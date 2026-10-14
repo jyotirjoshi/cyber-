@@ -15,9 +15,18 @@ $ErrorActionPreference = "Stop"
 
 function Invoke-Checked {
     param([Parameter(Mandatory)][string]$FilePath, [string[]]$Arguments = @())
-    $output = & $FilePath @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed ($LASTEXITCODE): $FilePath $($Arguments -join ' ')`n$($output -join [Environment]::NewLine)"
+    $null = Get-Command $FilePath -ErrorAction Stop
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell turns native stderr (including successful CLI
+        # progress) into ErrorRecords. The process exit code is authoritative.
+        $ErrorActionPreference = "Continue"
+        $output = @(& $FilePath @Arguments 2>&1 | ForEach-Object { $_.ToString() })
+        $commandExitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousErrorPreference }
+    if ($commandExitCode -ne 0) {
+        throw "Command failed ($commandExitCode): $FilePath $($Arguments -join ' ')`n$($output -join [Environment]::NewLine)"
     }
     return @($output)
 }
