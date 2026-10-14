@@ -43,6 +43,7 @@ resource "google_sql_database_instance" "cynux" {
   deletion_protection = true
 
   settings {
+    edition           = "ENTERPRISE"
     tier              = var.sql_tier
     availability_type = "ZONAL"
     disk_type         = "PD_SSD"
@@ -114,7 +115,7 @@ resource "google_redis_instance" "cynux" {
   transit_encryption_mode = "SERVER_AUTHENTICATION"
   labels                  = local.common_labels
   redis_configs = {
-    maxmemory-policy = "allkeys-lru"
+    maxmemory-policy = "noeviction"
   }
 
   maintenance_policy {
@@ -188,11 +189,11 @@ locals {
   secret_payloads = {
     database-url                 = "postgresql+asyncpg://cynux:${urlencode(random_password.database.result)}@${google_sql_database_instance.cynux.private_ip_address}:5432/${google_sql_database.cynux.name}"
     database-password            = random_password.database.result
-    redis-url                    = "rediss://:${urlencode(google_redis_instance.cynux.auth_string)}@${google_redis_instance.cynux.host}:${google_redis_instance.cynux.port}/0"
+    redis-url                    = "rediss://:${urlencode(google_redis_instance.cynux.auth_string)}@${google_redis_instance.cynux.host}:${google_redis_instance.cynux.port}/0?ssl_cert_reqs=required&ssl_ca_data=${urlencode(join("\n", [for ca in google_redis_instance.cynux.server_ca_certs : ca.cert]))}"
     gcs-access-key               = google_storage_hmac_key.artifacts.access_id
     gcs-secret-key               = google_storage_hmac_key.artifacts.secret
     jwt-secret                   = random_password.jwt.result
-    fernet-key                   = random_id.fernet.b64_url
+    fernet-key                   = replace(replace(random_id.fernet.b64_std, "+", "-"), "/", "_")
     defectdojo-admin-password    = random_password.defectdojo_admin.result
     defectdojo-secret-key        = random_password.defectdojo_secret.result
     defectdojo-database-password = random_password.defectdojo_database.result
@@ -200,21 +201,24 @@ locals {
   }
 
   secret_access_pairs = {
-    api_database      = { account = "api", secret = "database-url" }
-    api_redis         = { account = "api", secret = "redis-url" }
-    api_jwt           = { account = "api", secret = "jwt-secret" }
-    api_fernet        = { account = "api", secret = "fernet-key" }
-    api_gcs_access    = { account = "api", secret = "gcs-access-key" }
-    api_gcs_secret    = { account = "api", secret = "gcs-secret-key" }
-    worker_database   = { account = "worker", secret = "database-url" }
-    worker_redis      = { account = "worker", secret = "redis-url" }
-    worker_fernet     = { account = "worker", secret = "fernet-key" }
-    worker_gcs_access = { account = "worker", secret = "gcs-access-key" }
-    worker_gcs_secret = { account = "worker", secret = "gcs-secret-key" }
-    dojo_admin        = { account = "defectdojo", secret = "defectdojo-admin-password" }
-    dojo_secret       = { account = "defectdojo", secret = "defectdojo-secret-key" }
-    dojo_database     = { account = "defectdojo", secret = "defectdojo-database-password" }
-    dojo_credential   = { account = "defectdojo", secret = "defectdojo-credential-key" }
+    api_database             = { account = "api", secret = "database-url" }
+    api_database_password    = { account = "api", secret = "database-password" }
+    api_redis                = { account = "api", secret = "redis-url" }
+    api_jwt                  = { account = "api", secret = "jwt-secret" }
+    api_fernet               = { account = "api", secret = "fernet-key" }
+    api_gcs_access           = { account = "api", secret = "gcs-access-key" }
+    api_gcs_secret           = { account = "api", secret = "gcs-secret-key" }
+    worker_database          = { account = "worker", secret = "database-url" }
+    worker_database_password = { account = "worker", secret = "database-password" }
+    worker_jwt               = { account = "worker", secret = "jwt-secret" }
+    worker_redis             = { account = "worker", secret = "redis-url" }
+    worker_fernet            = { account = "worker", secret = "fernet-key" }
+    worker_gcs_access        = { account = "worker", secret = "gcs-access-key" }
+    worker_gcs_secret        = { account = "worker", secret = "gcs-secret-key" }
+    dojo_admin               = { account = "defectdojo", secret = "defectdojo-admin-password" }
+    dojo_secret              = { account = "defectdojo", secret = "defectdojo-secret-key" }
+    dojo_database            = { account = "defectdojo", secret = "defectdojo-database-password" }
+    dojo_credential          = { account = "defectdojo", secret = "defectdojo-credential-key" }
   }
 }
 

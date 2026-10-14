@@ -43,6 +43,8 @@ write_files:
         printf 'CYNUX_DB__PORT=5432\n'
         printf 'CYNUX_DB__NAME=${database_name}\n'
         printf 'CYNUX_DB__USER=${database_user}\n'
+        printf 'CYNUX_DB__POOL_SIZE=3\n'
+        printf 'CYNUX_DB__MAX_OVERFLOW=2\n'
         printf 'CYNUX_DB__PASSWORD=%s\n' "$(secret cynux-database-password)"
         printf 'CYNUX_REDIS__URL=%s\n' "$(secret cynux-redis-url)"
         printf 'CYNUX_SECURITY__JWT_SECRET=%s\n' "$(secret cynux-jwt-secret)"
@@ -96,7 +98,7 @@ write_files:
       Restart=on-failure
       RestartSec=15
       ExecStartPre=-/usr/bin/docker rm -f cynux-worker
-      ExecStart=/usr/bin/docker run --name cynux-worker --rm --env-file /etc/cynux/worker.env --network bridge -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/cynux/artifacts:/var/lib/cynux/artifacts $BACKEND_IMAGE python -m app.worker
+      ExecStart=/usr/bin/docker run --name cynux-worker --rm --user 0:0 --env-file /etc/cynux/worker.env --network bridge -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/cynux/artifacts:/var/lib/cynux/artifacts $BACKEND_IMAGE python -m app.worker
       ExecStop=/usr/bin/docker stop -t 30 cynux-worker
       TimeoutStartSec=180
       TimeoutStopSec=45

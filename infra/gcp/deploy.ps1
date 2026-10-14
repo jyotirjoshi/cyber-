@@ -3,6 +3,8 @@ param(
     [switch]$ApproveApply,
     [switch]$AllowDirtySnapshot,
     [switch]$SkipBuild,
+    [string]$ExistingImageTag,
+    [string]$FirebaseAccount,
     [string]$DeploymentFile = (Join-Path $PSScriptRoot ".deployment.env"),
     [string]$LastDeploymentFile = (Join-Path $PSScriptRoot ".last-deployment.json")
 )
@@ -70,6 +72,19 @@ function Get-DirtyFingerprint {
     return ([BitConverter]::ToString($hash) -replace '-', '').Substring(0, 12).ToLowerInvariant()
 }
 
+function Resolve-ReleaseImageTag {
+    param([string]$GitSha, [string]$DirtyFingerprint, [switch]$AllowDirtySnapshot,
+        [switch]$SkipBuild, [string]$ExistingImageTag)
+    if ($ExistingImageTag) {
+        if (-not $SkipBuild -or $ExistingImageTag -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{6,127}$' -or $ExistingImageTag -eq 'latest') {
+            throw "An existing immutable image tag requires -SkipBuild; latest is not allowed."
+        }
+        return $ExistingImageTag
+    }
+    if ($SkipBuild) { throw "-SkipBuild requires -ExistingImageTag so recovery cannot select an unbuilt snapshot." }
+    return Resolve-ImageTag -GitSha $GitSha -DirtyFingerprint $DirtyFingerprint -AllowDirtySnapshot:$AllowDirtySnapshot
+}
+
 function Write-DeploymentRecord {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Values)
     $allowed = @(
@@ -89,7 +104,7 @@ function Invoke-ReleasePipeline {
     foreach ($stage in @(
         "preflight", "billing-budget", "terraform-plan", "apply-approval",
         "artifact-foundation", "terraform-replan", "build-push",
-        "terraform-apply", "private-host-bootstrap", "secret-check", "migration", "cloud-run-readiness",
+        "terraform-apply", "migration", "private-host-bootstrap", "secret-check", "cloud-run-readiness",
         "firebase-deploy", "smoke-tests"
     )) {
         & $RunStage $stage
@@ -102,6 +117,8 @@ function Invoke-CynuxDeploy {
         [switch]$ApproveApply,
         [switch]$AllowDirtySnapshot,
         [switch]$SkipBuild,
+        [string]$ExistingImageTag,
+        [string]$FirebaseAccount,
         [string]$DeploymentFile = (Join-Path $PSScriptRoot ".deployment.env"),
         [string]$LastDeploymentFile = (Join-Path $PSScriptRoot ".last-deployment.json")
     )
@@ -121,12 +138,13 @@ function Invoke-CynuxDeploy {
     $stateBucket = $config.CYNUX_GCP_TERRAFORM_STATE_BUCKET
     $sha = (Invoke-Checked git @("-C", $repoRoot, "rev-parse", "HEAD") | Select-Object -First 1).Trim()
     $fingerprint = Get-DirtyFingerprint -RepoRoot $repoRoot
-    $imageTag = Resolve-ImageTag -GitSha $sha -DirtyFingerprint $fingerprint -AllowDirtySnapshot:$AllowDirtySnapshot
+    $imageTag = Resolve-ReleaseImageTag -GitSha $sha -DirtyFingerprint $fingerprint -AllowDirtySnapshot:$AllowDirtySnapshot -SkipBuild:$SkipBuild -ExistingImageTag $ExistingImageTag
     # A mutable reference is intentional: Invoke-ReleasePipeline executes callbacks in
     # child scope, while release state must survive for cleanup and the final record.
     $releaseState = @{
         TerraformOutputs   = $null
         PrivateHostsStarted = $false
+        FirebaseAccount = $FirebaseAccount
     }
 
     try {
@@ -140,7 +158,9 @@ function Invoke-CynuxDeploy {
                 if ($firebaseConfig -match '__PROJECT_ID__' -or $firebaseConfig -notmatch [regex]::Escape($project)) {
                     throw ".firebaserc does not target the recorded production project."
                 }
-                $null = Invoke-Checked $gcloud @("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+                $activeAccount = (Invoke-Checked $gcloud @("auth", "list", "--filter=status:ACTIVE", "--format=value(account)") | Select-Object -First 1)
+                if (-not $releaseState.FirebaseAccount) { $releaseState.FirebaseAccount = $activeAccount }
+                if (-not $releaseState.FirebaseAccount) { throw "No deployment account is selected." }
             }
             "billing-budget" {
                 $billing = (Invoke-Checked $gcloud @("billing", "projects", "describe", $project, "--format=value(billingEnabled)") | Select-Object -First 1).Trim()
@@ -150,7 +170,6 @@ function Invoke-CynuxDeploy {
                 if (-not ($budgets -match 'Cynux production credit guardrail')) { throw "The production credit budget guardrail is missing." }
             }
             "build-push" {
-                if ($SkipBuild) { break }
                 $apiImage = "$region-docker.pkg.dev/$project/cynux/api:$imageTag"
                 $webImage = "$region-docker.pkg.dev/$project/cynux/frontend:$imageTag"
                 $bothExist = $true
@@ -159,6 +178,7 @@ function Invoke-CynuxDeploy {
                     catch { $bothExist = $false }
                 }
                 if (-not $bothExist) {
+                    if ($SkipBuild) { throw "The requested recovery image tag is not present for both API and frontend." }
                     $null = Invoke-Checked $gcloud @("builds", "submit", $repoRoot, "--project=$project", "--config=$repoRoot\cloudbuild.yaml", "--substitutions=_IMAGE_TAG=$imageTag")
                 }
             }
@@ -214,7 +234,7 @@ function Invoke-CynuxDeploy {
                 }
             }
             "firebase-deploy" {
-                $null = Invoke-Checked firebase @("deploy", "--only", "hosting", "--project", $project, "--non-interactive")
+                $null = Invoke-Checked firebase @("deploy", "--only", "hosting", "--project", $project, "--account", $releaseState.FirebaseAccount, "--non-interactive")
             }
             "smoke-tests" {
                 & $verify -DeploymentFile $DeploymentFile
@@ -253,5 +273,6 @@ function Invoke-CynuxDeploy {
 
 if ($MyInvocation.InvocationName -ne ".") {
     Invoke-CynuxDeploy -ApproveApply:$ApproveApply -AllowDirtySnapshot:$AllowDirtySnapshot `
-        -SkipBuild:$SkipBuild -DeploymentFile $DeploymentFile -LastDeploymentFile $LastDeploymentFile
+        -SkipBuild:$SkipBuild -ExistingImageTag $ExistingImageTag -FirebaseAccount $FirebaseAccount `
+        -DeploymentFile $DeploymentFile -LastDeploymentFile $LastDeploymentFile
 }

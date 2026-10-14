@@ -37,6 +37,22 @@
     ],
     "rewrites": [
       {
+        "source": "/readyz",
+        "run": {
+          "serviceId": "cynux-api",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      },
+      {
+        "source": "/healthz",
+        "run": {
+          "serviceId": "cynux-api",
+          "region": "asia-south1",
+          "pinTag": true
+        }
+      },
+      {
         "source": "/api/**",
         "run": {
           "serviceId": "cynux-api",

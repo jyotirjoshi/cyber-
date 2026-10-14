@@ -59,6 +59,24 @@ run "managed_foundation" {
   }
 
   assert {
+    condition = alltrue([
+      for secret in values(local.api_secret_env) : contains([
+        for binding in values(local.secret_access_pairs) : binding.secret if binding.account == "api"
+      ], secret)
+    ])
+    error_message = "Every API and migration secret must be readable by the API identity."
+  }
+
+  assert {
+    condition = alltrue([
+      for secret in ["database-password", "jwt-secret", "redis-url", "fernet-key", "gcs-access-key", "gcs-secret-key"] : contains([
+        for binding in values(local.secret_access_pairs) : binding.secret if binding.account == "worker"
+      ], secret)
+    ])
+    error_message = "Worker bootstrap must be able to read all required secrets."
+  }
+
+  assert {
     condition     = google_sql_database_instance.cynux.deletion_protection
     error_message = "Cloud SQL must be deletion protected."
   }

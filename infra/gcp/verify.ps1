@@ -40,8 +40,15 @@ function Invoke-CynuxVerification {
         if (-not $response.Headers["strict-transport-security"]) { throw "HSTS header missing" }
     }
     Add-Check "api-health" {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "$base/healthz"
-        if ($response.StatusCode -ne 200) { throw "health check failed" }
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "$base/healthz" -TimeoutSec 60
+        if ($response.StatusCode -ne 200 -or $response.Headers["content-type"] -notmatch "json") { throw "API liveness response unavailable" }
+    }
+    Add-Check "api-data-connectivity" {
+        $snapshot = Invoke-RestMethod -Uri "$base/readyz" -TimeoutSec 60
+        foreach ($name in @("database", "redis")) {
+            $dependency = @($snapshot.dependencies | Where-Object name -eq $name)
+            if ($dependency.Count -ne 1 -or -not $dependency[0].healthy) { throw "$name is unreachable from the API" }
+        }
     }
     Add-Check "openapi" {
         $response = Invoke-WebRequest -UseBasicParsing -Uri "$base/openapi.json"
@@ -53,15 +60,16 @@ function Invoke-CynuxVerification {
     }
     Add-Check "websocket-upgrade" {
         $socket = [System.Net.WebSockets.ClientWebSocket]::new()
+        $deadline = [Threading.CancellationTokenSource]::new(20000)
         try {
             $uri = [Uri]("wss://$project.web.app/ws/agent/00000000-0000-0000-0000-000000000000")
-            $socket.ConnectAsync($uri, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            $socket.ConnectAsync($uri, $deadline.Token).GetAwaiter().GetResult()
             if ($socket.State -ne [System.Net.WebSockets.WebSocketState]::Open) { throw "WebSocket did not upgrade" }
             $payload = [Text.Encoding]::UTF8.GetBytes('{"type":"auth","token":"verification-invalid"}')
             $segment = [ArraySegment[byte]]::new($payload)
-            $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+            $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $deadline.Token).GetAwaiter().GetResult()
         }
-        finally { $socket.Dispose() }
+        finally { $socket.Dispose(); $deadline.Dispose() }
     }
     Add-Check "cloud-run-ready" {
         foreach ($service in @("cynux-api", "cynux-web")) {

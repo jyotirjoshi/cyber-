@@ -173,6 +173,7 @@ resource "google_compute_instance" "defectdojo" {
     google_compute_router_nat.cynux,
     google_secret_manager_secret_iam_member.accessors,
     google_secret_manager_secret_iam_member.defectdojo_can_publish_api_token,
+    google_secret_manager_secret_version.cynux,
   ]
 }
 
@@ -231,5 +232,6 @@ resource "google_compute_instance" "scanner" {
     google_compute_router_nat.cynux,
     google_secret_manager_secret_iam_member.accessors,
     google_secret_manager_secret_iam_member.worker_can_read_defectdojo_api_token,
+    google_secret_manager_secret_version.cynux,
   ]
 }

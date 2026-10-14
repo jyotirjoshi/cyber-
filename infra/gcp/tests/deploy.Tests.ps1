@@ -2,6 +2,11 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path (Split-Path -Parent $here) "deploy.ps1")
 
 Describe "Cynux production release orchestration" {
+    It "requires an explicit immutable tag to skip a rebuild" {
+        { Resolve-ReleaseImageTag -GitSha ("a" * 40) -SkipBuild } | Should Throw
+        Resolve-ReleaseImageTag -GitSha ("b" * 40) -ExistingImageTag "abc123-dirty-456" -SkipBuild | Should Be "abc123-dirty-456"
+        { Resolve-ReleaseImageTag -GitSha ("b" * 40) -ExistingImageTag "latest" -SkipBuild } | Should Throw
+    }
     It "prefers the repository-local Google Cloud CLI when available" {
         $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
         $portable = Join-Path $repoRoot ".tools\gcloud\google-cloud-sdk\bin\gcloud.cmd"
@@ -38,7 +43,7 @@ Describe "Cynux production release orchestration" {
 
         ($seen -join ",") | Should Be (
             "preflight,billing-budget,terraform-plan,apply-approval,artifact-foundation,terraform-replan,build-push," +
-            "terraform-apply,private-host-bootstrap,secret-check,migration,cloud-run-readiness," +
+            "terraform-apply,migration,private-host-bootstrap,secret-check,cloud-run-readiness," +
             "firebase-deploy,smoke-tests"
         )
     }

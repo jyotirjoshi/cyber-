@@ -63,6 +63,7 @@ resource "google_cloud_run_v2_job" "migrate" {
   depends_on = [
     google_project_service.required,
     google_secret_manager_secret_iam_member.accessors,
+    google_secret_manager_secret_version.cynux,
   ]
 }
 
@@ -175,6 +176,7 @@ resource "google_cloud_run_v2_service" "api" {
   depends_on = [
     google_project_service.required,
     google_secret_manager_secret_iam_member.accessors,
+    google_secret_manager_secret_version.cynux,
   ]
 }
 

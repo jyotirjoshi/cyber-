@@ -16,6 +16,8 @@ def test_firebase_rewrites_are_ordered_before_frontend_catch_all() -> None:
     rewrites = config["hosting"]["rewrites"]
 
     assert [rule["source"] for rule in rewrites] == [
+        "/readyz",
+        "/healthz",
         "/api/**",
         "/ws/**",
         "/docs",
@@ -23,6 +25,8 @@ def test_firebase_rewrites_are_ordered_before_frontend_catch_all() -> None:
         "**",
     ]
     assert [rule["run"]["serviceId"] for rule in rewrites] == [
+        "cynux-api",
+        "cynux-api",
         "cynux-api",
         "cynux-api",
         "cynux-api",
@@ -36,7 +40,7 @@ def test_firebase_rewrites_are_ordered_before_frontend_catch_all() -> None:
 def test_firebase_alias_cannot_accidentally_target_an_existing_project() -> None:
     config = json.loads((ROOT / ".firebaserc").read_text(encoding="utf-8"))
 
-    assert config == {"projects": {"production": "__PROJECT_ID__"}}
+    assert config == {"projects": {"production": "cynux-security-prod"}}
 
 
 def test_cloud_build_produces_immutable_api_and_frontend_images() -> None:
