@@ -123,7 +123,7 @@ Describe "Cynux production release orchestration" {
         $verify | Should Match "ClientWebSocket"
         $verify | Should Match "gcloud storage cp"
         $verify | Should Match "systemctl is-active cynux-worker"
-        $verify | Should Match "curl -fsS http://127.0.0.1:8080"
+        $verify | Should Match 'networkInterfaces\[0\].networkIP'
         $deploy | Should Match "finally"
         $deploy | Should Match "compute.*instances.*stop"
     }

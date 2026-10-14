@@ -114,7 +114,9 @@ function Invoke-CynuxVerification {
         if ($LASTEXITCODE -ne 0 -or $state -ne "active") { throw "worker service is not active" }
     }
     Add-Check "defectdojo-private-health" {
-        $status = (& $gcloud compute ssh cynux-defectdojo-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "curl -fsS http://127.0.0.1:8080/login >/dev/null && echo healthy" | Out-String).Trim()
+        $privateIp = (& $gcloud compute instances describe cynux-defectdojo-01 --project=$project --zone=$zone --format="value(networkInterfaces[0].networkIP)" | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $privateIp -notmatch '^10\.[0-9]+\.[0-9]+\.[0-9]+$') { throw "DefectDojo private address unavailable" }
+        $status = (& $gcloud compute ssh cynux-defectdojo-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "curl --max-time 20 -fsS http://${privateIp}:8080/login >/dev/null && echo healthy" | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $status -ne "healthy") { throw "DefectDojo private health check failed" }
     }
 
