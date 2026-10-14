@@ -79,7 +79,9 @@ function Invoke-CynuxVerification {
         if ($sql -ne "RUNNABLE" -or $redis -ne "READY") { throw "managed data service is not ready" }
     }
     Add-Check "budget" {
-        $budget = (& $gcloud billing budgets list --filter="displayName='Cynux production USD 300'" --format="value(displayName)" | Out-String).Trim()
+        $billingAccount = (& $gcloud billing projects describe $project --format="value(billingAccountName)" | Out-String).Trim().Replace("billingAccounts/", "")
+        if ($LASTEXITCODE -ne 0 -or -not $billingAccount) { throw "billing account lookup failed" }
+        $budget = (& $gcloud billing budgets list --billing-account=$billingAccount --filter="displayName='Cynux production credit guardrail'" --format="value(displayName)" | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or -not $budget) { throw "budget missing" }
     }
     Add-Check "artifact-bucket-roundtrip" {

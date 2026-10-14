@@ -2,6 +2,11 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path (Split-Path -Parent $here) "bootstrap.ps1")
 
 Describe "Cynux GCP bootstrap" {
+    It "uses a valid budget amount for the billing account currency" {
+        Get-CynuxBudgetAmount -CurrencyCode "USD" | Should Be "300USD"
+        Get-CynuxBudgetAmount -CurrencyCode "INR" | Should Be "28500INR"
+    }
+
     It "refuses an explicitly requested project id that already exists" {
         $threw = $false
         try {

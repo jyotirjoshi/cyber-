@@ -99,6 +99,17 @@ function Assert-OpenBillingAccount {
     }
 }
 
+function Get-CynuxBudgetAmount {
+    param([Parameter(Mandatory)][string]$CurrencyCode)
+    switch ($CurrencyCode.Trim().ToUpperInvariant()) {
+        "USD" { return "300USD" }
+        # USD 300 is approximately INR 28,575 on 2026-10-14; round down so
+        # alerts fire before the credit-equivalent threshold is exhausted.
+        "INR" { return "28500INR" }
+        default { throw "Unsupported billing currency '$CurrencyCode'; set an explicit reviewed budget amount." }
+    }
+}
+
 function Set-FirebaseProjectAlias {
     param([string]$Path, [string]$ResolvedProjectId)
     $document = [ordered]@{ projects = [ordered]@{ production = $ResolvedProjectId } }
@@ -180,7 +191,11 @@ function Invoke-CynuxBootstrap {
     $null = Invoke-Gcloud -Arguments (@("services", "enable", "--project=$resolved") + $foundationApis)
 
     $projectNumber = (Invoke-Gcloud -Arguments @("projects", "describe", $resolved, "--format=value(projectNumber)") | Select-Object -First 1).Trim()
-    $budgetName = "Cynux production USD 300"
+    $budgetName = "Cynux production credit guardrail"
+    $currencyCode = (Invoke-Gcloud -Arguments @(
+        "billing", "accounts", "describe", $BillingAccountId, "--format=value(currencyCode)"
+    ) | Select-Object -First 1).Trim()
+    $budgetAmount = Get-CynuxBudgetAmount -CurrencyCode $currencyCode
     $existingBudget = Invoke-Gcloud -Arguments @(
         "billing", "budgets", "list", "--billing-account=$BillingAccountId",
         "--filter=displayName='$budgetName'", "--format=value(displayName)"
@@ -188,7 +203,7 @@ function Invoke-CynuxBootstrap {
     if (-not ($existingBudget | Where-Object { ([string]$_).Trim() -eq $budgetName })) {
         $null = Invoke-Gcloud -Arguments @(
             "billing", "budgets", "create", "--billing-account=$BillingAccountId",
-            "--display-name=$budgetName", "--budget-amount=300USD", "--calendar-period=year",
+            "--display-name=$budgetName", "--budget-amount=$budgetAmount", "--calendar-period=year",
             "--filter-projects=projects/$projectNumber",
             "--threshold-rule=percent=0.25", "--threshold-rule=percent=0.50",
             "--threshold-rule=percent=0.75", "--threshold-rule=percent=0.90",

@@ -144,8 +144,9 @@ function Invoke-CynuxDeploy {
             "billing-budget" {
                 $billing = (Invoke-Checked $gcloud @("billing", "projects", "describe", $project, "--format=value(billingEnabled)") | Select-Object -First 1).Trim()
                 if ($billing.ToLowerInvariant() -ne "true") { throw "Billing is disabled for $project." }
-                $budgets = Invoke-Checked $gcloud @("billing", "budgets", "list", "--filter=displayName='Cynux production USD 300'", "--format=value(displayName)")
-                if (-not ($budgets -match 'Cynux production USD 300')) { throw "The USD 300 production budget is missing." }
+                $billingAccount = (Invoke-Checked $gcloud @("billing", "projects", "describe", $project, "--format=value(billingAccountName)") | Select-Object -First 1).Trim().Replace("billingAccounts/", "")
+                $budgets = Invoke-Checked $gcloud @("billing", "budgets", "list", "--billing-account=$billingAccount", "--filter=displayName='Cynux production credit guardrail'", "--format=value(displayName)")
+                if (-not ($budgets -match 'Cynux production credit guardrail')) { throw "The production credit budget guardrail is missing." }
             }
             "build-push" {
                 if ($SkipBuild) { break }

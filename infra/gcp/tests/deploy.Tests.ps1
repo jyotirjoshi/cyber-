@@ -22,6 +22,14 @@ Describe "Cynux production release orchestration" {
         )
     }
 
+    It "uses the stable account-currency budget guardrail name" {
+        $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
+        $verify = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "verify.ps1")
+
+        $deploy | Should Match "Cynux production credit guardrail"
+        $verify | Should Match "Cynux production credit guardrail"
+    }
+
     It "does not deploy Firebase Hosting when migration fails" {
         $seen = [System.Collections.Generic.List[string]]::new()
         $threw = $false
