@@ -52,3 +52,15 @@ output "secret_resource_ids" {
     for name, resource in google_secret_manager_secret.cynux : name => resource.id
   }
 }
+
+output "api_service_uri" {
+  value = google_cloud_run_v2_service.api.uri
+}
+
+output "web_service_uri" {
+  value = google_cloud_run_v2_service.web.uri
+}
+
+output "migration_job_name" {
+  value = google_cloud_run_v2_job.migrate.name
+}

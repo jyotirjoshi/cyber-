@@ -31,6 +31,16 @@ variable "environment" {
   default     = "production"
 }
 
+variable "image_tag" {
+  description = "Immutable git-derived tag shared by backend and frontend release images."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9._-]{6,127}$", var.image_tag)) && lower(var.image_tag) != "latest"
+    error_message = "image_tag must be an immutable tag of at least seven characters and cannot be latest."
+  }
+}
+
 variable "network_cidr" {
   description = "RFC1918 subnet used by private application resources."
   type        = string

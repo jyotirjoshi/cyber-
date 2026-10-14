@@ -42,6 +42,9 @@ def test_terraform_outputs_expose_only_the_reviewed_non_secret_contract() -> Non
         "redis_endpoint",
         "runtime_service_accounts",
         "secret_resource_ids",
+        "api_service_uri",
+        "web_service_uri",
+        "migration_job_name",
     }
 
     forbidden_expressions = (
