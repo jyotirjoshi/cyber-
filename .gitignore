@@ -33,3 +33,12 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Local deployment tooling (downloaded CLIs and caches)
+/.tools/
+
+# Terraform local provider cache and state
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
