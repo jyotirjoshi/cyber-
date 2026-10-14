@@ -87,7 +87,7 @@ function Write-DeploymentRecord {
 function Invoke-ReleasePipeline {
     param([Parameter(Mandatory)][scriptblock]$RunStage)
     foreach ($stage in @(
-        "preflight", "billing-budget", "build-push", "terraform-plan", "apply-approval",
+        "preflight", "billing-budget", "terraform-plan", "apply-approval", "build-push",
         "terraform-apply", "private-host-bootstrap", "secret-check", "migration", "cloud-run-readiness",
         "firebase-deploy", "smoke-tests"
     )) {

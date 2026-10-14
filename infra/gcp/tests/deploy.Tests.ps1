@@ -16,7 +16,7 @@ Describe "Cynux production release orchestration" {
         Invoke-ReleasePipeline -RunStage { param($Stage) $seen.Add($Stage) | Out-Null }
 
         ($seen -join ",") | Should Be (
-            "preflight,billing-budget,build-push,terraform-plan,apply-approval," +
+            "preflight,billing-budget,terraform-plan,apply-approval,build-push," +
             "terraform-apply,private-host-bootstrap,secret-check,migration,cloud-run-readiness," +
             "firebase-deploy,smoke-tests"
         )
