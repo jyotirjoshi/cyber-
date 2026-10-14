@@ -28,9 +28,11 @@ backend/tests/
 
 # Node / Next.js
 frontend/node_modules/
+node_modules/
 frontend/.next/
 frontend/out/
 frontend/npm-debug.log*
+.playwright-cli/
 
 # Docs and infra artifacts not needed at build time
 docs/

@@ -111,15 +111,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_telemetry(settings, service_name="cynux-api")
     configure_langsmith(settings)
 
-    docs_disabled = settings.is_production
+    docs_enabled = not settings.is_production or settings.expose_api_docs
     app = FastAPI(
         title="Cynux API",
         version=API_VERSION,
         summary="AI-driven security assessment platform.",
         lifespan=_lifespan,
-        docs_url=None if docs_disabled else "/docs",
-        redoc_url=None if docs_disabled else "/redoc",
-        openapi_url=None if docs_disabled else "/openapi.json",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
     app.state.settings = settings
 
@@ -148,7 +148,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ws_router)
 
     instrument_app(app, settings)
-    log.info("api.created", environment=settings.environment, docs_enabled=not docs_disabled)
+    log.info("api.created", environment=settings.environment, docs_enabled=docs_enabled)
     return app
 
 

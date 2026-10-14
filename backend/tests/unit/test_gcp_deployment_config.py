@@ -6,6 +6,7 @@ import pytest
 
 from app.core.config import Settings, validate_runtime_configuration
 from app.core.errors import ConfigurationError
+from app.api.app import create_app
 
 
 def _production_settings(**overrides: object) -> Settings:
@@ -93,4 +94,11 @@ def test_production_worker_rejects_plain_http_object_storage() -> None:
 
     with pytest.raises(ConfigurationError, match="CYNUX_STORAGE__ENDPOINT_URL"):
         validate_runtime_configuration(settings, role="worker")
+
+
+def test_production_can_explicitly_expose_openapi_for_the_hosting_route() -> None:
+    app = create_app(_production_settings(expose_api_docs=True))
+
+    assert app.openapi_url == "/openapi.json"
+    assert app.docs_url == "/docs"
 

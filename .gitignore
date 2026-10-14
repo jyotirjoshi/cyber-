@@ -18,9 +18,11 @@ env/
 
 # Node / Next.js
 frontend/node_modules/
+/node_modules/
 frontend/.next/
 frontend/.env.local
 frontend/tsconfig.tsbuildinfo
+/.playwright-cli/
 
 # Docker volumes / runtime artifacts
 /var/lib/cynux/
@@ -42,3 +44,9 @@ Thumbs.db
 *.tfstate
 *.tfstate.*
 *.tfplan
+
+# Local production deployment state and verification output
+/infra/gcp/.deployment.env
+/infra/gcp/.last-deployment.json
+/infra/gcp/.verification.json
+/infra/gcp/.production.tfplan

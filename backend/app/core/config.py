@@ -619,6 +619,7 @@ class Settings(BaseSettings):
 
     environment: Environment = "development"
     debug: bool = False
+    expose_api_docs: bool = False
     api_prefix: str = "/api/v1"
     public_base_url: str = "http://localhost:3000"
 
