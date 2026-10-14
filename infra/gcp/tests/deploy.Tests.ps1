@@ -11,6 +11,27 @@ Describe "Cynux production release orchestration" {
             -CommandLookup { param($Name) throw "PATH lookup must not run" } | Should Be $portable
     }
 
+    It "exposes isolated application-default credentials to Terraform" {
+        $savedConfig = $env:CLOUDSDK_CONFIG
+        $savedCredentials = $env:GOOGLE_APPLICATION_CREDENTIALS
+        try {
+            $env:CLOUDSDK_CONFIG = $null
+            $env:GOOGLE_APPLICATION_CREDENTIALS = $null
+            $configDir = Join-Path $TestDrive ".tools\gcloud-config"
+            $null = New-Item -ItemType Directory -Path $configDir -Force
+            $adc = Join-Path $configDir "application_default_credentials.json"
+            Set-Content -LiteralPath $adc -Value '{}'
+
+            Initialize-CynuxGcloudEnvironment -RepoRoot $TestDrive
+
+            $env:GOOGLE_APPLICATION_CREDENTIALS | Should Be $adc
+        }
+        finally {
+            $env:CLOUDSDK_CONFIG = $savedConfig
+            $env:GOOGLE_APPLICATION_CREDENTIALS = $savedCredentials
+        }
+    }
+
     It "keeps the irreversible release stages in the required order" {
         $seen = [System.Collections.Generic.List[string]]::new()
         Invoke-ReleasePipeline -RunStage { param($Stage) $seen.Add($Stage) | Out-Null }
