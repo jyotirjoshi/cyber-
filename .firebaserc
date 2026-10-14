@@ -1,5 +1,5 @@
 {
   "projects": {
-    "production": "__PROJECT_ID__"
+    "production": "cynux-security-prod"
   }
 }
