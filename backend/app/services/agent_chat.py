@@ -12,7 +12,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import CynuxError
+from app.core.errors import CynuxError, ResourceNotFoundError
 from app.core.logging_conf import redact_text
 from app.db.enums import MessageRole, Permission
 from app.db.models.agent import AgentAction, AgentMessage, AgentRun, AgentSession
@@ -691,6 +691,8 @@ async def create_custom_reply(
     redis=None,
 ) -> AgentMessage:
     """Run and persist one turn using the immutable version pinned to the session."""
+    if not settings.features.custom_agents:
+        raise ResourceNotFoundError("custom agents are disabled")
     if principal.organization_id != organization_id:
         raise ValueError("Agent conversation organization does not match the caller organization")
     conversation = await session.scalar(tenant_select(AgentSession, organization_id).where(

@@ -42,6 +42,7 @@ from app.core.logging_conf import configure_logging
 from app.core.redis_client import close_redis
 from app.core.telemetry import configure_langsmith, instrument_app, setup_telemetry
 from app.db.session import dispose_engine
+from app.graphql.schema import graphql_router
 
 log = structlog.get_logger(__name__)
 
@@ -143,6 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(api_router, prefix=settings.api_prefix)
+    app.include_router(graphql_router, prefix="/api/graphql")
     # The live agent stream is mounted without the API prefix: it declares its own ``/ws/...``
     # path and is a transport rather than a versioned resource (see app.api.ws).
     app.include_router(ws_router)

@@ -116,7 +116,7 @@ async def test_chat_request_queues_work_and_passes_status_to_reply(monkeypatch) 
             return SimpleNamespace(scalar_one=lambda: row)
 
     async def resolve(*args):
-        return SimpleNamespace(id=conversation_id, message_count=0), False
+        return SimpleNamespace(id=conversation_id, message_count=0, agent_version_id=None), False
 
     async def next_seq(*args):
         return 0
@@ -175,6 +175,7 @@ async def test_chat_request_queues_work_and_passes_status_to_reply(monkeypatch) 
         object(),
         gateway_for_request,
         request_settings,
+        None,
     )
     assert result.content == "Sync GitHub alerts"
     assert calls == ["commit", "propose", "commit", "reply"]

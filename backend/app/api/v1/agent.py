@@ -333,6 +333,8 @@ async def post_message(
     custom_version_id: uuid.UUID | None = None
     for attempt in range(_MAX_SEQ_RETRIES):
         convo, created = await _resolve_conversation(session, principal, payload)
+        if convo.agent_version_id is not None and not settings.features.custom_agents:
+            raise ResourceNotFoundError("custom agents are disabled")
         seq = await _next_message_seq(session, convo.id)
         message = AgentMessage(
             id=uuid.uuid4(),
