@@ -455,3 +455,97 @@ async def test_async_client_creates_knowledge_collection_with_same_contract():
             client_mutation_id="async-collection",
         )
     assert result["collection"]["id"] == "collection-async"
+
+
+def test_sync_client_deletes_and_restores_knowledge_source():
+    operations = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        operations.append(body)
+        field = (
+            "deleteKnowledgeSource"
+            if body["operationName"] == "DeleteKnowledgeSource"
+            else "restoreKnowledgeSource"
+        )
+        status = "deleted" if field == "deleteKnowledgeSource" else "stored"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    field: {
+                        "source": {"id": "source-1", "status": status},
+                        "clientMutationId": body["variables"]["input"][
+                            "clientMutationId"
+                        ],
+                    }
+                }
+            },
+        )
+
+    with CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        deleted = client.delete_knowledge_source(
+            "source-1",
+            idempotency_key="delete-source-1",
+            client_mutation_id="delete-client",
+        )
+        restored = client.restore_knowledge_source(
+            "source-1",
+            idempotency_key="restore-source-1",
+            client_mutation_id="restore-client",
+        )
+
+    assert deleted["source"]["status"] == "deleted"
+    assert restored["source"]["status"] == "stored"
+    assert [item["operationName"] for item in operations] == [
+        "DeleteKnowledgeSource",
+        "RestoreKnowledgeSource",
+    ]
+    assert all(
+        item["variables"]["input"]["sourceId"] == "source-1" for item in operations
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_client_deletes_and_restores_knowledge_source():
+    operations = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        operations.append(body["operationName"])
+        field = (
+            "deleteKnowledgeSource"
+            if body["operationName"] == "DeleteKnowledgeSource"
+            else "restoreKnowledgeSource"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    field: {
+                        "source": {"id": "source-async", "status": "stored"},
+                        "clientMutationId": body["variables"]["input"][
+                            "clientMutationId"
+                        ],
+                    }
+                }
+            },
+        )
+
+    async with AsyncCynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        await client.delete_knowledge_source(
+            "source-async",
+            idempotency_key="async-delete-source",
+            client_mutation_id="async-delete",
+        )
+        await client.restore_knowledge_source(
+            "source-async",
+            idempotency_key="async-restore-source",
+            client_mutation_id="async-restore",
+        )
+
+    assert operations == ["DeleteKnowledgeSource", "RestoreKnowledgeSource"]

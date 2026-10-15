@@ -27,7 +27,7 @@ from app.db.models.agent_definition import (
     AgentVersionTool,
 )
 from app.db.models.audit import AuditEvent
-from app.db.models.knowledge import KnowledgeCollection
+from app.db.models.knowledge import KnowledgeCollection, KnowledgeSource
 from app.graphql.ids import encode_global_id
 from app.graphql.schema import schema
 from app.services.context import ACTOR_API_KEY, Principal
@@ -45,6 +45,7 @@ async def mutation_context():
         AgentVersionCollection,
         AgentVersionTool,
         KnowledgeCollection,
+        KnowledgeSource,
         AuditEvent,
     ):
         Table(
@@ -128,6 +129,20 @@ DISABLE_AGENT = """mutation($input: DisableAgentDefinitionInput!) {
 CREATE_KNOWLEDGE_COLLECTION = """mutation($input: CreateKnowledgeCollectionInput!) {
   createKnowledgeCollection(input: $input) {
     collection { id name description retrievalProvider revision isEnabled }
+    clientMutationId
+  }
+}"""
+
+DELETE_KNOWLEDGE_SOURCE = """mutation($input: DeleteKnowledgeSourceInput!) {
+  deleteKnowledgeSource(input: $input) {
+    source { id collectionId filename status currentRevision }
+    clientMutationId
+  }
+}"""
+
+RESTORE_KNOWLEDGE_SOURCE = """mutation($input: RestoreKnowledgeSourceInput!) {
+  restoreKnowledgeSource(input: $input) {
+    source { id collectionId filename status currentRevision }
     clientMutationId
   }
 }"""
@@ -475,3 +490,94 @@ async def test_create_knowledge_collection_rejects_non_object_policy(mutation_co
     assert result.errors[0].extensions["code"] == "BAD_USER_INPUT"
     async with mutation_context.session_factory() as session:
         assert list((await session.scalars(select(KnowledgeCollection))).all()) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_and_restore_knowledge_source_are_replay_safe(mutation_context):
+    collection_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    async with mutation_context.session_factory() as session:
+        session.add(
+            KnowledgeCollection(
+                id=collection_id,
+                organization_id=mutation_context.principal.organization_id,
+                name="Response procedures",
+                retrieval_provider="internal",
+                retrieval_policy={},
+                is_enabled=True,
+                revision=1,
+            )
+        )
+        session.add(
+            KnowledgeSource(
+                id=source_id,
+                organization_id=mutation_context.principal.organization_id,
+                collection_id=collection_id,
+                source_type="upload",
+                filename="containment.md",
+                object_key="tenant/knowledge/containment.md",
+                mime_type="text/markdown",
+                content_hash="a" * 64,
+                size_bytes=128,
+                status="ready",
+                document_metadata={},
+                current_revision=1,
+            )
+        )
+        await session.commit()
+
+    global_source_id = encode_global_id("KnowledgeSource", source_id)
+    delete_input = {
+        "idempotencyKey": "delete-containment-v1",
+        "clientMutationId": "delete-source-request",
+        "sourceId": global_source_id,
+    }
+    deleted = await schema.execute(
+        DELETE_KNOWLEDGE_SOURCE,
+        context_value=mutation_context,
+        variable_values={"input": delete_input},
+    )
+    delete_replay = await schema.execute(
+        DELETE_KNOWLEDGE_SOURCE,
+        context_value=mutation_context,
+        variable_values={"input": delete_input},
+    )
+
+    restore_input = {
+        "idempotencyKey": "restore-containment-v1",
+        "clientMutationId": "restore-source-request",
+        "sourceId": global_source_id,
+    }
+    restored = await schema.execute(
+        RESTORE_KNOWLEDGE_SOURCE,
+        context_value=mutation_context,
+        variable_values={"input": restore_input},
+    )
+    restore_replay = await schema.execute(
+        RESTORE_KNOWLEDGE_SOURCE,
+        context_value=mutation_context,
+        variable_values={"input": restore_input},
+    )
+
+    assert deleted.errors is None
+    assert delete_replay.errors is None
+    assert delete_replay.data == deleted.data
+    assert deleted.data["deleteKnowledgeSource"]["source"]["status"] == "deleted"
+    assert restored.errors is None
+    assert restore_replay.errors is None
+    assert restore_replay.data == restored.data
+    assert restored.data["restoreKnowledgeSource"]["source"] == {
+        "id": global_source_id,
+        "collectionId": encode_global_id("KnowledgeCollection", collection_id),
+        "filename": "containment.md",
+        "status": "stored",
+        "currentRevision": 1,
+    }
+    async with mutation_context.session_factory() as session:
+        source = await session.get(KnowledgeSource, source_id)
+        collection = await session.get(KnowledgeCollection, collection_id)
+        audits = list((await session.scalars(select(AuditEvent))).all())
+    assert source.status == "stored"
+    assert source.tombstoned_at is None
+    assert collection.revision == 3
+    assert len(audits) == 2

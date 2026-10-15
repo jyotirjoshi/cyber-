@@ -53,6 +53,18 @@ CREATE_KNOWLEDGE_COLLECTION = """mutation CreateKnowledgeCollection($input: Crea
     clientMutationId
   }
 }"""
+DELETE_KNOWLEDGE_SOURCE = """mutation DeleteKnowledgeSource($input: DeleteKnowledgeSourceInput!) {
+  deleteKnowledgeSource(input: $input) {
+    source { id collectionId sourceType filename title mimeType contentHash sizeBytes status errorCode currentRevision indexedChunks totalChunks createdAt updatedAt }
+    clientMutationId
+  }
+}"""
+RESTORE_KNOWLEDGE_SOURCE = """mutation RestoreKnowledgeSource($input: RestoreKnowledgeSourceInput!) {
+  restoreKnowledgeSource(input: $input) {
+    source { id collectionId sourceType filename title mimeType contentHash sizeBytes status errorCode currentRevision indexedChunks totalChunks createdAt updatedAt }
+    clientMutationId
+  }
+}"""
 
 
 def service_root(base_url: str) -> str:

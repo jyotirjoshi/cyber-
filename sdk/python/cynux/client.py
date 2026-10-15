@@ -14,7 +14,9 @@ from .graphql import (
     CREATE_AGENT,
     CREATE_AGENT_VERSION,
     CREATE_KNOWLEDGE_COLLECTION,
+    DELETE_KNOWLEDGE_SOURCE,
     DISABLE_AGENT,
+    RESTORE_KNOWLEDGE_SOURCE,
     SOURCES,
     VERSIONS,
     connection_page,
@@ -286,3 +288,41 @@ class CynuxClient:
             operation_name="CreateKnowledgeCollection",
         )
         return mutation_result(data, "createKnowledgeCollection")
+
+    def delete_knowledge_source(
+        self,
+        source_id: str,
+        *,
+        idempotency_key: str,
+        client_mutation_id: str,
+    ) -> dict[str, Any]:
+        variables = mutation_input(
+            {"sourceId": source_id},
+            idempotency_key=idempotency_key,
+            client_mutation_id=client_mutation_id,
+        )
+        data = self.graphql(
+            DELETE_KNOWLEDGE_SOURCE,
+            {"input": variables},
+            operation_name="DeleteKnowledgeSource",
+        )
+        return mutation_result(data, "deleteKnowledgeSource")
+
+    def restore_knowledge_source(
+        self,
+        source_id: str,
+        *,
+        idempotency_key: str,
+        client_mutation_id: str,
+    ) -> dict[str, Any]:
+        variables = mutation_input(
+            {"sourceId": source_id},
+            idempotency_key=idempotency_key,
+            client_mutation_id=client_mutation_id,
+        )
+        data = self.graphql(
+            RESTORE_KNOWLEDGE_SOURCE,
+            {"input": variables},
+            operation_name="RestoreKnowledgeSource",
+        )
+        return mutation_result(data, "restoreKnowledgeSource")

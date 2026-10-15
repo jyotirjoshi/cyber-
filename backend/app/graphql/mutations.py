@@ -10,7 +10,7 @@ from strawberry.types import Info
 from app.api.deps import require_custom_agents, require_internal_knowledge
 from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition, AgentDefinitionVersion
-from app.db.models.knowledge import KnowledgeCollection
+from app.db.models.knowledge import KnowledgeCollection, KnowledgeSource
 from app.db.repository import tenant_select
 from app.graphql.context import require_context
 from app.graphql.errors import PublicGraphQLError
@@ -19,12 +19,13 @@ from app.graphql.types import (
     AgentDefinitionNode,
     AgentDefinitionVersionNode,
     KnowledgeCollectionNode,
+    KnowledgeSourceNode,
 )
 from app.schemas.agent_definition import AgentDefinitionCreateIn, AgentVersionCreateIn
 from app.schemas.knowledge import KnowledgeCollectionCreateIn
 from app.services import agent_definition as agent_service
 from app.services.graphql_idempotency import input_digest, reserve
-from app.services.knowledge_ingest import create_collection
+from app.services.knowledge_ingest import create_collection, restore_source, tombstone_source
 
 
 @strawberry.input
@@ -93,6 +94,20 @@ class CreateKnowledgeCollectionInput:
     retrieval_policy: JSON | None = None
 
 
+@strawberry.input
+class DeleteKnowledgeSourceInput:
+    idempotency_key: str
+    client_mutation_id: str
+    source_id: strawberry.ID
+
+
+@strawberry.input
+class RestoreKnowledgeSourceInput:
+    idempotency_key: str
+    client_mutation_id: str
+    source_id: strawberry.ID
+
+
 @strawberry.type
 class AgentDefinitionMutationPayload:
     agent: AgentDefinitionNode
@@ -108,6 +123,12 @@ class AgentDefinitionVersionMutationPayload:
 @strawberry.type
 class KnowledgeCollectionMutationPayload:
     collection: KnowledgeCollectionNode
+    client_mutation_id: str
+
+
+@strawberry.type
+class KnowledgeSourceMutationPayload:
+    source: KnowledgeSourceNode
     client_mutation_id: str
 
 
@@ -198,6 +219,52 @@ def _validated_collection_payload(
         raise PublicGraphQLError(
             "BAD_USER_INPUT", "Knowledge collection configuration is invalid."
         ) from exc
+
+
+async def _knowledge_source_action(
+    info: Info,
+    input: DeleteKnowledgeSourceInput | RestoreKnowledgeSourceInput,
+    *,
+    operation: str,
+    action,
+) -> KnowledgeSourceMutationPayload:
+    context = require_context(info)
+    require_internal_knowledge(context.settings)
+    context.principal.require(Permission.ORG_MANAGE)
+    _client_mutation_id(input.client_mutation_id)
+    source_id = decode_global_id(str(input.source_id), "KnowledgeSource")
+    digest = input_digest({"source_id": str(source_id)})
+    async with context.session_factory() as session:
+        receipt, replayed = await reserve(
+            session,
+            context.principal,
+            operation=operation,
+            idempotency_key=input.idempotency_key,
+            digest=digest,
+        )
+        if replayed:
+            row = await session.scalar(
+                tenant_select(KnowledgeSource, context.principal.organization_id).where(
+                    KnowledgeSource.id == receipt.resource_id,
+                    KnowledgeSource.id == source_id,
+                )
+            )
+            if row is None:
+                raise PublicGraphQLError(
+                    "RESOURCE_NOT_FOUND", "The mutation result is no longer available."
+                )
+        else:
+            row = await action(session, context.principal, source_id)
+            receipt.resource_type = "KnowledgeSource"
+            receipt.resource_id = row.id
+        await session.flush()
+        await session.refresh(row)
+        projected = KnowledgeSourceNode.from_row(row)
+        await session.commit()
+    return KnowledgeSourceMutationPayload(
+        source=projected,
+        client_mutation_id=input.client_mutation_id,
+    )
 
 
 @strawberry.type
@@ -383,6 +450,28 @@ class AgentMutations:
         return KnowledgeCollectionMutationPayload(
             collection=projected,
             client_mutation_id=input.client_mutation_id,
+        )
+
+    @strawberry.mutation
+    async def delete_knowledge_source(
+        self, info: Info, input: DeleteKnowledgeSourceInput
+    ) -> KnowledgeSourceMutationPayload:
+        return await _knowledge_source_action(
+            info,
+            input,
+            operation="deleteKnowledgeSource",
+            action=tombstone_source,
+        )
+
+    @strawberry.mutation
+    async def restore_knowledge_source(
+        self, info: Info, input: RestoreKnowledgeSourceInput
+    ) -> KnowledgeSourceMutationPayload:
+        return await _knowledge_source_action(
+            info,
+            input,
+            operation="restoreKnowledgeSource",
+            action=restore_source,
         )
 
 
