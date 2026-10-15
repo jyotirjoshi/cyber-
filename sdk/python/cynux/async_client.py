@@ -10,6 +10,8 @@ from .errors import CynuxError
 from .graphql import (
     AGENTS,
     COLLECTIONS,
+    SOURCES,
+    VERSIONS,
     connection_page,
     graphql_data,
     graphql_payload,
@@ -61,11 +63,19 @@ class AsyncCynuxClient:
             raise CynuxError("Cynux could not be reached", retryable=True) from None
         return graphql_data(response)
 
-    async def _iter_graphql(self, query: str, field: str, page_size: int):
+    async def _iter_graphql(
+        self,
+        query: str,
+        field: str,
+        page_size: int,
+        variables: dict[str, Any] | None = None,
+    ):
         validate_page_size(page_size)
         cursor = None
         while True:
-            data = await self.graphql(query, {"first": page_size, "after": cursor})
+            data = await self.graphql(
+                query, {**(variables or {}), "first": page_size, "after": cursor}
+            )
             nodes, cursor = connection_page(data, field, cursor)
             for node in nodes:
                 yield node
@@ -79,3 +89,17 @@ class AsyncCynuxClient:
         self, *, page_size: int = 25
     ) -> AsyncIterator[dict[str, Any]]:
         return self._iter_graphql(COLLECTIONS, "knowledgeCollections", page_size)
+
+    def iter_agent_versions(
+        self, agent_definition_id: str, *, page_size: int = 25
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._iter_graphql(
+            VERSIONS, "agentDefinitionVersions", page_size, {"id": agent_definition_id}
+        )
+
+    def iter_knowledge_sources(
+        self, collection_id: str, *, page_size: int = 25
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._iter_graphql(
+            SOURCES, "knowledgeSources", page_size, {"id": collection_id}
+        )

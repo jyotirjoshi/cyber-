@@ -17,6 +17,18 @@ COLLECTIONS = """query KnowledgeCollections($first: Int!, $after: String) {
     pageInfo { hasNextPage endCursor }
   }
 }"""
+VERSIONS = """query AgentVersions($id: ID!, $first: Int!, $after: String) {
+  agentDefinitionVersions(agentDefinitionId: $id, first: $first, after: $after) {
+    nodes { id agentDefinitionId version role provider model autonomyMode temperature maxOutputTokens maxParallelTasks maxRuntimeSeconds maxToolCalls maxInputTokens maxEstimatedSpendMicros createdAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+SOURCES = """query KnowledgeSources($id: ID!, $first: Int!, $after: String) {
+  knowledgeSources(collectionId: $id, first: $first, after: $after) {
+    nodes { id collectionId sourceType filename title mimeType contentHash sizeBytes status errorCode currentRevision indexedChunks totalChunks createdAt updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
 
 
 def service_root(base_url: str) -> str:

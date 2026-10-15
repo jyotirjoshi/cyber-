@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from cynux import CynuxClient, CynuxError
+from cynux import AsyncCynuxClient, CynuxClient, CynuxError
 
 
 @pytest.mark.parametrize(
@@ -124,8 +124,6 @@ def test_cursor_iterator_stops_on_broken_server_cursor():
 
 @pytest.mark.asyncio
 async def test_async_client_supports_same_graphql_and_cursor_contract():
-    from cynux import AsyncCynuxClient
-
     async def handler(request):
         assert request.url.path == "/api/graphql"
         return httpx.Response(
@@ -144,3 +142,71 @@ async def test_async_client_supports_same_graphql_and_cursor_contract():
         "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
     ) as client:
         assert [row async for row in client.iter_agents()] == [{"name": "A"}]
+
+
+def test_nested_agent_versions_and_knowledge_sources_use_global_parent_ids():
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        field = (
+            "agentDefinitionVersions"
+            if "agentDefinitionVersions" in body["query"]
+            else "knowledgeSources"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    field: {
+                        "nodes": [{"version": 2}]
+                        if field == "agentDefinitionVersions"
+                        else [{"filename": "runbook.md"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
+
+    with CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert list(client.iter_agent_versions("agent-global-id")) == [{"version": 2}]
+        assert list(client.iter_knowledge_sources("collection-global-id")) == [
+            {"filename": "runbook.md"}
+        ]
+    assert seen[0]["variables"]["id"] == "agent-global-id"
+    assert seen[1]["variables"]["id"] == "collection-global-id"
+
+
+@pytest.mark.asyncio
+async def test_async_nested_iterators_match_sync_contract():
+    async def handler(request):
+        body = json.loads(request.content)
+        field = (
+            "agentDefinitionVersions"
+            if "agentDefinitionVersions" in body["query"]
+            else "knowledgeSources"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    field: {
+                        "nodes": [{"id": "one"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
+
+    async with AsyncCynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert [x async for x in client.iter_agent_versions("agent-id")] == [
+            {"id": "one"}
+        ]
+        assert [x async for x in client.iter_knowledge_sources("collection-id")] == [
+            {"id": "one"}
+        ]

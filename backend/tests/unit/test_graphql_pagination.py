@@ -21,6 +21,18 @@ def test_cursor_round_trip_and_scope_binding():
             other.decode(cursor)
 
 
+def test_cursor_preserves_integer_and_datetime_sort_values():
+    import datetime as dt
+
+    from app.graphql.pagination import CursorCodec
+
+    codec = CursorCodec("s" * 32, uuid.uuid4(), "versions")
+    identifier = uuid.uuid4()
+    assert codec.decode(codec.encode(7, identifier)) == (7, identifier)
+    timestamp = dt.datetime(2026, 10, 15, 12, 30, tzinfo=dt.UTC)
+    assert codec.decode(codec.encode(timestamp, identifier)) == (timestamp, identifier)
+
+
 @pytest.mark.parametrize("value", ["", "nonsense", "a.b.c", "a" * 5000])
 def test_malformed_cursor_is_rejected(value):
     from app.graphql.errors import PublicGraphQLError
