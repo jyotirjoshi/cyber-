@@ -57,6 +57,14 @@ class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=4096)
 
 
+class SsoHandoffIn(BaseModel):
+    """One-time opaque browser handoff after a completed external identity login."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    handoff_token: str = Field(min_length=24, max_length=512)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -130,6 +138,7 @@ __all__ = [
     "PasswordResetConfirmIn",
     "PasswordResetRequestIn",
     "RefreshIn",
+    "SsoHandoffIn",
     "RegisterIn",
     "SwitchOrganizationIn",
     "TokenPairOut",

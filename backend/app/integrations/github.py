@@ -36,6 +36,15 @@ class GitHubAlertFeed:
     alerts: list[dict[str, Any]]
 
 
+@dataclass(frozen=True, slots=True)
+class GitHubIssue:
+    key: str
+    id: str
+    url: str
+    status: str
+    summary: str = ""
+
+
 class GitHubClient:
     """Retrieve and explicitly update organization security alerts."""
 
@@ -78,6 +87,97 @@ class GitHubClient:
                 PROVIDER, hint="Set CYNUX_GITHUB__ORGANIZATION to ingest organization alerts."
             )
         return organization
+
+    def _issue_repository(self) -> tuple[str, str]:
+        organization = self._organization()
+        repository = str(getattr(self._cfg, "repository", "") or "").strip()
+        if not _REPOSITORY_SEGMENT.fullmatch(organization) or not _REPOSITORY_SEGMENT.fullmatch(
+            repository
+        ):
+            raise IntegrationNotConfiguredError(
+                PROVIDER,
+                hint="Set CYNUX_GITHUB__ORGANIZATION and CYNUX_GITHUB__REPOSITORY for issue filing.",
+            )
+        return organization, repository
+
+    @staticmethod
+    def _finding_label(finding_id: str) -> str:
+        return f"cynux-finding-{re.sub(r'[^A-Za-z0-9_.-]', '-', str(finding_id))[:80]}"
+
+    @staticmethod
+    def _issue_from_payload(payload: dict[str, Any]) -> GitHubIssue:
+        number = payload.get("number")
+        if not isinstance(number, int) or number <= 0:
+            raise IntegrationError("GitHub returned an invalid issue number", provider=PROVIDER)
+        return GitHubIssue(
+            key=f"#{number}",
+            id=str(payload.get("id") or number),
+            url=str(payload.get("html_url") or ""),
+            status=str(payload.get("state") or ""),
+            summary=str(payload.get("title") or ""),
+        )
+
+    async def find_issue_for_finding(self, finding_id: str) -> GitHubIssue | None:
+        organization, repository = self._issue_repository()
+        payload = await self._require().get_json(
+            f"/repos/{organization}/{repository}/issues",
+            headers=self._headers(),
+            params={"state": "all", "labels": self._finding_label(finding_id), "per_page": 1},
+        )
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise IntegrationError("GitHub returned an invalid issue search response", provider=PROVIDER)
+        return self._issue_from_payload(payload[0]) if payload else None
+
+    async def create_issue(
+        self,
+        *,
+        summary: str,
+        description: str,
+        finding_id: str,
+        labels: list[str] | None = None,
+    ) -> GitHubIssue:
+        """Create one labeled GitHub issue, returning an existing label match on retries."""
+        organization, repository = self._issue_repository()
+        existing = await self.find_issue_for_finding(finding_id)
+        if existing is not None:
+            return existing
+        issue_labels = ["cynux", self._finding_label(finding_id), *(labels or [])]
+        payload = await self._require().post_json(
+            f"/repos/{organization}/{repository}/issues",
+            headers=self._headers(),
+            json={
+                "title": summary.strip()[:256],
+                "body": description[:60_000],
+                "labels": sorted(set(issue_labels)),
+            },
+        )
+        if not isinstance(payload, dict):
+            raise IntegrationError("GitHub returned an invalid issue response", provider=PROVIDER)
+        return self._issue_from_payload(payload)
+
+    async def get_issue(self, key: str) -> GitHubIssue:
+        organization, repository = self._issue_repository()
+        number = key.lstrip("#")
+        if not number.isdigit() or int(number) <= 0:
+            raise IntegrationError("Invalid GitHub issue key", provider=PROVIDER)
+        payload = await self._require().get_json(
+            f"/repos/{organization}/{repository}/issues/{int(number)}", headers=self._headers()
+        )
+        if not isinstance(payload, dict):
+            raise IntegrationError("GitHub returned an invalid issue response", provider=PROVIDER)
+        return self._issue_from_payload(payload)
+
+    async def add_comment(self, key: str, text: str) -> None:
+        """Append a bounded Cynux remediation update to a GitHub issue."""
+        organization, repository = self._issue_repository()
+        number = key.lstrip("#")
+        if not number.isdigit() or int(number) <= 0:
+            raise IntegrationError("Invalid GitHub issue key", provider=PROVIDER)
+        await self._require().post_json(
+            f"/repos/{organization}/{repository}/issues/{int(number)}/comments",
+            headers=self._headers(),
+            json={"body": text[:60_000]},
+        )
 
     async def ping(self) -> bool:
         await self._require().get_json("/user", headers=self._headers())
@@ -178,4 +278,4 @@ class GitHubClient:
             self._client = None
 
 
-__all__ = ["GitHubAlertFeed", "GitHubClient", "PROVIDER"]
+__all__ = ["GitHubAlertFeed", "GitHubClient", "GitHubIssue", "PROVIDER"]

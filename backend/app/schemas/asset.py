@@ -157,8 +157,21 @@ class AssetFilter(BaseModel):
     internet_exposed: bool | None = None
     status: AssetStatus | None = None
     assessment_id: uuid.UUID | None = None
+    group: str | None = Field(default=None, min_length=1, max_length=60, pattern=r"^[^\x00-\x1f]+$")
     #: Free-text match against name, IP and service.
     q: str | None = Field(default=None, max_length=200)
+    #: Typed boolean inventory query, e.g. ``environment:production AND risk>=0.8``.
+    query: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @field_validator("group")
+    @classmethod
+    def normalize_group(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("group cannot be blank")
+        return value
 
 
 class CmdbImportOut(BaseModel):

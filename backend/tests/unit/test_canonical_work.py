@@ -21,10 +21,25 @@ def test_work_api_and_payload_require_a_real_change() -> None:
     app = FastAPI()
     app.include_router(api_router, prefix="/api/v1")
     assert "patch" in app.openapi()["paths"]["/api/v1/canonical-findings/{finding_id}/work"]
+    assert "patch" in app.openapi()["paths"]["/api/v1/canonical-findings/work/bulk"]
     with pytest.raises(ValidationError):
         CanonicalWorkIn(expected_version=0)
     with pytest.raises(ValidationError):
         CanonicalWorkIn(expected_version=0, remediation_plan="   ")
+
+
+def test_bulk_work_requires_unique_bounded_versioned_items() -> None:
+    from app.schemas.canonical import BulkCanonicalWorkIn, BulkCanonicalWorkItemIn
+
+    finding_id = uuid.uuid4()
+    item = BulkCanonicalWorkItemIn(
+        finding_id=finding_id,
+        expected_version=2,
+        remediation_plan="Upgrade the affected dependency and verify the deployed version.",
+    )
+    assert BulkCanonicalWorkIn(items=[item]).items == [item]
+    with pytest.raises(ValidationError, match="unique"):
+        BulkCanonicalWorkIn(items=[item, item])
 
 
 @pytest.mark.asyncio
@@ -73,6 +88,45 @@ async def test_work_assignment_sets_owner_due_plan_and_records_history() -> None
     assert finding.remediation_plan == "Upgrade affected package"
     assert finding.status_version == 3
     assert [row for row in session.add.call_args_list if isinstance(row.args[0], FindingHistory)]
+
+
+@pytest.mark.asyncio
+async def test_bulk_work_rejects_a_stale_item_before_mutating_any_finding() -> None:
+    from app.schemas.canonical import BulkCanonicalWorkIn, BulkCanonicalWorkItemIn
+    from app.services.canonical_work import bulk_update_work
+
+    org_id = uuid.uuid4()
+    first = CanonicalFinding(
+        id=uuid.uuid4(), organization_id=org_id, asset_id=uuid.uuid4(), fingerprint="c" * 64,
+        title="First", severity="high", status="open", status_version=2,
+    )
+    stale = CanonicalFinding(
+        id=uuid.uuid4(), organization_id=org_id, asset_id=uuid.uuid4(), fingerprint="d" * 64,
+        title="Second", severity="high", status="open", status_version=3,
+    )
+    principal = Principal(user_id=uuid.uuid4(), organization_id=org_id, role=Role.SECURITY_ENGINEER)
+    session = AsyncMock()
+    session.add = MagicMock()
+    rows = MagicMock()
+    rows.scalars.return_value.all.return_value = [first, stale]
+    session.execute.return_value = rows
+    request = BulkCanonicalWorkIn(
+        items=[
+            BulkCanonicalWorkItemIn(
+                finding_id=first.id, expected_version=2, remediation_plan="Upgrade and verify.",
+            ),
+            BulkCanonicalWorkItemIn(
+                finding_id=stale.id, expected_version=2, remediation_plan="Upgrade and verify.",
+            ),
+        ]
+    )
+
+    with pytest.raises(ConflictError, match="changed"):
+        await bulk_update_work(session, principal, request)
+
+    assert first.status_version == 2
+    assert first.remediation_plan is None
+    assert not session.add.called
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ dependencies = [
   # --- Security ---
   "cryptography==46.0.5",
   "PyJWT==2.10.1",
+  "pysaml2==7.5.5",
   "argon2-cffi==23.1.0",
   "defusedxml==0.7.1",
 

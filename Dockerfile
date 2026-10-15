@@ -16,6 +16,7 @@ RUN apt-get update \
         libgdk-pixbuf-2.0-0 \
         libffi8 \
         fonts-dejavu-core \
+        xmlsec1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -78,7 +78,7 @@ def test_gitleaks_scans_one_approved_repo_and_imports_secret_free_report(tmp_pat
 @pytest.mark.parametrize(
     "target",
     [
-        "https://bitbucket.org/acme/api",
+        "https://evil.example/acme/api",
         "https://github.com/acme/api?token=x",
         "https://example.com/",
     ],

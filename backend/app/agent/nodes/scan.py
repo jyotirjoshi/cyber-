@@ -44,12 +44,15 @@ logs -- summaries and degradation notes carry counts only (SEC-002).
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
+import inspect
 import uuid
 from dataclasses import dataclass
 from typing import Literal
 
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.nodes._common import StepHandle, load_assessment, record_step
@@ -69,9 +72,19 @@ from app.db.enums import (
 from app.db.models.assessment import Approval
 from app.db.models.asset import Asset
 from app.db.models.identity import Organization
-from app.db.models.scanner import ScannerJob
+from app.db.models.scanner import ScannerArtifact, ScannerJob
 from app.db.session import session_scope
 from app.services import audit as audit_service
+from app.services.agent_planner import DecisionCandidate, match_approved_jobs
+from app.services.agent_specialist import (
+    SpecialistOutcome,
+    bind_scanner_job,
+    ensure_tasks,
+    evidence_gate,
+    mark_running,
+    mark_terminal,
+    recover_stale_tasks,
+)
 from app.services.approval import approval_targets, granted_approval
 from app.services.assessment import record_degradation, transition
 from app.services.asset import assets_by_ids
@@ -193,6 +206,31 @@ class _ScanPlan:
     skip: bool
     jobs: list[tuple[ScannerName, list[str]]]
     no_scan_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ScannerExecution:
+    status: str
+    duration_ms: int | None
+    job_id: uuid.UUID | None
+    artifacts_archived: bool
+    artifact_count: int
+    failure_code: str | None = None
+
+    def __iter__(self):
+        """Keep the historical ``status, duration = result`` test/caller contract."""
+        yield self.status
+        yield self.duration_ms
+
+
+@dataclass(frozen=True, slots=True)
+class _SpecialistResult:
+    specialist: str
+    scanner: str
+    outcome: SpecialistOutcome
+    job_id: uuid.UUID | None
+    artifact_count: int
+    failure_code: str | None = None
 
 
 def _jobs_for_scope(
@@ -338,21 +376,159 @@ async def execute_scanners(state: AssessmentState, *, deps: AgentDeps) -> dict[s
             )
         return {"scanned": True, "stage": AssessmentStage.SCAN_NMAP.value}
 
-    for scanner, targets in plan.jobs:
-        async with record_step(
-            deps,
-            state,
-            node=_NODE,
-            stage=_SCAN_STAGE[scanner],
-            label=f"Scanning {len(targets)} target(s) with {_SCANNER_LABELS[scanner]}",
-            tool_name=scanner.value,
-            input_digest={"scanner": scanner.value, "targets": len(targets)},
-        ) as step:
-            # A ScannerError must be caught *inside* the body: record_step re-raises any
-            # Exception as a failed run (FR-040 would be violated otherwise).
-            await _run_scanner(deps, state, step, scanner, targets)
+    tasks = await _prepare_specialist_tasks(deps, state, plan.jobs)
+    async with record_step(
+        deps,
+        state,
+        node=_NODE,
+        stage=None,
+        label=f"Running {len(tasks)} approved security specialist task(s)",
+        tool_name="specialist_supervisor",
+        input_digest={"specialists": len(tasks), "targets": sum(len(item[1]) for item in plan.jobs)},
+    ) as step:
+        results = await asyncio.gather(
+            *(
+                _run_specialist(deps, state, step, task.id, scanner, targets)
+                for task, (scanner, targets) in zip(tasks, plan.jobs, strict=True)
+            )
+        )
+        counts = {outcome.value: 0 for outcome in SpecialistOutcome}
+        for result in results:
+            counts[result.outcome.value] += 1
+        step.record_output({"specialists": len(results), "outcomes": counts})
+        if counts[SpecialistOutcome.FAILED.value] or counts[SpecialistOutcome.DEGRADED.value]:
+            step.degrade("One or more specialists did not produce complete artifact-backed evidence.")
+        for result, (scanner, targets) in zip(results, plan.jobs, strict=True):
+            async with record_step(
+                deps,
+                state,
+                node=_NODE,
+                stage=_SCAN_STAGE[scanner],
+                label=f"{result.specialist.title()} specialist ran {_SCANNER_LABELS[scanner]}",
+                tool_name=scanner.value,
+                input_digest={"scanner": scanner.value, "targets": len(targets)},
+            ) as specialist_step:
+                specialist_step.record_output(
+                    {
+                        "outcome": result.outcome.value,
+                        "artifact_count": result.artifact_count,
+                        "scanner_job_id": str(result.job_id) if result.job_id else None,
+                    }
+                )
+                if result.outcome is not SpecialistOutcome.COMPLETED:
+                    specialist_step.degrade(
+                        "The specialist did not produce complete artifact-backed evidence."
+                    )
 
     return {"scanned": True, "stage": _SCAN_STAGE[plan.jobs[-1][0]].value}
+
+
+async def execute_adaptive_scanners(
+    state: AssessmentState, *, deps: AgentDeps
+) -> dict[str, object]:
+    """Run one policy-accepted follow-up round inside the original live approval.
+
+    The decision payload is never authority. This node re-reads the granted approval,
+    rebuilds scanner-specific compatible targets, and requires every proposed target to
+    remain a subset before it creates work.
+    """
+    raw_actions = state.get("adaptive_actions") or []
+    if not raw_actions:
+        return {"adaptive_actions": []}
+
+    candidates: list[DecisionCandidate] = []
+    for raw in raw_actions:
+        try:
+            candidates.append(DecisionCandidate.model_validate(raw))
+        except (TypeError, ValueError):
+            continue
+
+    async with session_scope(deps.settings) as session:
+        assessment = await load_assessment(session, state)
+        if assessment.status_enum not in {
+            AssessmentStatus.SCANNING,
+            AssessmentStatus.ANALYZING,
+        }:
+            return {
+                "adaptive_actions": [],
+                "adaptive_stop_reason": "assessment_not_active",
+            }
+        approved_jobs = await approved_scan_jobs(session, state, deps.settings)
+
+    matched = match_approved_jobs(
+        actions=tuple(candidates),
+        approved_jobs=tuple((scanner.value, targets) for scanner, targets in approved_jobs),
+    )
+    jobs = [(ScannerName(tool), targets) for tool, targets in matched]
+    if not jobs:
+        return {
+            "adaptive_actions": [],
+            "adaptive_stop_reason": "approval_scope_changed",
+        }
+
+    tasks = await _prepare_specialist_tasks(deps, state, jobs)
+    async with record_step(
+        deps,
+        state,
+        node="execute_adaptive_scanners",
+        stage=None,
+        label=f"Running {len(tasks)} adaptive specialist task(s)",
+        tool_name="adaptive_specialist_supervisor",
+        input_digest={"specialists": len(tasks), "targets": sum(len(item[1]) for item in jobs)},
+    ) as step:
+        results = await asyncio.gather(
+            *(
+                _run_specialist(
+                    deps,
+                    state,
+                    step,
+                    task.id,
+                    scanner,
+                    targets,
+                    adaptive=True,
+                )
+                for task, (scanner, targets) in zip(tasks, jobs, strict=True)
+            )
+        )
+        counts = {outcome.value: 0 for outcome in SpecialistOutcome}
+        for result in results:
+            counts[result.outcome.value] += 1
+        step.record_output({"specialists": len(results), "outcomes": counts})
+        if counts[SpecialistOutcome.FAILED.value] or counts[SpecialistOutcome.DEGRADED.value]:
+            step.degrade("One or more adaptive specialists lacked complete evidence.")
+    return {"adaptive_actions": []}
+
+
+async def approved_scan_jobs(
+    session: AsyncSession,
+    state: AssessmentState,
+    settings: Settings,
+) -> list[tuple[ScannerName, list[str]]]:
+    """Rebuild the current scanner-specific scope from the granted approval."""
+    approval = await granted_approval(session, state_uuid(state, "assessment_id"))
+    targets, scanners, _ = await _resolve_scope(session, state, approval, settings)
+    return _jobs_for_scope(targets, scanners)
+
+
+async def _prepare_specialist_tasks(
+    deps: AgentDeps,
+    state: AssessmentState,
+    jobs: list[tuple[ScannerName, list[str]]],
+):
+    async with session_scope(deps.settings) as session:
+        await recover_stale_tasks(
+            session,
+            run_id=state_uuid(state, "run_id"),
+            organization_id=state_uuid(state, "organization_id"),
+            stale_before=dt.datetime.now(dt.UTC) - dt.timedelta(minutes=5),
+        )
+        return await ensure_tasks(
+            session,
+            organization_id=state_uuid(state, "organization_id"),
+            run_id=state_uuid(state, "run_id"),
+            assessment_id=state_uuid(state, "assessment_id"),
+            jobs=jobs,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -472,13 +648,82 @@ def _canonical_targets(assets: list[Asset], policy: TargetPolicySettings) -> lis
 # ---------------------------------------------------------------------------
 
 
+async def _run_specialist(
+    deps: AgentDeps,
+    state: AssessmentState,
+    step: StepHandle,
+    task_id: uuid.UUID,
+    scanner: ScannerName,
+    targets: list[str],
+    *,
+    adaptive: bool = False,
+) -> _SpecialistResult:
+    """Run one persisted specialist assignment and settle it with bounded evidence."""
+    async with session_scope(deps.settings) as session:
+        task = await mark_running(session, task_id, worker_id=None)
+        specialist = task.specialist
+        if task.status in {"completed", "degraded", "failed"}:
+            evidence = task.evidence if isinstance(task.evidence, dict) else {}
+            return _SpecialistResult(
+                specialist=specialist,
+                scanner=scanner.value,
+                outcome=SpecialistOutcome(task.status),
+                job_id=task.scanner_job_id,
+                artifact_count=int(evidence.get("artifact_count") or 0),
+                failure_code=task.failure_code,
+            )
+
+    execution = await _run_scanner(
+        deps,
+        state,
+        step,
+        scanner,
+        targets,
+        task_id=task_id,
+        allow_analyzing=adaptive,
+    )
+    outcome = evidence_gate(
+        execution.status,
+        artifacts_archived=execution.artifacts_archived,
+        artifact_count=execution.artifact_count,
+    )
+    evidence = {
+        "scanner_job_id": str(execution.job_id) if execution.job_id else None,
+        "scanner_status": execution.status,
+        "artifact_count": execution.artifact_count,
+        "artifacts_archived": execution.artifacts_archived,
+        "evidence_verified": outcome is SpecialistOutcome.COMPLETED,
+        "duration_ms": execution.duration_ms,
+    }
+    async with session_scope(deps.settings) as session:
+        await mark_terminal(
+            session,
+            task_id,
+            outcome=outcome,
+            scanner_job_id=execution.job_id,
+            evidence=evidence,
+            failure_code=execution.failure_code,
+        )
+    return _SpecialistResult(
+        specialist=specialist,
+        scanner=scanner.value,
+        outcome=outcome,
+        job_id=execution.job_id,
+        artifact_count=execution.artifact_count,
+        failure_code=execution.failure_code,
+    )
+
+
 async def _run_scanner(
     deps: AgentDeps,
     state: AssessmentState,
     step: StepHandle,
     scanner: ScannerName,
     targets: list[str],
-) -> None:
+    *,
+    task_id: uuid.UUID | None = None,
+    allow_analyzing: bool = False,
+) -> _ScannerExecution:
     """Claim a slot, run one scanner through ``execute_job``, and degrade on any scanner fault.
 
     Never re-raises a :class:`ScannerError`: a scanner failure is recorded on the job row by
@@ -490,11 +735,17 @@ async def _run_scanner(
 
     if not await _acquire_slot(deps, org_id):
         await _emit_tool(step, scanner, status="failed", summary=f"No capacity for {label}")
-        step.record_output({"scanner": scanner.value, "status": "no_capacity"})
         await _apply_degradation(
-            deps, state, step, scanner, reason=_capacity_reason(scanner), impact=_IMPACT_NOT_RUN
+            deps, state, scanner, reason=_capacity_reason(scanner), impact=_IMPACT_NOT_RUN
         )
-        return
+        return _ScannerExecution(
+            status=JobStatus.FAILED.value,
+            duration_ms=None,
+            job_id=None,
+            artifacts_archived=False,
+            artifact_count=0,
+            failure_code="scanner_capacity_unavailable",
+        )
 
     await _emit_tool(
         step,
@@ -502,11 +753,17 @@ async def _run_scanner(
         status="started",
         summary=f"Scanning {len(targets)} target(s) with {label}",
     )
-    status: str | None = None
-    duration_ms: int | None = None
+    execution: _ScannerExecution | None = None
     failure: ScannerError | None = None
     try:
-        status, duration_ms = await _enqueue_and_execute(deps, state, scanner, targets)
+        execution = await _enqueue_and_execute(
+            deps,
+            state,
+            scanner,
+            targets,
+            specialist_task_id=task_id,
+            allow_analyzing=allow_analyzing,
+        )
     except ScannerError as exc:
         # A refused invocation, an unreachable daemon, a crash or a timeout are all this class.
         # None of them fail the assessment -- they degrade it.
@@ -517,44 +774,44 @@ async def _run_scanner(
     if failure is not None:
         log.warning("agent.scan.scanner_failed", scanner=scanner.value, failure_code=failure.code)
         await _emit_tool(step, scanner, status="failed", summary=f"{label} could not run")
-        step.record_output(
-            {
-                "scanner": scanner.value,
-                "status": JobStatus.FAILED.value,
-                "failure_code": failure.code,
-            }
-        )
         await _apply_degradation(
-            deps, state, step, scanner, reason=_fatal_reason(scanner), impact=_IMPACT_NOT_RUN
+            deps, state, scanner, reason=_fatal_reason(scanner), impact=_IMPACT_NOT_RUN
         )
-        return
+        return _ScannerExecution(
+            status=JobStatus.FAILED.value,
+            duration_ms=None,
+            job_id=None,
+            artifacts_archived=False,
+            artifact_count=0,
+            failure_code=failure.code,
+        )
 
-    succeeded = status == JobStatus.COMPLETED.value
+    if execution is None:  # defensive: every non-exception execution path assigns a result
+        raise RuntimeError("scanner execution ended without a durable outcome")
+    succeeded = execution.status == JobStatus.COMPLETED.value
     await _emit_tool(
         step,
         scanner,
         status="succeeded" if succeeded else "failed",
         summary=f"{label} {'completed' if succeeded else 'did not finish cleanly'}",
-        duration_ms=duration_ms,
+        duration_ms=execution.duration_ms,
     )
-    step.record_output({"scanner": scanner.value, "status": status or JobStatus.FAILED.value})
     if not succeeded:
         await _apply_degradation(
-            deps, state, step, scanner, reason=_partial_reason(scanner), impact=_IMPACT_PARTIAL
+            deps, state, scanner, reason=_partial_reason(scanner), impact=_IMPACT_PARTIAL
         )
+    return execution
 
 
 async def _apply_degradation(
     deps: AgentDeps,
     state: AssessmentState,
-    step: StepHandle,
     scanner: ScannerName,
     *,
     reason: str,
     impact: str,
 ) -> None:
     """Mark this step degraded and record the matching assessment-level degradation (FR-039)."""
-    step.degrade(reason)
     await _degrade(deps, state, stage=_SCAN_STAGE[scanner], reason=reason, impact=impact)
 
 
@@ -563,7 +820,10 @@ async def _enqueue_and_execute(
     state: AssessmentState,
     scanner: ScannerName,
     targets: list[str],
-) -> tuple[str, int | None]:
+    *,
+    specialist_task_id: uuid.UUID | None = None,
+    allow_analyzing: bool = False,
+) -> _ScannerExecution:
     """Enqueue the job, then run it to a terminal state; returns ``(job status, duration ms)``.
 
     Two transactions: the first creates and commits the QUEUED row (which audits the enqueue),
@@ -584,8 +844,26 @@ async def _enqueue_and_execute(
         )
         job_id = job.id
 
+    if specialist_task_id is not None:
+        async with session_scope(deps.settings) as session:
+            await bind_scanner_job(session, specialist_task_id, scanner_job_id=job_id)
+
+    # A recovered graph may meet the same idempotent job while its original container is
+    # still healthy. Wait for that durable job instead of starting or failing duplicate work.
     async with session_scope(deps.settings) as session:
-        row = await session.get(ScannerJob, job_id)
+        existing = await session.get(ScannerJob, job_id)
+        existing_status = existing.status if existing is not None else None
+        existing_timeout = int(getattr(existing, "timeout_seconds", 60) or 60)
+    if existing_status == JobStatus.RUNNING.value:
+        return await _await_existing_job(deps, job_id, timeout_seconds=existing_timeout + 60)
+
+    async with session_scope(deps.settings) as session:
+        get_parameters = inspect.signature(session.get).parameters
+        row = await session.get(
+            ScannerJob,
+            job_id,
+            **({"with_for_update": True} if "with_for_update" in get_parameters else {}),
+        )
         if row is None:  # pragma: no cover - the row was just committed above
             raise ScannerError(
                 "scanner job disappeared between enqueue and execution",
@@ -598,14 +876,25 @@ async def _enqueue_and_execute(
             )
         if row.status != JobStatus.QUEUED.value:
             duration = row.duration_seconds
-            return row.status, int(duration * 1000) if duration is not None else None
+            artifact_count = await _artifact_count(session, row.id)
+            return _ScannerExecution(
+                status=row.status,
+                duration_ms=int(duration * 1000) if duration is not None else None,
+                job_id=row.id,
+                artifacts_archived=bool(getattr(row, "artifacts_archived", False)),
+                artifact_count=artifact_count,
+                failure_code=getattr(row, "failure_code", None),
+            )
         current_assessment = await load_assessment(session, state)
         approval = await granted_approval(session, current_assessment.id)
         allowed_targets, allowed_scanners, _ = await _resolve_scope(
             session, state, approval, deps.settings
         )
+        allowed_statuses = {AssessmentStatus.SCANNING}
+        if allow_analyzing:
+            allowed_statuses.add(AssessmentStatus.ANALYZING)
         if (
-            current_assessment.status_enum is not AssessmentStatus.SCANNING
+            current_assessment.status_enum not in allowed_statuses
             or not _job_matches_approval(scanner, row.targets, allowed_targets, allowed_scanners)
         ):
             row.status = JobStatus.CANCELLED.value
@@ -622,15 +911,79 @@ async def _enqueue_and_execute(
                 detail={"scanner": scanner.value, "status": row.status},
             )
             log.warning("agent.scan.authorization_changed", job_id=str(job_id))
-            return row.status, None
+            return _ScannerExecution(
+                status=row.status,
+                duration_ms=None,
+                job_id=row.id,
+                artifacts_archived=False,
+                artifact_count=0,
+                failure_code=row.failure_code,
+            )
         finished = await execute_job(
             session, row, runner=deps.runner, storage=deps.storage, settings=deps.settings
         )
         status = finished.status
         duration = finished.duration_seconds
+        artifact_count = await _artifact_count(session, finished.id)
+        archived = bool(getattr(finished, "artifacts_archived", False))
+        failure_code = getattr(finished, "failure_code", None)
 
     duration_ms = int(duration * 1000) if duration is not None else None
-    return status, duration_ms
+    return _ScannerExecution(
+        status=status,
+        duration_ms=duration_ms,
+        job_id=job_id,
+        artifacts_archived=archived,
+        artifact_count=artifact_count,
+        failure_code=failure_code,
+    )
+
+
+async def _artifact_count(session: AsyncSession, job_id: uuid.UUID) -> int:
+    """Count durable proof rows; tolerate narrow unit-test session fakes."""
+    scalar = getattr(session, "scalar", None)
+    if scalar is None:
+        return 0
+    return int(
+        await scalar(
+            select(func.count(ScannerArtifact.id)).where(ScannerArtifact.job_id == job_id)
+        )
+        or 0
+    )
+
+
+async def _await_existing_job(
+    deps: AgentDeps,
+    job_id: uuid.UUID,
+    *,
+    timeout_seconds: int,
+) -> _ScannerExecution:
+    deadline = asyncio.get_running_loop().time() + max(10, min(timeout_seconds, 3600))
+    while True:
+        async with session_scope(deps.settings) as session:
+            job = await session.get(ScannerJob, job_id)
+            if job is None:
+                raise ScannerError("scanner job disappeared during specialist recovery")
+            if job.status not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
+                duration = job.duration_seconds
+                return _ScannerExecution(
+                    status=job.status,
+                    duration_ms=int(duration * 1000) if duration is not None else None,
+                    job_id=job.id,
+                    artifacts_archived=job.artifacts_archived,
+                    artifact_count=await _artifact_count(session, job.id),
+                    failure_code=job.failure_code,
+                )
+        if asyncio.get_running_loop().time() >= deadline:
+            return _ScannerExecution(
+                status=JobStatus.RUNNING.value,
+                duration_ms=None,
+                job_id=job_id,
+                artifacts_archived=False,
+                artifact_count=0,
+                failure_code="specialist_job_still_running",
+            )
+        await asyncio.sleep(3.0)
 
 
 async def _acquire_slot(deps: AgentDeps, org_id: uuid.UUID) -> bool:
@@ -715,4 +1068,4 @@ def _fatal_reason(scanner: ScannerName) -> str:
     return f"{_SCANNER_LABELS[scanner]} could not be run."
 
 
-__all__ = ["execute_scanners"]
+__all__ = ["approved_scan_jobs", "execute_adaptive_scanners", "execute_scanners"]

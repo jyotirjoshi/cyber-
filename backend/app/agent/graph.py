@@ -49,6 +49,7 @@ from app.agent.nodes.actions import create_actions
 from app.agent.nodes.analyze import analyze_findings
 from app.agent.nodes.approval import request_approval
 from app.agent.nodes.attack_path import attack_path
+from app.agent.nodes.decide_next import decide_next
 from app.agent.nodes.discover_assets import discover_assets
 from app.agent.nodes.enrich import enrich_intelligence
 from app.agent.nodes.importer import import_findings
@@ -57,8 +58,9 @@ from app.agent.nodes.prioritize import prioritize_findings
 from app.agent.nodes.recon import recon
 from app.agent.nodes.remediate import remediate_findings
 from app.agent.nodes.report import generate_report
-from app.agent.nodes.scan import execute_scanners
+from app.agent.nodes.scan import execute_adaptive_scanners, execute_scanners
 from app.agent.nodes.understand import understand
+from app.agent.nodes.verify_specialists import verify_specialists
 from app.agent.registry import AgentDeps
 from app.agent.state import AssessmentState
 from app.db.enums import AssessmentDepth
@@ -71,6 +73,9 @@ log = structlog.get_logger(__name__)
 #: outgoing edge, so once approval has checkpointed the graph stops here until a granted
 #: approval row and a resume drive it forward.
 _SCANNER_NODE = "execute_scanners"
+_ADAPTIVE_SCANNER_NODE = "execute_adaptive_scanners"
+_DECISION_NODE = "decide_next"
+_PLAN_NODE = "build_plan"
 
 #: The two fixed continuations out of ``discover_assets`` (see :func:`route_after_discovery`).
 #: ``request_approval`` opens the active-scan block; ``analyze_findings`` is the join point
@@ -96,12 +101,15 @@ class _NodeFn(Protocol):
 #: control flow is the edges in :func:`build_graph`, not this tuple.
 _NODES: tuple[tuple[str, _NodeFn], ...] = (
     ("understand", understand),
-    ("plan", plan),
+    (_PLAN_NODE, plan),
     ("recon", recon),
     ("discover_assets", discover_assets),
     (_APPROVAL_NODE, request_approval),
     (_SCANNER_NODE, execute_scanners),
+    (_ADAPTIVE_SCANNER_NODE, execute_adaptive_scanners),
     ("import_findings", import_findings),
+    ("verify_specialists", verify_specialists),
+    (_DECISION_NODE, decide_next),
     ("enrich_intelligence", enrich_intelligence),
     ("attack_path", attack_path),  # NEW: kill-chain + SSVC + correlation
     (_ANALYSIS_NODE, analyze_findings),
@@ -140,6 +148,11 @@ def route_after_discovery(state: AssessmentState) -> str:
     return _APPROVAL_NODE
 
 
+def route_after_decision(state: AssessmentState) -> str:
+    """Enter another approved specialist round only when policy accepted actions."""
+    return _ADAPTIVE_SCANNER_NODE if state.get("adaptive_actions") else "enrich_intelligence"
+
+
 def build_graph(
     deps: AgentDeps, checkpointer: BaseCheckpointSaver | None = None
 ) -> CompiledStateGraph:
@@ -164,8 +177,8 @@ def build_graph(
 
     # Passive prefix: always runs, touches no target actively (FR-008).
     builder.add_edge(START, "understand")
-    builder.add_edge("understand", "plan")
-    builder.add_edge("plan", "recon")
+    builder.add_edge("understand", _PLAN_NODE)
+    builder.add_edge(_PLAN_NODE, "recon")
     builder.add_edge("recon", "discover_assets")
 
     # The one branch: into the active-scan block, or straight to analysis.
@@ -179,7 +192,14 @@ def build_graph(
     # by ``interrupt_before`` until a human approves (FR-011).
     builder.add_edge(_APPROVAL_NODE, _SCANNER_NODE)
     builder.add_edge(_SCANNER_NODE, "import_findings")
-    builder.add_edge("import_findings", "enrich_intelligence")
+    builder.add_edge("import_findings", "verify_specialists")
+    builder.add_edge("verify_specialists", _DECISION_NODE)
+    builder.add_conditional_edges(
+        _DECISION_NODE,
+        route_after_decision,
+        [_ADAPTIVE_SCANNER_NODE, "enrich_intelligence"],
+    )
+    builder.add_edge(_ADAPTIVE_SCANNER_NODE, "import_findings")
     builder.add_edge("enrich_intelligence", "attack_path")  # NEW: kill-chain analysis
     builder.add_edge("attack_path", _ANALYSIS_NODE)
 
@@ -200,4 +220,4 @@ def build_graph(
     return compiled
 
 
-__all__ = ["build_graph", "route_after_discovery"]
+__all__ = ["build_graph", "route_after_decision", "route_after_discovery"]

@@ -20,13 +20,14 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import LAZY, Base, TimestampMixin, uuid_pk
+from app.db.base import LAZY, Base, TenantMixin, TimestampMixin, uuid_pk
 from app.db.enums import Role
 
 if TYPE_CHECKING:
@@ -41,6 +42,14 @@ class Organization(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = uuid_pk()
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    #: Optional MSSP / holding organization.  This is deliberately only a relationship
+    #: between tenant records: all assets, findings, integrations and credentials remain
+    #: keyed to this organization's own id and are never inherited by the parent.
+    parent_organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        index=True,
+    )
 
     #: Per-organization overrides of the global scanner concurrency ceiling
     #: (PRD section 57: "concurrency must be configurable per organization").
@@ -67,6 +76,15 @@ class Organization(Base, TimestampMixin):
     )
     integrations: Mapped[list[Integration]] = relationship(
         back_populates="organization", cascade="all, delete-orphan", lazy=LAZY
+    )
+    parent_organization: Mapped[Organization | None] = relationship(
+        back_populates="client_organizations",
+        remote_side="Organization.id",
+        lazy=LAZY,
+    )
+    client_organizations: Mapped[list[Organization]] = relationship(
+        back_populates="parent_organization",
+        lazy=LAZY,
     )
 
     __table_args__ = (
@@ -176,4 +194,78 @@ class PasswordResetToken(Base):
     )
 
 
-__all__ = ["Membership", "Organization", "PasswordResetToken", "User"]
+class ScimProvisioningToken(Base, TenantMixin, TimestampMixin):
+    """Tenant-local bearer credential for an identity provider's SCIM client.
+
+    The token is deliberately independent of public platform API keys: a SCIM client
+    gets only provisioning authority, and revoking it cannot affect CI integrations.
+    As with every long-lived credential, only an Argon2 verifier is persisted.
+    """
+
+    __tablename__ = "scim_provisioning_tokens"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "key_prefix", name="unique_scim_provisioning_key_prefix"),
+        Index("ix_scim_provisioning_tokens_org_active", "organization_id", "revoked_at", "expires_at"),
+    )
+
+
+class OidcConnection(Base, TenantMixin, TimestampMixin):
+    """One confidential OIDC connection per organization."""
+
+    __tablename__ = "oidc_connections"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    issuer_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    client_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    client_secret_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(2048), nullable=False)
+    allowed_email_domains: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (UniqueConstraint("organization_id", name="unique_oidc_connection_org"),)
+
+
+class SamlConnection(Base, TenantMixin, TimestampMixin):
+    """One tenant-local SAML 2.0 IdP trust configuration."""
+
+    __tablename__ = "saml_connections"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    sp_entity_id: Mapped[str] = mapped_column(String(2048), nullable=False)
+    idp_entity_id: Mapped[str] = mapped_column(String(2048), nullable=False)
+    idp_sso_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    idp_certificate_pem: Mapped[str] = mapped_column(Text, nullable=False)
+    acs_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    allowed_email_domains: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (UniqueConstraint("organization_id", name="unique_saml_connection_org"),)
+
+
+__all__ = [
+    "Membership",
+    "OidcConnection",
+    "Organization",
+    "PasswordResetToken",
+    "ScimProvisioningToken",
+    "SamlConnection",
+    "User",
+]

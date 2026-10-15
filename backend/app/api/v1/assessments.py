@@ -38,10 +38,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep, RedisDep, SettingsDep
 from app.api.v1.projections import assessment_detail_out, assessment_out
-from app.core.errors import ResourceNotFoundError
+from app.core.errors import InvalidConfigurationError, ResourceNotFoundError
 from app.db.enums import Permission
 from app.db.models.agent import AgentRun, RunDispatch
 from app.db.models.assessment import Assessment, RecurringScan, ScanProfile
+from app.db.models.notification import Notification
 from app.db.models.scanner import ScannerJob
 from app.db.repository import tenant_select
 from app.schemas.assessment import (
@@ -50,6 +51,7 @@ from app.schemas.assessment import (
     AssessmentFilter,
     AssessmentOut,
     CancelIn,
+    EngagementChecklistUpdateIn,
     RecurringScanCreateIn,
     RecurringScanOut,
     ScanProfileCreateIn,
@@ -58,6 +60,7 @@ from app.schemas.assessment import (
 )
 from app.schemas.common import Page
 from app.services import assessment as assessment_service
+from app.services import audit as audit_service
 from app.services import recurring_scan as recurring_scan_service
 from app.services.context import Principal
 from app.worker.dispatch import deliver_run_dispatch, stage_assessment_run
@@ -91,10 +94,29 @@ async def worker_metrics(principal: PrincipalDep, session: DbSession) -> WorkerM
             .group_by(ScannerJob.status)
         )
     ).all()
+    notification_rows = (
+        await session.execute(
+            tenant_select(Notification, org_id)
+            .with_only_columns(Notification.status, func.count())
+            .where(Notification.channel.in_(("slack", "email", "pagerduty", "webhook")))
+            .group_by(Notification.status)
+        )
+    ).all()
+    notification_retries_due = await session.scalar(
+        tenant_select(Notification, org_id)
+        .with_only_columns(func.count())
+        .where(
+            Notification.status == "pending",
+            Notification.next_retry_at.is_not(None),
+            Notification.next_retry_at <= func.now(),
+        )
+    )
     return WorkerMetricsOut(
         runs={row[0]: row[1] for row in run_rows},
         pending_dispatches=next((row[1] for row in dispatch_rows if row[0] == "pending"), 0),
         scanner_jobs={row[0]: row[1] for row in scanner_rows},
+        notification_deliveries={row[0]: row[1] for row in notification_rows},
+        notification_retries_due=int(notification_retries_due or 0),
     )
 
 
@@ -117,6 +139,29 @@ async def create_scan_profile(
     payload: ScanProfileCreateIn, principal: PrincipalDep, session: DbSession
 ) -> ScanProfile:
     profile = await recurring_scan_service.create_scan_profile(session, principal, payload)
+    await session.commit()
+    return profile
+
+
+@router.post("/profiles/{profile_id}/deactivate", response_model=ScanProfileOut)
+async def deactivate_scan_profile(
+    profile_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ScanProfile:
+    profile, disabled_schedules = await recurring_scan_service.deactivate_scan_profile(
+        session,
+        principal,
+        profile_id,
+    )
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.SCAN_PROFILE_DEACTIVATE,
+        principal=principal,
+        resource_type="scan_profile",
+        resource_id=profile.id,
+        detail={"disabled_recurring_schedules": disabled_schedules},
+    )
     await session.commit()
     return profile
 
@@ -164,6 +209,47 @@ async def pause_recurring_scan(
     if schedule is None:
         raise ResourceNotFoundError("Recurring scan not found")
     schedule.enabled = False
+    await session.commit()
+    return schedule
+
+
+@router.post("/schedules/{schedule_id}/resume", response_model=RecurringScanOut)
+async def resume_recurring_scan(
+    schedule_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> RecurringScan:
+    """Resume a paused schedule only when its original authorization is still valid."""
+    principal.require(Permission.ASSESSMENT_CREATE)
+    schedule = (
+        await session.execute(
+            tenant_select(RecurringScan, principal.organization_id)
+            .where(RecurringScan.id == schedule_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if schedule is None:
+        raise ResourceNotFoundError("Recurring scan not found")
+    from app.db.base import utcnow
+
+    now = utcnow()
+    if schedule.authorization_expires_at <= now:
+        raise InvalidConfigurationError(
+            "Recurring scan authorization has expired",
+            user_message="Renew the authorization before resuming this schedule.",
+        )
+    try:
+        next_run_at = recurring_scan_service.next_scan_time(
+            schedule.cron_expression, schedule.timezone, now
+        )
+    except ValueError as exc:
+        raise InvalidConfigurationError(str(exc), user_message="The stored schedule is invalid.") from exc
+    if next_run_at >= schedule.authorization_expires_at:
+        raise InvalidConfigurationError(
+            "Recurring scan authorization expires before the next run",
+            user_message="Renew the authorization before resuming this schedule.",
+        )
+    schedule.enabled = True
+    schedule.next_run_at = next_run_at
+    schedule.last_error_code = None
     await session.commit()
     return schedule
 
@@ -247,6 +333,27 @@ async def get_assessment(
         session, principal, assessment_id, detail=True
     )
     return await assessment_detail_out(session, assessment)
+
+
+@router.patch("/{assessment_id}/engagement-checklist/{key}", response_model=AssessmentDetailOut)
+async def update_engagement_checklist(
+    assessment_id: uuid.UUID,
+    key: str,
+    payload: EngagementChecklistUpdateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AssessmentDetailOut:
+    assessment = await assessment_service.update_engagement_checklist(
+        session,
+        principal,
+        assessment_id,
+        key,
+        completed=payload.completed,
+        evidence_reference=payload.evidence_reference,
+    )
+    await session.commit()
+    detail = await assessment_service.get_assessment(session, principal, assessment.id, detail=True)
+    return await assessment_detail_out(session, detail)
 
 
 @router.post("/{assessment_id}/cancel", response_model=AssessmentDetailOut)

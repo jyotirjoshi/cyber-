@@ -16,6 +16,7 @@ class ApplicationRiskOut(BaseModel):
     critical: int = Field(ge=0)
     high: int = Field(ge=0)
     max_risk_score: float = Field(ge=0, le=100)
+    aggregate_risk_score: float = Field(ge=0, le=100)
 
 
 class ApplicationRiskPageOut(BaseModel):

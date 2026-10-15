@@ -23,6 +23,7 @@ frontend/.next/
 frontend/.env.local
 frontend/tsconfig.tsbuildinfo
 /.playwright-cli/
+/.superpowers/sdd/
 
 # Docker volumes / runtime artifacts
 /var/lib/cynux/

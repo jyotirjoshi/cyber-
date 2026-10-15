@@ -86,6 +86,25 @@
   </div>
 </div>
 
+{% if report_template_blocks %}
+<div class="section">
+  <h2>Custom report view</h2>
+  {% for block in report_template_blocks %}
+    {% if block.type == "title" %}<h3>{{ block.text }}</h3>
+    {% elif block.type == "narrative" %}<p>{{ block.text }}</p>
+    {% elif block.type == "page_break" %}<div style="page-break-after: always"></div>
+    {% elif block.type == "branding" %}<p><strong>{{ block.heading or "Organization report" }}</strong>{% if block.logo_url %} · {{ block.logo_url }}{% endif %}</p>
+    {% elif block.type in ("metric", "trend", "table", "chart", "compliance") %}
+      <h3>{{ block.label or block.heading or (block.query | replace("_", " ") | title) }}</h3>
+      {% if block.value is mapping %}
+      <table><tbody>{% for key, value in block.value.items() %}<tr><th>{{ key | replace("_", " ") | title }}</th><td>{{ value if value is not none else "—" }}</td></tr>{% endfor %}</tbody></table>
+      {% elif block.value is iterable and block.value is not string %}<p class="muted">{{ block.value | length }} record(s) included in the saved query snapshot.</p>
+      {% else %}<p>{{ block.value }}</p>{% endif %}
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if degradations or intelligence_unavailable %}
 <div class="banner">
   <strong>This report is based on incomplete data.</strong>
@@ -122,6 +141,28 @@
   {% if summary.kev_undetermined %}
   <p class="muted">Exploitation status could not be determined for {{ summary.kev_undetermined }}
   finding(s): {{ unverifiable_text }}</p>
+  {% endif %}
+</div>
+
+{# ---------------- Operational metrics ---------------- #}
+<div class="section">
+  <h2>Exposure trend &amp; remediation accountability</h2>
+  <div class="counts">
+    <div class="count-card"><div class="n">{{ operational_metrics.exposure_score }}</div><div class="l">Exposure score</div></div>
+    <div class="count-card"><div class="n">{{ operational_metrics.new_findings }}</div><div class="l">New findings</div></div>
+    <div class="count-card"><div class="n">{{ operational_metrics.resolved_findings }}</div><div class="l">Resolved findings</div></div>
+    <div class="count-card"><div class="n">{{ operational_metrics.mean_time_to_remediate_days if operational_metrics.mean_time_to_remediate_days is not none else "—" }}</div><div class="l">MTTR days</div></div>
+    <div class="count-card"><div class="n">{{ operational_metrics.sla.compliance_percent if operational_metrics.sla.compliance_percent is not none else "—" }}{% if operational_metrics.sla.compliance_percent is not none %}%{% endif %}</div><div class="l">Within SLA</div></div>
+  </div>
+  {% if operational_metrics.previous_exposure_score is not none %}
+  <p class="muted">Exposure score changed by {{ "%+.2f" | format(operational_metrics.exposure_delta) }} points since the previous completed report for this assessment.</p>
+  {% else %}
+  <p class="muted">No previous completed report is available yet for an exposure-score comparison.</p>
+  {% endif %}
+  {% if operational_metrics.sla.tracked %}
+  <p class="muted">{{ operational_metrics.sla.overdue }} overdue of {{ operational_metrics.sla.tracked }} findings carrying an SLA due date.</p>
+  {% else %}
+  <p class="muted">No assessment-linked canonical findings currently carry an SLA due date.</p>
   {% endif %}
 </div>
 
@@ -242,6 +283,31 @@
   <h3>Unprioritized <span class="muted">({{ unprioritized | length }})</span></h3>
     {% for f in unprioritized %}{% include "_finding.html" %}{% endfor %}
   {% endif %}
+</div>
+
+{# ---------------- Compliance evidence ---------------- #}
+<div class="section">
+  <h2>Compliance evidence</h2>
+  <p class="muted">This section contains controls mapped to canonical findings observed in this
+  assessment. It is evidence for review, not a certification determination.</p>
+  <p>{{ compliance.mapped_controls }} mapped control(s); {{ compliance.at_risk_controls }} currently at risk.</p>
+  {% for framework in compliance.frameworks %}
+  <h3>{{ framework.framework }} <span class="muted">({{ framework.mapped_control_count }} mapped,
+  {{ framework.at_risk_control_count }} at risk)</span></h3>
+  <table>
+    <thead><tr><th>Control</th><th>Status</th><th>Active findings</th><th>Highest risk</th></tr></thead>
+    <tbody>
+    {% for control in framework.controls %}
+      <tr><td>{{ control.control_id }} — {{ control.title }}</td>
+      <td><span class="pill">{{ control.effective_status }}</span></td>
+      <td>{{ control.active_finding_count }}</td>
+      <td>{{ control.highest_risk_score if control.highest_risk_score is not none else "—" }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No controls are mapped to canonical findings from this assessment.</p>
+  {% endfor %}
 </div>
 
 {# ---------------- Appendix ---------------- #}

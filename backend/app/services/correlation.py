@@ -21,10 +21,12 @@ handles genuinely ambiguous ones. This keeps cost bounded on large assessments.
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import structlog
 from pydantic import BaseModel
@@ -40,6 +42,7 @@ from app.db.models.finding import Finding
 from app.llm.base import LLMMessage
 from app.llm.gateway import LLMGateway
 from app.llm.prompts_enhanced import CORRELATION_SYSTEM
+from app.services.canonical_identity import valid_cves
 
 log = structlog.get_logger(__name__)
 
@@ -60,6 +63,10 @@ class DuplicateGroup:
     finding_ids: list[uuid.UUID]
     canonical_title: str
     representative_id: uuid.UUID
+    #: A model may nominate a group for analyst comparison, but only a deterministic
+    #: coordinate match is eligible for a high-confidence workflow recommendation.
+    confidence: str = "high"
+    source: str = "deterministic"
 
 
 @dataclass(frozen=True)
@@ -206,30 +213,58 @@ async def correlate_findings(
 # ---------------------------------------------------------------------------
 
 
-def _fingerprint(finding: Finding) -> str:
-    """A stable fingerprint for duplicate detection.
+def _fingerprint(finding: Finding) -> str | None:
+    """Only group findings with a stable asset and specific weakness evidence.
 
-    Two findings with the same (CWE, normalized_endpoint, CVE) on the same asset
-    are strong duplicate candidates regardless of title or scanner.
+    Missing identifiers are not a match. A CWE identifies a weakness class, not
+    an individual defect: without a CVE it also needs a title and code/web location.
+    Component versions and case-sensitive URL paths remain distinct.
     """
+    if finding.asset_id is None:
+        return None
+    cves = valid_cves([cve for cve in (finding.cve_ids or []) if isinstance(cve, str)])
+    endpoint = _normalize_endpoint(finding.endpoint or "")
+    component = (finding.component or "").strip()
+    title = " ".join((finding.title or "").split()).casefold()
+    if not cves and (
+        not isinstance(finding.cwe, int)
+        or isinstance(finding.cwe, bool)
+        or finding.cwe <= 0
+        or not (endpoint or component)
+        or not title
+    ):
+        return None
     parts = [
-        str(finding.asset_id or ""),
-        str(finding.cwe or ""),
-        _normalize_endpoint(finding.endpoint or ""),
-        ",".join(sorted(str(c) for c in (finding.cve_ids or []))),
+        str(finding.asset_id),
+        cves if cves else [finding.cwe, title],
+        endpoint,
+        component,
+        (finding.component_version or "").strip(),
     ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
 
 def _normalize_endpoint(endpoint: str) -> str:
-    """Strip query strings and fragments for fingerprinting."""
+    """Normalize URL origin only; paths, query parameters and versions can differ."""
     if not endpoint:
         return ""
-    # Keep only scheme://host/path
-    for delim in ("?", "#"):
-        if delim in endpoint:
-            endpoint = endpoint[: endpoint.index(delim)]
-    return endpoint.lower().rstrip("/")
+    raw = endpoint.strip()
+    try:
+        parsed = urlsplit(raw)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return raw
+        if parsed.username is not None or parsed.password is not None:
+            return raw
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        port = parsed.port
+        scheme = parsed.scheme.lower()
+        if port is not None and (scheme, port) not in {("http", 80), ("https", 443)}:
+            host = f"{host}:{port}"
+        return urlunsplit((scheme, host, parsed.path or "/", parsed.query, ""))
+    except ValueError:
+        return raw
 
 
 def _deterministic_duplicates(findings: list[Finding]) -> list[DuplicateGroup]:
@@ -237,7 +272,8 @@ def _deterministic_duplicates(findings: list[Finding]) -> list[DuplicateGroup]:
     groups: dict[str, list[Finding]] = defaultdict(list)
     for f in findings:
         key = _fingerprint(f)
-        groups[key].append(f)
+        if key is not None:
+            groups[key].append(f)
 
     result: list[DuplicateGroup] = []
     for _key, group in groups.items():
@@ -267,8 +303,6 @@ def _deterministic_duplicates(findings: list[Finding]) -> list[DuplicateGroup]:
 
 async def _ai_correlate(gateway: LLMGateway, findings: list[Finding]) -> _CorrelationOut:
     """Ask the reasoning model to find false positives and compound risks."""
-    import json
-
     # Build a compact summary — full finding data would exceed the budget
     summary = [
         {
@@ -348,14 +382,18 @@ def _merge(
         for grp in ai_result.duplicates:
             key = frozenset(grp.finding_ids)
             if key not in det_keys:
-                fids = [id_map[fid] for fid in grp.finding_ids if fid in id_map]
+                fids = list(dict.fromkeys(id_map[fid] for fid in grp.finding_ids if fid in id_map))
                 if len(fids) >= 2:
-                    rep = id_map.get(grp.representative_id) or fids[0]
+                    rep = id_map.get(grp.representative_id)
+                    if rep not in fids:
+                        rep = fids[0]
                     all_dups.append(
                         DuplicateGroup(
                             finding_ids=fids,
                             canonical_title=grp.canonical_title or "Duplicate finding",
                             representative_id=rep,
+                            confidence="medium",
+                            source="ai_correlation",
                         )
                     )
 

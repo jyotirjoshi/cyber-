@@ -474,6 +474,14 @@ class CanonicalFindingStatus(StrEnum):
     CLOSED = "closed"
 
 
+class AttackSimulationCampaignStatus(StrEnum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class Priority(StrEnum):
     """FR-023 output. Distinct from severity: severity is the scanner's opinion,
     priority is Cynux's after exposure, exploitation and business context."""
@@ -536,6 +544,74 @@ class StepStatus(StrEnum):
     DEGRADED = "degraded"  # completed without a non-essential dependency
 
 
+class MessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+    TOOL = "tool"
+
+
+class AgentActionName(StrEnum):
+    """An allow-listed external action the agent may propose, never invent."""
+
+    SYNC_GITHUB_ALERTS = "sync_github_alerts"
+    SYNC_GITLAB_ALERTS = "sync_gitlab_alerts"
+    SYNC_WAZUH_ALERTS = "sync_wazuh_alerts"
+    SYNC_SONARQUBE_ALERTS = "sync_sonarqube_alerts"
+    SYNC_SNYK_ISSUES = "sync_snyk_issues"
+    SYNC_TENABLE_VULNERABILITIES = "sync_tenable_vulnerabilities"
+    SYNC_QUALYS_HOST_DETECTIONS = "sync_qualys_host_detections"
+    SYNC_RAPID7_VULNERABILITIES = "sync_rapid7_vulnerabilities"
+    SYNC_WIZ_ISSUES = "sync_wiz_issues"
+    SYNC_PRISMA_CLOUD_ALERTS = "sync_prisma_cloud_alerts"
+    SYNC_CROWDSTRIKE_VULNERABILITIES = "sync_crowdstrike_vulnerabilities"
+    SYNC_AWS_SECURITY_HUB_FINDINGS = "sync_aws_security_hub_findings"
+    SYNC_AWS_INSPECTOR_FINDINGS = "sync_aws_inspector_findings"
+    SYNC_HACKERONE_REPORTS = "sync_hackerone_reports"
+    SYNC_BUGCROWD_SUBMISSIONS = "sync_bugcrowd_submissions"
+    SYNC_CHECKMARX_RESULTS = "sync_checkmarx_results"
+    SYNC_FORTIFY_ISSUES = "sync_fortify_issues"
+    SYNC_AZURE_DEFENDER_ALERTS = "sync_azure_defender_alerts"
+    SYNC_GCP_SCC_FINDINGS = "sync_gcp_scc_findings"
+    SYNC_BURP_DAST_FINDINGS = "sync_burp_dast_findings"
+    UPDATE_GITHUB_ALERT = "update_github_alert"
+    CREATE_JIRA_TICKET = "create_jira_ticket"
+    CREATE_TICKET = "create_ticket"
+    REFRESH_TICKET_STATUS = "refresh_ticket_status"
+    UPDATE_CANONICAL_WORK = "update_canonical_work"
+    BULK_UPDATE_CANONICAL_WORK = "bulk_update_canonical_work"
+    REQUEST_RETEST = "request_retest"
+    REQUEST_REMEDIATION_GROUP_RETESTS = "request_remediation_group_retests"
+    REQUEST_RISK_ACCEPTANCE = "request_risk_acceptance"
+    START_ASSESSMENT = "start_assessment"
+
+
+class AgentActionStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+class AgentSpecialistRole(StrEnum):
+    NETWORK = "network"
+    WEB = "web"
+    CODE = "code"
+    SECRETS = "secrets"
+    SUPPLY_CHAIN = "supply_chain"
+    CONTAINER = "container"
+    CLOUD = "cloud"
+
+
+class AgentSpecialistStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+
 class AgentAutonomyMode(StrEnum):
     MANUAL = "manual"
     SUPERVISED = "supervised"
@@ -582,36 +658,6 @@ class AgentMemoryCandidateStatus(StrEnum):
     EXPIRED = "expired"
 
 
-class MessageRole(StrEnum):
-    USER = "user"
-    ASSISTANT = "assistant"
-    SYSTEM = "system"
-    TOOL = "tool"
-
-
-class AgentActionName(StrEnum):
-    """An allow-listed external action the agent may propose, never invent."""
-
-    SYNC_GITHUB_ALERTS = "sync_github_alerts"
-    SYNC_GITLAB_ALERTS = "sync_gitlab_alerts"
-    SYNC_WAZUH_ALERTS = "sync_wazuh_alerts"
-    SYNC_SONARQUBE_ALERTS = "sync_sonarqube_alerts"
-    SYNC_SNYK_ISSUES = "sync_snyk_issues"
-    SYNC_TENABLE_VULNERABILITIES = "sync_tenable_vulnerabilities"
-    UPDATE_GITHUB_ALERT = "update_github_alert"
-    CREATE_JIRA_TICKET = "create_jira_ticket"
-    UPDATE_CANONICAL_WORK = "update_canonical_work"
-    START_ASSESSMENT = "start_assessment"
-
-
-class AgentActionStatus(StrEnum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    EXECUTED = "executed"
-    FAILED = "failed"
-
-
 class ApprovalDecision(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -637,6 +683,12 @@ class IntegrationKind(StrEnum):
     LLM = "llm"
     DEFECTDOJO = "defectdojo"
     JIRA = "jira"
+    SERVICENOW = "servicenow"
+    AZURE_DEVOPS = "azure_devops"
+    LINEAR = "linear"
+    PAGERDUTY = "pagerduty"
+    SPLUNK = "splunk"
+    BURP_DAST = "burp_dast"
     SLACK = "slack"
     EMAIL = "email"
     DIFY = "dify"
@@ -649,6 +701,19 @@ class IntegrationKind(StrEnum):
     SONARQUBE = "sonarqube"
     SNYK = "snyk"
     TENABLE = "tenable"
+    QUALYS = "qualys"
+    RAPID7 = "rapid7"
+    WIZ = "wiz"
+    PRISMA_CLOUD = "prisma_cloud"
+    CROWDSTRIKE = "crowdstrike"
+    AWS_SECURITY_HUB = "aws_security_hub"
+    AWS_INSPECTOR = "aws_inspector"
+    HACKERONE = "hackerone"
+    BUGCROWD = "bugcrowd"
+    CHECKMARX = "checkmarx"
+    FORTIFY = "fortify"
+    AZURE_DEFENDER = "azure_defender"
+    GCP_SCC = "gcp_scc"
     PROWLER_AWS = "prowler_aws"
     PROWLER_AZURE = "prowler_azure"
     PROWLER_GCP = "prowler_gcp"
@@ -668,13 +733,19 @@ class NotificationEvent(StrEnum):
     ASSESSMENT_COMPLETED = "assessment_completed"
     ASSESSMENT_FAILED = "assessment_failed"
     TICKET_CREATED = "ticket_created"
+    TICKET_CLOSED = "ticket_closed"
     NEW_ASSET = "new_asset"
+    SLA_BREACH = "sla_breach"
+    AUTOMATION_NOTIFICATION = "automation_notification"
 
 
 class NotificationChannel(StrEnum):
     SLACK = "slack"
     EMAIL = "email"
     WEBSOCKET = "websocket"
+    PAGERDUTY = "pagerduty"
+    WEBHOOK = "webhook"
+    SPLUNK = "splunk"
 
 
 class NotificationStatus(StrEnum):
@@ -708,9 +779,14 @@ __all__ = [
     "PERMISSIONS",
     "STAGE_ORDER",
     "AgentRunStatus",
+    "AgentAutonomyMode",
+    "AgentEvaluationDecision",
+    "AgentMemoryCandidateStatus",
+    "AgentToolApprovalMode",
     "ApprovalDecision",
     "ApprovalKind",
     "ArtifactKind",
+    "AttackSimulationCampaignStatus",
     "AssessmentDepth",
     "AssessmentStage",
     "AssessmentStatus",
@@ -727,6 +803,9 @@ __all__ = [
     "IntegrationKind",
     "IntegrationStatus",
     "JobStatus",
+    "KnowledgeEmbeddingStatus",
+    "KnowledgeRetrievalProvider",
+    "KnowledgeSourceStatus",
     "MessageRole",
     "NotificationChannel",
     "NotificationEvent",
@@ -742,13 +821,6 @@ __all__ = [
     "Severity",
     "StepStatus",
     "StrEnum",
-    "AgentAutonomyMode",
-    "AgentEvaluationDecision",
-    "AgentMemoryCandidateStatus",
-    "AgentToolApprovalMode",
-    "KnowledgeEmbeddingStatus",
-    "KnowledgeRetrievalProvider",
-    "KnowledgeSourceStatus",
     "ValidationStatus",
     "role_has",
 ]

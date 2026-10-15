@@ -14,9 +14,12 @@ happens to be looking would be wrong in both directions (handled in the service)
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep
 from app.schemas.audit import AuditEventOut, AuditFilter
@@ -43,6 +46,39 @@ async def list_audit_events(
     )
     items = [AuditEventOut.model_validate(row) for row in rows]
     return Page.build(items, total=total, limit=pagination.limit, offset=pagination.offset)
+
+
+@router.get("/export")
+async def export_audit_events(
+    principal: PrincipalDep,
+    session: DbSession,
+    filters: Annotated[AuditFilter, Query()],
+) -> Response:
+    """Download up to 10,000 filtered audit events as a CSV evidence file."""
+    rows = await audit_service.export_audit_events(session, principal, filters=filters)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "timestamp", "actor_email", "actor_type", "action", "resource_type",
+            "resource_id", "outcome", "reason", "source_ip", "user_agent",
+            "request_id", "trace_id", "detail",
+        ]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                row.created_at.isoformat(), row.actor_email or "", row.actor_type, row.action,
+                row.resource_type or "", row.resource_id or "", row.outcome, row.reason or "",
+                row.source_ip or "", row.user_agent or "", row.request_id or "",
+                row.trace_id or "", json.dumps(row.detail or {}, sort_keys=True, default=str),
+            ]
+        )
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="cynux-audit-events.csv"'},
+    )
 
 
 @router.get(

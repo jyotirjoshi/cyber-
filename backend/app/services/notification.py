@@ -35,6 +35,7 @@ entirely (:mod:`app.services.events`) and deliberately does not route through he
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -44,7 +45,7 @@ from urllib.parse import urlsplit
 
 import structlog
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,8 +63,10 @@ from app.db.enums import (
 )
 from app.db.models.identity import Organization
 from app.db.models.notification import Notification
+from app.db.models.platform import WebhookSubscription
 from app.db.repository import tenant_select
 from app.integrations.email import EmailSender, html_to_text
+from app.integrations.pagerduty import PagerDutyClient
 from app.integrations.slack import (
     SlackClient,
     context_line,
@@ -72,8 +75,10 @@ from app.integrations.slack import (
     section,
     severity_emoji,
 )
+from app.integrations.splunk import SplunkHecClient
 from app.schemas.organization import OrgPolicy
 from app.services import audit as audit_service
+from app.services import webhook as webhook_service
 from app.services.audit import AuditAction
 from app.services.context import ACTOR_WORKER, Principal
 from app.services.integration import find_integration, resolve_settings
@@ -104,26 +109,61 @@ _DEFAULT_CHANNELS: dict[NotificationEvent, tuple[NotificationChannel, ...]] = {
     NotificationEvent.CRITICAL_FINDING: (
         NotificationChannel.WEBSOCKET,
         NotificationChannel.SLACK,
+        NotificationChannel.WEBHOOK,
     ),
     NotificationEvent.ASSESSMENT_COMPLETED: (
         NotificationChannel.WEBSOCKET,
         NotificationChannel.SLACK,
         NotificationChannel.EMAIL,
+        NotificationChannel.WEBHOOK,
     ),
     NotificationEvent.ASSESSMENT_FAILED: (
         NotificationChannel.WEBSOCKET,
         NotificationChannel.SLACK,
         NotificationChannel.EMAIL,
+        NotificationChannel.WEBHOOK,
     ),
-    NotificationEvent.TICKET_CREATED: (NotificationChannel.WEBSOCKET,),
+    NotificationEvent.TICKET_CREATED: (NotificationChannel.WEBSOCKET, NotificationChannel.WEBHOOK),
+    NotificationEvent.TICKET_CLOSED: (NotificationChannel.WEBSOCKET, NotificationChannel.WEBHOOK),
     NotificationEvent.NEW_ASSET: (
+        NotificationChannel.WEBSOCKET,
+        NotificationChannel.SLACK,
+        NotificationChannel.WEBHOOK,
+    ),
+    NotificationEvent.SLA_BREACH: (
+        NotificationChannel.WEBSOCKET,
+        NotificationChannel.SLACK,
+        NotificationChannel.EMAIL,
+        NotificationChannel.WEBHOOK,
+    ),
+    NotificationEvent.AUTOMATION_NOTIFICATION: (
         NotificationChannel.WEBSOCKET,
         NotificationChannel.SLACK,
     ),
 }
 
+_PAGERDUTY_EVENTS: frozenset[NotificationEvent] = frozenset(
+    {
+        NotificationEvent.CRITICAL_FINDING,
+        NotificationEvent.SLA_BREACH,
+    }
+)
+
+_WEBHOOK_EVENT_NAMES: dict[NotificationEvent, str] = {
+    NotificationEvent.ASSESSMENT_COMPLETED: "assessment.completed",
+    NotificationEvent.ASSESSMENT_FAILED: "assessment.failed",
+    NotificationEvent.NEW_ASSET: "asset.created",
+    NotificationEvent.CRITICAL_FINDING: "finding.created",
+    NotificationEvent.TICKET_CREATED: "ticket.created",
+    NotificationEvent.TICKET_CLOSED: "ticket.closed",
+    NotificationEvent.SLA_BREACH: "sla.breached",
+}
+
 _MAX_DEDUPE_KEY = 300
 _MAX_SUBJECT = 500
+_MAX_EXTERNAL_DELIVERY_ATTEMPTS = 5
+_RETRY_BASE_SECONDS = 30
+_RETRY_MAX_SECONDS = 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +238,11 @@ def _recipients(
             if address:
                 seen.setdefault(address.strip().lower(), None)
         return list(seen)
+    if channel is NotificationChannel.PAGERDUTY:
+        # One routing key is scoped to the organization integration, not a user address.
+        return ["default"]
+    if channel is NotificationChannel.SPLUNK:
+        return ["hec"]
     # In-app: addressed to the user who will read it, or to the organization at large.
     return [str(user_id)] if user_id is not None else ["*"]
 
@@ -209,6 +254,24 @@ def _dedupe_key(
     recipient: str,
 ) -> str:
     return f"{event.value}:{resource_id or '-'}:{channel.value}:{recipient}"[:_MAX_DEDUPE_KEY]
+
+
+async def _matching_webhook_subscriptions(
+    session: AsyncSession, organization_id: uuid.UUID, event: NotificationEvent
+) -> list[WebhookSubscription]:
+    """Enabled destinations that explicitly opted into this safe event type."""
+    event_name = _WEBHOOK_EVENT_NAMES.get(event)
+    if event_name is None:
+        return []
+    stmt = (
+        tenant_select(WebhookSubscription, organization_id)
+        .where(
+            WebhookSubscription.is_enabled.is_(True),
+            WebhookSubscription.event_types.contains([event_name]),
+        )
+        .order_by(WebhookSubscription.id)
+    )
+    return list((await session.scalars(stmt)).all())
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +343,8 @@ async def _delivery_settings(
     base.notify.smtp_password = None
     base.notify.smtp_port = 587
     base.notify.smtp_use_tls = True
+    base.pagerduty.routing_key = None
+    base.splunk.hec_token = None
     return await resolve_settings(session, principal, kind, settings=base)
 
 
@@ -320,11 +385,49 @@ async def _deliver(
                 html,
                 html_to_text(html),
             )
+        elif channel is NotificationChannel.PAGERDUTY:
+            scoped = await _delivery_settings(
+                session, principal, IntegrationKind.PAGERDUTY, settings
+            )
+            client = PagerDutyClient(scoped, redis)
+            try:
+                await client.trigger(
+                    summary=notification.subject or content.subject,
+                    body=content.body,
+                    severity=severity,
+                    dedup_key=notification.dedupe_key,
+                    link=content.link,
+                )
+            finally:
+                await client.aclose()
+        elif channel is NotificationChannel.SPLUNK:
+            scoped = await _delivery_settings(
+                session, principal, IntegrationKind.SPLUNK, settings
+            )
+            client = SplunkHecClient(scoped, redis)
+            try:
+                await client.emit(
+                    event=notification.event_enum,
+                    subject=notification.subject or content.subject,
+                    body=content.body,
+                    severity=severity,
+                    dedupe_key=notification.dedupe_key,
+                    organization_id=str(notification.organization_id),
+                    resource_type=notification.resource_type,
+                    resource_id=notification.resource_id,
+                    link=content.link,
+                )
+            finally:
+                await client.aclose()
+        elif channel is NotificationChannel.WEBHOOK:
+            await webhook_service.deliver_notification(session, notification, settings=settings)
     except CynuxError as exc:
-        notification.status = NotificationStatus.FAILED.value
         # The user-safe message only. A provider response body can echo a credential back
         # (SEC-002), and this column is rendered in the UI.
-        notification.last_error = exc.user_message
+        if exc.retryable:
+            _schedule_delivery_retry(notification, exc.user_message)
+        else:
+            _mark_delivery_failed(notification, exc.user_message)
         log.warning(
             "notification.delivery_failed",
             notification_id=str(notification.id),
@@ -333,8 +436,7 @@ async def _deliver(
         )
         return
     except Exception as exc:  # - an unexpected client bug is still a failed send
-        notification.status = NotificationStatus.FAILED.value
-        notification.last_error = "Delivery failed unexpectedly."
+        _schedule_delivery_retry(notification, "Delivery failed unexpectedly.")
         log.error(
             "notification.delivery_error",
             notification_id=str(notification.id),
@@ -345,6 +447,31 @@ async def _deliver(
 
     notification.status = NotificationStatus.SENT.value
     notification.sent_at = utcnow()
+    notification.next_retry_at = None
+    notification.last_error = None
+
+
+def _schedule_delivery_retry(notification: Notification, error: str) -> None:
+    """Persist bounded exponential delivery retry without spinning the worker."""
+    notification.last_error = error
+    if notification.attempts >= _MAX_EXTERNAL_DELIVERY_ATTEMPTS:
+        notification.status = NotificationStatus.FAILED.value
+        notification.next_retry_at = None
+        return
+
+    delay_seconds = min(
+        _RETRY_BASE_SECONDS * (2 ** max(notification.attempts - 1, 0)),
+        _RETRY_MAX_SECONDS,
+    )
+    notification.status = NotificationStatus.PENDING.value
+    notification.next_retry_at = utcnow() + dt.timedelta(seconds=delay_seconds)
+
+
+def _mark_delivery_failed(notification: Notification, error: str) -> None:
+    """Terminally record a non-retryable provider/configuration failure."""
+    notification.status = NotificationStatus.FAILED.value
+    notification.next_retry_at = None
+    notification.last_error = error
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +506,12 @@ async def dispatch(
     """
     policy = await _policy(session, principal.organization_id)
     suppressed_reason = _suppression_reason(event, severity, policy)
-    targets = tuple(channels) if channels is not None else _DEFAULT_CHANNELS.get(event, ())
+    if channels is not None:
+        targets = tuple(channels)
+    else:
+        targets = _DEFAULT_CHANNELS.get(event, ())
+        if policy.pagerduty_enabled and event in _PAGERDUTY_EVENTS:
+            targets = (*targets, NotificationChannel.PAGERDUTY)
 
     # The client is constructed only to read its configured default channel, which is a
     # settings lookup and does no I/O.
@@ -395,13 +527,31 @@ async def dispatch(
 
     created: list[Notification] = []
     for channel in targets:
-        for recipient in _recipients(
-            channel,
-            policy=policy,
-            slack_default=slack_default,
-            extra_emails=extra_emails,
-            user_id=recipient_user_id or principal.user_id,
-        ):
+        if channel is NotificationChannel.WEBHOOK:
+            recipient_payloads = [
+                (
+                    str(subscription.id),
+                    {
+                        "webhook_subscription_id": str(subscription.id),
+                        "webhook_event": _WEBHOOK_EVENT_NAMES[event],
+                    },
+                )
+                for subscription in await _matching_webhook_subscriptions(
+                    session, principal.organization_id, event
+                )
+            ]
+        else:
+            recipient_payloads = [
+                (recipient, {})
+                for recipient in _recipients(
+                    channel,
+                    policy=policy,
+                    slack_default=slack_default,
+                    extra_emails=extra_emails,
+                    user_id=recipient_user_id or principal.user_id,
+                )
+            ]
+        for recipient, delivery_payload in recipient_payloads:
             key = _dedupe_key(event, resource_id, channel, recipient)
             if await _already_recorded(session, principal.organization_id, key):
                 log.debug(
@@ -425,6 +575,7 @@ async def dispatch(
                     **({"severity": severity.value} if severity else {}),
                     **({"html": content.html} if content.html else {}),
                     **({"blocks": content.blocks} if content.blocks else {}),
+                    **delivery_payload,
                 },
                 resource_type=resource_type,
                 resource_id=resource_id[:80] if resource_id else None,
@@ -508,8 +659,18 @@ async def deliver_pending(
         select(Notification)
         .where(
             Notification.status == NotificationStatus.PENDING.value,
+            or_(
+                Notification.next_retry_at.is_(None),
+                Notification.next_retry_at <= utcnow(),
+            ),
             Notification.channel.in_(
-                (NotificationChannel.SLACK.value, NotificationChannel.EMAIL.value)
+                (
+                    NotificationChannel.SLACK.value,
+                    NotificationChannel.EMAIL.value,
+                    NotificationChannel.PAGERDUTY.value,
+                    NotificationChannel.WEBHOOK.value,
+                    NotificationChannel.SPLUNK.value,
+                )
             ),
         )
         .order_by(Notification.created_at, Notification.id)
@@ -777,6 +938,38 @@ async def notify_ticket_created(
     )
 
 
+async def notify_ticket_closed(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    ticket_id: uuid.UUID,
+    closure_generation: int,
+    ticket_key: str,
+    ticket_url: str,
+    settings: Settings,
+    redis: Redis | None = None,
+) -> list[Notification]:
+    """Record a terminal tracker transition for in-app and webhook consumers.
+
+    The closure generation permits a remote close-reopen-close cycle to produce a new
+    event without weakening delivery deduplication for retries of the same closure.
+    """
+    return await dispatch(
+        session,
+        principal,
+        event=NotificationEvent.TICKET_CLOSED,
+        content=NotificationContent(
+            subject=f"Ticket {ticket_key} closed",
+            body=f"The linked remediation ticket {ticket_key} moved to a terminal status.",
+            link=ticket_url,
+        ),
+        settings=settings,
+        redis=redis,
+        resource_type="ticket_link",
+        resource_id=f"{ticket_id}:closure:{closure_generation}",
+    )
+
+
 __all__ = [
     "NotificationContent",
     "dispatch",
@@ -786,5 +979,6 @@ __all__ = [
     "notify_assessment_started",
     "notify_critical_finding",
     "notify_ticket_created",
+    "notify_ticket_closed",
     "pending_for_organization",
 ]

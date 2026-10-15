@@ -14,7 +14,7 @@ import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
 import { Spinner } from "@/components/ui/Spinner";
 import { ApprovalCard } from "@/components/approval/ApprovalCard";
-import { useApiResource } from "@/hooks/useApi";
+import { useApiResource, useMutation } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { actionPrerequisiteReady, agentActionSuccessTitle, assessmentWorkSummary, approveAndRunAgentAction, canApproveAgentAction, requireExecutedAgentAction, settledActionSignature } from "@/lib/agent-action-workflow";
 import { useAuth } from "@/lib/auth";
@@ -88,6 +88,15 @@ const TOOL_STATUS_TONE: Record<ToolCallData["status"], BadgeTone> = {
   failed: "danger",
 };
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const AGENT_STARTERS = [
+  "Summarize the highest-risk exposures and explain what should be fixed first.",
+  "Review overdue remediation work and propose owners, deadlines, and next actions.",
+  "Identify findings with verified exploitation signals and prepare an evidence-backed remediation plan.",
+  "Review the connected-tool alert backlog and suggest a safe triage order.",
+] as const;
+
 // ---------------------------------------------------------------------------
 // Conversation screen.
 // ---------------------------------------------------------------------------
@@ -105,6 +114,16 @@ export default function AgentConversationPage() {
     [sessionId],
     { enabled: canChat && !!sessionId },
   );
+  const setAutonomy = useMutation(
+    ({ mode }: { mode: "supervised" | "monitored" }) =>
+      api.agent.setAutonomy(sessionId as string, { autonomy_mode: mode }),
+    {
+      onSuccess: (next) => {
+        if (session.data) session.setData({ ...session.data, autonomy_mode: next.autonomy_mode });
+        toast({ title: `Agent mode set to ${next.autonomy_mode}`, tone: "ok" });
+      },
+    },
+  );
   const actions = useApiResource(
     () => api.agent.actions(sessionId as string),
     [sessionId],
@@ -116,6 +135,10 @@ export default function AgentConversationPage() {
   const [githubLoading, setGithubLoading] = React.useState(false);
   const [githubReason, setGithubReason] = React.useState("");
   const [githubComment, setGithubComment] = React.useState("");
+  const [remediationFindingId, setRemediationFindingId] = React.useState("");
+  const [remediationPlan, setRemediationPlan] = React.useState("");
+  const [retestNote, setRetestNote] = React.useState("");
+  const [remediationGroup, setRemediationGroup] = React.useState("");
 
   // Durable turns, keyed by id so REST loads and live `agent_message` events merge idempotently.
   const [messagesById, setMessagesById] = React.useState<Record<string, AgentMessageOut>>({});
@@ -132,6 +155,16 @@ export default function AgentConversationPage() {
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [resolving, setResolving] = React.useState(false);
+
+  const canonicalFindingId = remediationFindingId.trim();
+  const canonicalFinding = useApiResource(
+    () => api.canonicalFindings.get(canonicalFindingId),
+    [canonicalFindingId],
+    { enabled: canChat && UUID_PATTERN.test(canonicalFindingId) },
+  );
+  const loadedCanonicalFinding = canonicalFinding.data?.id === canonicalFindingId
+    ? canonicalFinding.data
+    : null;
 
   // Highest event seq processed — dedup guard + REST replay cursor (WS and REST share the space).
   const maxSeqRef = React.useRef(0);
@@ -382,6 +415,61 @@ export default function AgentConversationPage() {
     }
   };
 
+  const queueRemediationProposal = async (kind: "work" | "retest") => {
+    if (!sessionId || actionBusyId || !canonicalFindingId) return;
+    if (!loadedCanonicalFinding) {
+      toast({ title: "Load a valid canonical finding before queuing work", tone: "danger" });
+      return;
+    }
+    const action: AgentActionName = kind === "work" ? "update_canonical_work" : "request_retest";
+    if (kind === "work" && !remediationPlan.trim()) {
+      toast({ title: "Describe the remediation plan before proposing it", tone: "danger" });
+      return;
+    }
+    setActionBusyId(action);
+    try {
+      const payload = kind === "work"
+        ? { finding_id: canonicalFindingId, expected_version: loadedCanonicalFinding.status_version, remediation_plan: remediationPlan.trim() }
+        : { finding_id: canonicalFindingId, ...(retestNote.trim() ? { note: retestNote.trim() } : {}) };
+      await api.agent.proposeAction({
+        session_id: sessionId,
+        action,
+        label: kind === "work" ? "Apply remediation plan" : "Request remediation retest",
+        payload,
+      });
+      actions.refetch();
+      toast({ title: "Remediation action queued for approval", tone: "ok" });
+    } catch (error) {
+      toast({ title: "Could not queue remediation action", description: getErrorMessage(error), tone: "danger" });
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const queueRemediationGroupRetest = async () => {
+    const group = remediationGroup.trim();
+    if (!sessionId || actionBusyId || !group) {
+      if (!group) toast({ title: "Enter a remediation group before requesting verification", tone: "danger" });
+      return;
+    }
+    const action: AgentActionName = "request_remediation_group_retests";
+    setActionBusyId(action);
+    try {
+      await api.agent.proposeAction({
+        session_id: sessionId,
+        action,
+        label: "Request verification for " + group,
+        payload: { remediation_group: group, ...(retestNote.trim() ? { note: retestNote.trim() } : {}) },
+      });
+      actions.refetch();
+      toast({ title: "Group retest queued for approval", tone: "ok" });
+    } catch (error) {
+      toast({ title: "Could not queue group retest", description: getErrorMessage(error), tone: "danger" });
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
   const handleAction = async (item: AgentActionOut, decision: "approve" | "reject" | "execute") => {
     if (actionBusyId) return;
     setActionBusyId(item.id);
@@ -431,6 +519,10 @@ export default function AgentConversationPage() {
   const streamMeta = STREAM_META[stream.state];
   const showLiveRegion =
     agentBusy || plan.length > 0 || toolActivity.length > 0 || !!progress || !!thinking;
+  const specialistTasks = (session.data?.runs ?? []).reduce(
+    (latest, run) => run.specialist_tasks.length ? run.specialist_tasks : latest,
+    [] as NonNullable<typeof session.data>["runs"][number]["specialist_tasks"],
+  );
 
   return (
     <div className="flex h-full flex-col space-y-4">
@@ -444,10 +536,28 @@ export default function AgentConversationPage() {
             {session.data?.title ?? "Conversation"}
           </h1>
         </div>
-        <Badge tone={streamMeta.tone} dot pulse={streamMeta.live && stream.state !== "open"}>
-          {streamMeta.label}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Select
+            aria-label="Agent autonomy mode"
+            className="w-44"
+            value={session.data?.autonomy_mode ?? "supervised"}
+            disabled={setAutonomy.loading || !session.data}
+            onChange={(event) => void setAutonomy.run({ mode: event.target.value as "supervised" | "monitored" })}
+          >
+            <option value="supervised">Supervised actions</option>
+            <option value="monitored">Monitored safe sync</option>
+          </Select>
+          <Badge tone={streamMeta.tone} dot pulse={streamMeta.live && stream.state !== "open"}>
+            {streamMeta.label}
+          </Badge>
+        </div>
       </div>
+
+      {session.data?.autonomy_mode === "monitored" && (
+        <p className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted">
+          Monitored mode automatically runs connector synchronization and linked-ticket status refreshes. Assessment launches, tickets, remediation changes, and provider-side updates still require approval.
+        </p>
+      )}
 
       {stream.error && (
         <InlineError message={stream.error} />
@@ -509,6 +619,33 @@ export default function AgentConversationPage() {
           />
         )}
 
+        {specialistTasks.length > 0 && (
+          <Card>
+            <CardBody className="space-y-3">
+              <div>
+                <h2 className="text-sm font-semibold text-fg">Autonomous specialist work</h2>
+                <p className="text-xs text-muted">Parallel, scope-approved tasks. Completed means the scanner job produced archived evidence and passed post-import verification.</p>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                {specialistTasks.map((task) => {
+                  const verified = task.evidence.verification_status === "passed" || task.evidence.evidence_verified === true;
+                  const artifactCount = typeof task.evidence.artifact_count === "number" ? task.evidence.artifact_count : 0;
+                  return (
+                    <div key={task.id} className="rounded-lg border border-line bg-surface-2/50 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-fg">{humanize(task.specialist)} specialist</span>
+                        <Badge tone={task.status === "completed" ? "ok" : task.status === "failed" ? "danger" : "warn"}>{humanize(task.status)}</Badge>
+                      </div>
+                      <p className="mt-1 text-xs text-muted">{humanize(task.scanner)} · {task.target_count} target{task.target_count === 1 ? "" : "s"} · attempt {task.attempts}/{task.max_attempts}</p>
+                      <p className="mt-1 text-xs text-faint">{verified ? `Evidence verified · ${artifactCount} archived artifact${artifactCount === 1 ? "" : "s"}` : "Awaiting artifact-backed verification"}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardBody>
+          </Card>
+        )}
+
         <Card>
           <CardBody className="space-y-3">
             <div>
@@ -559,11 +696,39 @@ export default function AgentConversationPage() {
                 )}
               </div>
             )}
+            {(can("finding:remediate") || can("finding:validate")) && (
+              <div className="space-y-3 rounded-lg border border-line bg-surface-2/50 p-3">
+                <p className="text-xs font-medium text-fg">Turn a decision into approved work</p>
+                <p className="text-xs text-muted">Enter the canonical finding ID. Cynux loads the live status and version before creating an approval-gated action, so the proposed work cannot use a copied stale version.</p>
+                <Input aria-label="Canonical finding ID" placeholder="Canonical finding UUID" value={remediationFindingId} onChange={(event) => setRemediationFindingId(event.target.value)} />
+                {canonicalFinding.loading && <p className="text-xs text-muted">Loading canonical finding…</p>}
+                {canonicalFinding.error && <p role="alert" className="text-xs text-danger">{canonicalFinding.error}</p>}
+                {loadedCanonicalFinding && <p className="text-xs text-muted">Loaded: <Link href={`/findings/canonical/${loadedCanonicalFinding.id}`} className="font-medium text-primary underline">{loadedCanonicalFinding.title}</Link> · {humanize(loadedCanonicalFinding.status)} · version {loadedCanonicalFinding.status_version}</p>}
+                {can("finding:remediate") && <><Textarea aria-label="Remediation plan" maxLength={4000} value={remediationPlan} onChange={(event) => setRemediationPlan(event.target.value)} placeholder="Describe the intended fix, expected owner action, and verification evidence…" /><Button size="sm" variant="outline" disabled={!!actionBusyId || !loadedCanonicalFinding} onClick={() => void queueRemediationProposal("work")}>Queue remediation plan</Button></>}
+                {can("finding:validate") && <div className="flex flex-wrap gap-2"><Input aria-label="Retest note" className="min-w-56 flex-1" maxLength={2000} value={retestNote} onChange={(event) => setRetestNote(event.target.value)} placeholder="Expected fix and retest scope (optional)" /><Button size="sm" variant="outline" disabled={!!actionBusyId || !loadedCanonicalFinding} onClick={() => void queueRemediationProposal("retest")}>Queue retest</Button></div>}
+                {can("finding:validate") && <div className="flex flex-wrap gap-2"><Input aria-label="Remediation group" className="min-w-56 flex-1" maxLength={160} value={remediationGroup} onChange={(event) => setRemediationGroup(event.target.value)} placeholder="Shared patch or upgrade group…" /><Button size="sm" variant="outline" disabled={!!actionBusyId || !remediationGroup.trim()} onClick={() => void queueRemediationGroupRetest()}>Queue group retest</Button></div>}
+              </div>
+            )}
             {actions.error && <InlineError message={actions.error} />}
             {actions.data?.length === 0 && <p className="text-xs text-faint">No actions queued for this conversation.</p>}
             {actions.data?.map((item) => {
               const permitted = canApproveAgentAction(item.action, can);
               const workerStatus = item.action === "start_assessment" && item.status === "executed" ? item.run_status : null;
+              const evidence = item.execution_evidence;
+              const evidenceResource = evidence && typeof evidence.resource === "object" && evidence.resource !== null
+                ? evidence.resource as Record<string, unknown>
+                : null;
+              const evidenceSummary = item.status === "executed" && evidence && Object.keys(evidence).length > 0
+                ? [
+                    typeof evidence.outcome === "string" ? humanize(evidence.outcome) : null,
+                    evidenceResource && typeof evidenceResource.type === "string" ? humanize(evidenceResource.type) : null,
+                    evidenceResource && typeof evidenceResource.id === "string" ? evidenceResource.id : null,
+                    typeof evidence.external_status === "string" ? humanize(evidence.external_status) : null,
+                  ].filter(Boolean).join(" · ")
+                : null;
+              const evidenceTicketUrl = typeof evidence?.ticket_url === "string" && /^https?:\/\//i.test(evidence.ticket_url)
+                ? evidence.ticket_url
+                : null;
               const actionTone = workerStatus === "failed" || workerStatus === "cancelled" || item.status === "rejected" || item.status === "failed"
                 ? "danger" : (workerStatus === "completed" && item.assessment?.status === "COMPLETED") || (item.status === "executed" && !workerStatus && item.action !== "start_assessment")
                   ? "ok" : "warn";
@@ -574,7 +739,8 @@ export default function AgentConversationPage() {
                     <Badge tone={actionTone}>{workerStatus ? humanize(workerStatus) : humanize(item.status)}</Badge>
                   </div>
                   {item.rationale && <p className="text-xs text-muted">{item.rationale}</p>}
-                  {item.action === "create_jira_ticket" && <p className="text-xs text-muted">Finding: {String(item.payload.canonical_finding_id ?? item.payload.finding_id ?? "unknown")}</p>}
+                  {(item.action === "create_jira_ticket" || item.action === "create_ticket") && <p className="text-xs text-muted">Finding: {String(item.payload.canonical_finding_id ?? item.payload.finding_id ?? "unknown")} · Tracker: {humanize(String(item.payload.provider ?? "jira"))}</p>}
+                  {item.action === "refresh_ticket_status" && <p className="text-xs text-muted">Ticket: {String(item.payload.ticket_id ?? "unknown")}</p>}
                   {item.depends_on_action_id && (item.status === "pending" || item.status === "approved") && !actionPrerequisiteReady(item, actions.data ?? []) && <p className="text-xs text-muted">Waiting for the matching triage action to complete. Approval queues the ticket; the worker files it afterward.</p>}
                   {item.action === "start_assessment" && (
                     <div className="space-y-1 text-xs text-muted">
@@ -595,7 +761,18 @@ export default function AgentConversationPage() {
                   {item.action === "update_github_alert" && (
                     <p className="text-xs text-muted">Alert: {String(item.payload.alert_id ?? "unknown")} · Decision: {String(item.payload.decision ?? "unknown")} {item.payload.reason ? `· Reason: ${String(item.payload.reason)}` : ""} {item.payload.comment ? `· Rationale: ${String(item.payload.comment)}` : ""}</p>
                   )}
+                  {item.action === "request_retest" && (
+                    <p className="text-xs text-muted">Finding: {String(item.payload.finding_id ?? "unknown")} {item.payload.note ? `· Retest scope: ${String(item.payload.note)}` : ""}</p>
+                  )}
+                  {item.action === "request_remediation_group_retests" && (
+                    <p className="text-xs text-muted">Remediation group: {String(item.payload.remediation_group ?? "unknown")} {item.payload.note ? `· Retest scope: ${String(item.payload.note)}` : ""}</p>
+                  )}
+                  {item.action === "request_risk_acceptance" && (
+                    <p className="text-xs text-muted">Finding: {String(item.payload.finding_id ?? "unknown")} · Expires: {String(item.payload.expires_at ?? "unknown")} · Rationale: {String(item.payload.rationale ?? "missing")}</p>
+                  )}
                   {item.result_summary && !(item.action === "start_assessment" && item.status === "executed") && <p className="text-xs text-muted">{item.result_summary}</p>}
+                  {evidenceSummary && <p className="text-xs text-muted">Recorded evidence: {evidenceSummary}</p>}
+                  {evidenceTicketUrl && <a href={evidenceTicketUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">Open linked ticket ↗</a>}
                   {permitted && item.status === "pending" && (
                     <div className="flex gap-2">
                       <Button size="sm" loading={actionBusyId === item.id} onClick={() => void handleAction(item, "approve")}>{actionPrerequisiteReady(item, actions.data ?? []) ? "Approve and run" : "Approve and queue"}</Button>
@@ -614,6 +791,7 @@ export default function AgentConversationPage() {
 
       {/* Composer */}
       <div className="shrink-0 border-t border-line pt-3">
+        {!input.trim() && !agentBusy && <div className="mb-2 flex flex-wrap gap-2"><span className="self-center text-xs text-muted">Try:</span>{AGENT_STARTERS.map((starter) => <button key={starter} type="button" className="rounded-full border border-line px-2.5 py-1 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-fg" onClick={() => setInput(starter)}>{starter}</button>)}</div>}
         <div className="flex items-end gap-2">
           <Textarea
             aria-label="Message the agent"

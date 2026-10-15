@@ -166,6 +166,75 @@ async def test_canonical_only_finding_creates_one_jira_link_with_stable_remote_i
 
 
 @pytest.mark.asyncio
+async def test_canonical_finding_creates_idempotent_servicenow_incident(monkeypatch) -> None:
+    """The change that would break this is routing a ServiceNow action into another tracker."""
+    from app.integrations.servicenow import ServiceNowIssue
+    from app.services import ticket
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    finding_id = uuid.uuid4()
+    finding = SimpleNamespace(
+        id=finding_id,
+        organization_id=principal.organization_id,
+        asset_id=uuid.uuid4(),
+        title="Externally exposed admin service",
+        severity="critical",
+        status="open",
+        risk_score=98.0,
+        cve_ids=[],
+        remediation_plan=None,
+    )
+    remote_calls: list[dict[str, object]] = []
+
+    class Result:
+        def __init__(self, value): self.value = value
+        def scalar_one_or_none(self): return self.value
+        def scalars(self): return self
+        def all(self): return self.value
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+            self.added = []
+        async def execute(self, statement):
+            self.calls += 1
+            return Result([None, [], None, "admin.example.test", []][self.calls - 1])
+        def add(self, value): self.added.append(value)
+        async def flush(self): return None
+
+    async def get_finding(self, finding_key):
+        assert finding_key == finding_id
+        return finding
+
+    async def scoped(*args, **kwargs): return Settings()
+    async def audit(*args, **kwargs): return None
+
+    class ServiceNow:
+        def __init__(self, *args): pass
+        async def create_issue(self, **kwargs):
+            remote_calls.append(kwargs)
+            return ServiceNowIssue(
+                key="INC0010042", id="sys-42", url="https://snow.example/incident/sys-42",
+                status="open", summary="Externally exposed admin service",
+            )
+        async def aclose(self): return None
+
+    monkeypatch.setattr(ticket.TenantRepository, "get_or_404", get_finding)
+    monkeypatch.setattr(ticket, "resolve_settings", scoped)
+    monkeypatch.setattr(ticket, "ServiceNowClient", ServiceNow)
+    monkeypatch.setattr(ticket.audit_service, "record", audit)
+    session = Session()
+    link = await ticket.create_canonical_ticket(
+        session, principal, finding_id, settings=Settings(), provider="servicenow"
+    )
+
+    assert link.provider == "servicenow"
+    assert link.external_key == "INC0010042"
+    assert remote_calls[0]["finding_id"] == str(finding_id)
+    assert remote_calls[0]["labels"] == ["severity-critical"]
+
+
+@pytest.mark.asyncio
 async def test_canonical_ticket_list_includes_direct_and_native_links_without_crossing_tenants() -> (
     None
 ):

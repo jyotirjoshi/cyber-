@@ -146,14 +146,18 @@ async def sync_github_alerts(
 ) -> IntegrationSyncOut:
     """Ingest the organization's GitHub security alerts into Cynux's private ledger.
 
-    The result has only the staged count. Raw provider evidence stays restricted to the
+    The result has only ingestion counts. Raw provider evidence stays restricted to the
     backend correlation path and cannot be exposed through a browser response.
     """
     result = await external_alert_service.sync_github_alerts(
         session, principal, settings=settings, redis=redis
     )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.GITHUB, alerts_staged=result.total)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.GITHUB,
+        alerts_staged=result.total,
+        missing_source_records=result.missing_source_records,
+    )
 
 
 @router.post("/gitlab/sync", response_model=IntegrationSyncOut)
@@ -168,7 +172,11 @@ async def sync_gitlab_alerts(
         session, principal, settings=settings, redis=redis
     )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.GITLAB, alerts_staged=result.total)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.GITLAB,
+        alerts_staged=result.total,
+        missing_source_records=result.missing_source_records,
+    )
 
 
 @router.post("/wazuh/sync", response_model=IntegrationSyncOut)
@@ -198,7 +206,11 @@ async def sync_sonarqube_alerts(
         session, principal, settings=settings, redis=redis
     )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.SONARQUBE, alerts_staged=result.total)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.SONARQUBE,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
 
 
 @router.post("/snyk/sync", response_model=IntegrationSyncOut)
@@ -228,7 +240,242 @@ async def sync_tenable_vulnerabilities(
         session, principal, settings=settings, redis=redis
     )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.TENABLE, alerts_staged=result.total)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.TENABLE,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/qualys/sync", response_model=IntegrationSyncOut)
+async def sync_qualys_host_detections(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest the configured Qualys VM host-detection report for one tenant IP asset."""
+    result = await external_alert_service.sync_qualys_host_detections(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.QUALYS,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/rapid7/sync", response_model=IntegrationSyncOut)
+async def sync_rapid7_vulnerabilities(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest vulnerabilities from the selected tenant InsightVM Console assets."""
+    result = await external_alert_service.sync_rapid7_vulnerabilities(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.RAPID7,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/wiz/sync", response_model=IntegrationSyncOut)
+async def sync_wiz_issues(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest issues from only the configured Wiz projects."""
+    result = await external_alert_service.sync_wiz_issues(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.WIZ,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+        missing_source_records=result.missing_source_records,
+    )
+
+
+@router.post("/prisma_cloud/sync", response_model=IntegrationSyncOut)
+async def sync_prisma_cloud_alerts(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest open alerts from the tenant's selected Prisma cloud accounts."""
+    result = await external_alert_service.sync_prisma_cloud_alerts(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.PRISMA_CLOUD,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/crowdstrike/sync", response_model=IntegrationSyncOut)
+async def sync_crowdstrike_vulnerabilities(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest the tenant's open Falcon Spotlight vulnerability snapshot."""
+    result = await external_alert_service.sync_crowdstrike_vulnerabilities(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.CROWDSTRIKE,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/aws_security_hub/sync", response_model=IntegrationSyncOut)
+async def sync_aws_security_hub_findings(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest active findings from the tenant's selected AWS accounts."""
+    result = await external_alert_service.sync_aws_security_hub_findings(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.AWS_SECURITY_HUB,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/aws_inspector/sync", response_model=IntegrationSyncOut)
+async def sync_aws_inspector_findings(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest active Amazon Inspector findings for selected AWS accounts."""
+    result = await external_alert_service.sync_aws_inspector_findings(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.AWS_INSPECTOR,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/hackerone/sync", response_model=IntegrationSyncOut)
+async def sync_hackerone_reports(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest reports from the tenant's selected HackerOne programs."""
+    result = await external_alert_service.sync_hackerone_reports(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.HACKERONE,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/bugcrowd/sync", response_model=IntegrationSyncOut)
+async def sync_bugcrowd_submissions(principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep) -> IntegrationSyncOut:
+    result = await external_alert_service.sync_bugcrowd_submissions(session, principal, settings=settings, redis=redis)
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.BUGCROWD, alerts_staged=result.total, absence_candidates=result.absence_candidates)
+
+
+@router.post("/checkmarx/sync", response_model=IntegrationSyncOut)
+async def sync_checkmarx_results(principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep) -> IntegrationSyncOut:
+    result = await external_alert_service.sync_checkmarx_results(session, principal, settings=settings, redis=redis)
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.CHECKMARX, alerts_staged=result.total, absence_candidates=result.absence_candidates)
+
+
+@router.post("/fortify/sync", response_model=IntegrationSyncOut)
+async def sync_fortify_issues(principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep) -> IntegrationSyncOut:
+    result = await external_alert_service.sync_fortify_issues(session, principal, settings=settings, redis=redis)
+    await session.commit()
+    return IntegrationSyncOut(kind=IntegrationKind.FORTIFY, alerts_staged=result.total, absence_candidates=result.absence_candidates)
+
+
+@router.post("/azure_defender/sync", response_model=IntegrationSyncOut)
+async def sync_azure_defender_alerts(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest alerts from the tenant's Microsoft Defender subscription."""
+    result = await external_alert_service.sync_azure_defender_alerts(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.AZURE_DEFENDER,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/gcp_scc/sync", response_model=IntegrationSyncOut)
+async def sync_gcp_scc_findings(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest findings from the tenant's Google Security Command Center project."""
+    result = await external_alert_service.sync_gcp_scc_findings(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.GCP_SCC,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
+
+
+@router.post("/burp_dast/sync", response_model=IntegrationSyncOut)
+async def sync_burp_dast_findings(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Ingest latest complete scans from the tenant's selected Burp DAST sites."""
+    result = await external_alert_service.sync_burp_dast_findings(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=IntegrationKind.BURP_DAST,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
 
 
 @router.get("/tenable/scans/{scan_id}/status", response_model=TenableScanStatusOut)

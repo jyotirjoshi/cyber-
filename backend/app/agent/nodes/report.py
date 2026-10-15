@@ -79,13 +79,13 @@ log = structlog.get_logger(__name__)
 #: The graph node name. Matches the key ``build_graph`` registers for this node.
 _NODE = "generate_report"
 
-#: The report the agent produces. PDF is the professional deliverable; ``generate`` degrades
-#: it to HTML -- and records that as a coverage degradation -- when no PDF renderer is
-#: available, so requesting PDF is safe on a host without WeasyPrint. ``technical`` is the
-#: fuller of the two audiences: an unattended agent has no operator to ask, so it produces
-#: the report that omits the least.
-_REPORT_FORMAT = ReportFormat.PDF
-_REPORT_AUDIENCE = "technical"
+#: Every completed assessment receives a board-ready PDF and a technical HTML artifact.
+#: PDF rendering can safely degrade to HTML; audience-scoped reuse keeps resumed runs from
+#: producing duplicate reports even if that degradation happened.
+_REPORT_SPECS: tuple[tuple[ReportFormat, str], ...] = (
+    (ReportFormat.PDF, "executive"),
+    (ReportFormat.HTML, "technical"),
+)
 
 #: Severity buckets for the completion alert, worst first. The alert renders "N critical,
 #: N high, ..." and drops the zero buckets, so this is counts-only (SEC-002).
@@ -104,6 +104,7 @@ class _ReportResult:
 
     report_id: uuid.UUID
     fmt: str
+    audience: str
     reused: bool
 
 
@@ -127,13 +128,15 @@ async def generate_report(state: AssessmentState, *, deps: AgentDeps) -> dict[st
         label="Building the assessment report",
     ) as step:
         principal = principal_from(state)
-        report = await _produce_report(state, deps=deps, principal=principal, step=step)
+        reports = await _produce_reports(state, deps=deps, principal=principal, step=step)
         completion = await _complete(state, deps=deps, principal=principal, step=step)
         step.record_output(
             {
-                "report_id": str(report.report_id),
-                "format": report.fmt,
-                "reused": report.reused,
+                "report_ids": [str(report.report_id) for report in reports],
+                "reports": [
+                    {"id": str(report.report_id), "format": report.fmt, "audience": report.audience, "reused": report.reused}
+                    for report in reports
+                ],
                 "findings_total": completion.findings_total,
                 "degraded": completion.degraded,
             }
@@ -141,12 +144,16 @@ async def generate_report(state: AssessmentState, *, deps: AgentDeps) -> dict[st
 
     log.info(
         "agent.report.done",
-        report_id=str(report.report_id),
-        reused=report.reused,
+        report_ids=[str(report.report_id) for report in reports],
+        reused=all(report.reused for report in reports),
         findings_total=completion.findings_total,
         degraded=completion.degraded,
     )
-    return {"stage": AssessmentStage.DONE.value, "report_id": str(report.report_id)}
+    return {
+        "stage": AssessmentStage.DONE.value,
+        "report_id": str(reports[0].report_id),
+        "report_ids": [str(report.report_id) for report in reports],
+    }
 
 
 async def _advance_to_report(state: AssessmentState, *, deps: AgentDeps) -> None:
@@ -166,7 +173,13 @@ async def _advance_to_report(state: AssessmentState, *, deps: AgentDeps) -> None
 
 
 async def _produce_report(
-    state: AssessmentState, *, deps: AgentDeps, principal: Principal, step: StepHandle
+    state: AssessmentState,
+    *,
+    deps: AgentDeps,
+    principal: Principal,
+    step: StepHandle,
+    fmt: ReportFormat,
+    audience: str,
 ) -> _ReportResult:
     """Reuse an already-``ready`` report if one exists, otherwise generate a fresh one.
 
@@ -183,31 +196,50 @@ async def _produce_report(
 
     async with session_scope(deps.settings) as session:
         existing = await latest_report(
-            session, assessment_id, organization_id=org_id, ready_only=True
+            session, assessment_id, organization_id=org_id, ready_only=True, audience=audience
         )
         reused = (
-            _ReportResult(report_id=existing.id, fmt=existing.format, reused=True)
+            _ReportResult(report_id=existing.id, fmt=existing.format, audience=audience, reused=True)
             if existing is not None
             else None
         )
 
     if reused is not None:
-        await step.thinking("A completed report already exists for this assessment; reusing it.")
+        await step.thinking(f"A completed {audience} report already exists; reusing it.")
         return reused
 
-    await step.thinking("Building the assessment report.")
+    await step.thinking(f"Building the {audience} assessment report.")
     async with session_scope(deps.settings) as session:
         assessment = await load_assessment(session, state)
         report = await generate(
             session,
             assessment,
-            fmt=_REPORT_FORMAT,
-            audience=_REPORT_AUDIENCE,
+            fmt=fmt,
+            audience=audience,
             storage=deps.storage,
             settings=deps.settings,
             principal=principal,
         )
-        return _ReportResult(report_id=report.id, fmt=report.format, reused=False)
+        return _ReportResult(report_id=report.id, fmt=report.format, audience=audience, reused=False)
+
+
+async def _produce_reports(
+    state: AssessmentState, *, deps: AgentDeps, principal: Principal, step: StepHandle
+) -> tuple[_ReportResult, ...]:
+    """Produce the executive and technical deliverables, reusing either independently."""
+    results: list[_ReportResult] = []
+    for fmt, audience in _REPORT_SPECS:
+        results.append(
+            await _produce_report(
+                state,
+                deps=deps,
+                principal=principal,
+                step=step,
+                fmt=fmt,
+                audience=audience,
+            )
+        )
+    return tuple(results)
 
 
 async def _complete(

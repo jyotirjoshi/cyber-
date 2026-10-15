@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.db.enums import AuditOutcome
+from app.db.enums import AuditOutcome, Priority, Severity
 from app.schemas.assessment import AssessmentOut
-from app.schemas.finding import FindingOut
 from app.schemas.integration import IntegrationHealthOut
 
 
@@ -36,6 +36,20 @@ class ActivityOut(BaseModel):
     outcome: AuditOutcome = AuditOutcome.SUCCESS
     #: Pre-rendered one-liner, e.g. "agent requested approval to scan 12 assets".
     summary: str | None = None
+
+
+class DashboardFindingOut(BaseModel):
+    """One ranked exposure with an explicit canonical or legacy destination."""
+
+    id: uuid.UUID
+    source_kind: Literal["canonical", "legacy"]
+    title: str
+    severity: Severity
+    priority: Priority | None = None
+    risk_score: float | None = None
+    risk_factors: dict[str, Any] = Field(default_factory=dict)
+    in_kev: bool | None = None
+    first_seen_at: dt.datetime
 
 
 class DashboardOut(BaseModel):
@@ -64,10 +78,60 @@ class DashboardOut(BaseModel):
 
     recent_assessments: list[AssessmentOut] = Field(default_factory=list)
     #: Highest-priority open findings, ordered by Cynux risk score (FR-023).
-    top_findings: list[FindingOut] = Field(default_factory=list)
+    top_findings: list[DashboardFindingOut] = Field(default_factory=list)
     activity: list[ActivityOut] = Field(default_factory=list)
     integration_health: list[IntegrationHealthOut] = Field(default_factory=list)
     generated_at: dt.datetime | None = None
 
 
-__all__ = ["ActivityOut", "DashboardOut"]
+class TeamDashboardOut(BaseModel):
+    """Exposure rollup for assets assigned to one CMDB or operator-owned team."""
+
+    team_name: str
+    assets_total: int = 0
+    assets_critical: int = 0
+    findings_open: int = 0
+    kev_findings: int = 0
+    highest_risk_score: float | None = None
+    severity_breakdown: dict[str, int] = Field(default_factory=dict)
+    priority_breakdown: dict[str, int] = Field(default_factory=dict)
+
+
+class AssetGroupRiskOut(BaseModel):
+    """Exposure rollup for a curated asset group using canonical findings."""
+
+    group_name: str
+    assets_total: int = 0
+    internet_exposed_assets: int = 0
+    findings_open: int = 0
+    critical_or_high_findings: int = 0
+    highest_risk_score: float | None = None
+    aggregate_risk_score: float = Field(default=0, ge=0)
+
+
+class RiskTrendPointOut(BaseModel):
+    """One immutable assessment-report snapshot for an exposure trend."""
+
+    assessment_id: uuid.UUID
+    assessment_reference: int | None = None
+    measured_at: dt.datetime
+    exposure_score: float = Field(ge=0, le=100)
+    findings_total: int = Field(ge=0)
+    assets_total: int = Field(ge=0)
+    new_findings: int = Field(ge=0)
+    resolved_findings: int = Field(ge=0)
+
+
+class RiskTrendOut(BaseModel):
+    points: list[RiskTrendPointOut] = Field(default_factory=list)
+    source: str = "completed_assessment_reports"
+
+
+__all__ = [
+    "ActivityOut",
+    "DashboardOut",
+    "RiskTrendOut",
+    "RiskTrendPointOut",
+    "TeamDashboardOut",
+    "AssetGroupRiskOut",
+]

@@ -37,14 +37,15 @@ contrast, is not degradable (SEC / FR-015): the evidence chain is broken, so the
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import AIError, ConfigurationError, StorageError
-from app.db.enums import ReportFormat
+from app.core.errors import AIError, ConfigurationError, StorageError, TenantIsolationError
+from app.db.enums import Permission, ReportFormat, ReportStatus
 from app.db.models.assessment import Assessment
 from app.db.models.report import Report
 from app.integrations.storage import ObjectStorage, StoredObject, report_key
@@ -61,6 +62,7 @@ from app.reporting.render import ReportRenderError, render_html, render_pdf
 from app.services import audit as audit_service
 from app.services import report as report_service
 from app.services.context import Principal
+from app.services.report_template import resolve_template_blocks
 
 log = structlog.get_logger(__name__)
 
@@ -86,6 +88,8 @@ async def generate(
     principal: Principal,
     gateway: LLMGateway | None = None,
     title: str | None = None,
+    report: Report | None = None,
+    template_id: uuid.UUID | None = None,
 ) -> Report:
     """Produce, store and record one report for ``assessment``; return the ``ready`` row.
 
@@ -98,21 +102,33 @@ async def generate(
     :class:`~app.reporting.render.ReportRenderError` (the HTML itself could not be built)
     after marking the row ``failed`` and writing a failure audit event.
     """
+    principal.require(Permission.REPORT_GENERATE)
+    if assessment.organization_id != principal.organization_id:
+        raise TenantIsolationError("report assessment does not belong to this organization")
     resolved_audience = _normalize_audience(audience)
     resolved_title = (title or f"Security assessment {assessment.reference}").strip()
     org_id = assessment.organization_id
 
-    report = await report_service.create_report(
-        session,
-        principal,
-        assessment,
-        title=resolved_title,
-        audience=resolved_audience,
-        fmt=fmt,
-        requested_by_id=principal.user_id,
-    )
-    # pending -> visible to a polling UI before any slow work begins (FR-030).
-    await session.commit()
+    if report is None:
+        report = await report_service.create_report(
+            session,
+            principal,
+            assessment,
+            title=resolved_title,
+            audience=resolved_audience,
+            fmt=fmt,
+            requested_by_id=principal.user_id,
+            template_id=template_id,
+        )
+        # pending -> visible to a polling UI before any slow work begins (FR-030).
+        await session.commit()
+    elif (
+        report.organization_id != assessment.organization_id
+        or report.assessment_id != assessment.id
+        or report.audience != resolved_audience
+        or report.status_enum not in {ReportStatus.PENDING, ReportStatus.FAILED}
+    ):
+        raise ValueError("report generation must target a pending or failed report for the same assessment and audience")
 
     await report_service.begin_generation(session, report)
     await session.commit()
@@ -144,6 +160,11 @@ async def generate(
         context["ai_model"] = ai_model
         context["unverifiable_text"] = UNVERIFIABLE_STATEMENT
         context["degradations"] = degradations
+        if report.template_snapshot:
+            context["report_template"] = report.template_snapshot
+            context["report_template_blocks"] = resolve_template_blocks(
+                report.template_snapshot, context
+            )
 
         html = render_html(context)
         data, ext, content_type = await _materialize(html, fmt=fmt)
@@ -409,6 +430,34 @@ def _deterministic_summary(context: dict[str, Any]) -> str:
             f"finding(s): {UNVERIFIABLE_STATEMENT}"
         )
 
+    metrics = context.get("operational_metrics") or {}
+    exposure_score = metrics.get("exposure_score")
+    exposure_delta = metrics.get("exposure_delta")
+    new_findings = metrics.get("new_findings")
+    resolved_findings = metrics.get("resolved_findings")
+    mttr = metrics.get("mean_time_to_remediate_days")
+    sla = metrics.get("sla") if isinstance(metrics.get("sla"), dict) else {}
+    metric_parts: list[str] = []
+    if isinstance(exposure_score, int | float):
+        trend = (
+            f", a change of {exposure_delta:+.2f} from the prior report"
+            if isinstance(exposure_delta, int | float)
+            else ""
+        )
+        metric_parts.append(f"Exposure score is {exposure_score:.2f}{trend}")
+    if isinstance(new_findings, int) and isinstance(resolved_findings, int):
+        metric_parts.append(f"{new_findings} new and {resolved_findings} resolved finding(s)")
+    if isinstance(mttr, int | float):
+        metric_parts.append(f"mean time to remediate is {mttr:.2f} days")
+    compliance_percent = sla.get("compliance_percent")
+    if isinstance(compliance_percent, int | float):
+        metric_parts.append(
+            f"SLA compliance is {compliance_percent:.2f}% "
+            f"({sla.get('within_sla', 0)} within target, {sla.get('overdue', 0)} overdue)"
+        )
+    if metric_parts:
+        paragraphs.append("Operational posture: " + "; ".join(metric_parts) + ".")
+
     degraded = context.get("degradations") or []
     unavailable = context.get("intelligence_unavailable") or []
     if degraded or unavailable:
@@ -516,6 +565,8 @@ def _content_digest(
         "degradations": degradations,
         "intelligence_unavailable": context["intelligence_unavailable"],
         "findings_total": context["summary"]["total"],
+        "compliance": context["compliance"],
+        "operational_metrics": context["operational_metrics"],
     }
 
 

@@ -591,6 +591,8 @@ async def list_assets(
         conditions.append(Asset.status == filters.status.value)
     if filters.assessment_id is not None:
         conditions.append(Asset.assessment_id == filters.assessment_id)
+    if filters.group:
+        conditions.append(Asset.groups.contains([filters.group.strip()]))
     if filters.q:
         term = f"%{_escape_like(filters.q)}%"
         conditions.append(
@@ -598,6 +600,17 @@ async def list_assets(
                 Asset.name.ilike(term, escape="\\"),
                 Asset.ip_address.ilike(term, escape="\\"),
                 Asset.service.ilike(term, escape="\\"),
+            )
+        )
+    if filters.query:
+        from app.services.query_language import compile_query
+
+        conditions.append(
+            compile_query(
+                filters.query,
+                resource="assets",
+                organization_id=principal.organization_id,
+                user_id=principal.user_id,
             )
         )
 

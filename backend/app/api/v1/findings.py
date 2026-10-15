@@ -119,6 +119,22 @@ async def list_finding_tickets(
     return [TicketLinkOut.model_validate(ticket) for ticket in tickets]
 
 
+@router.post("/tickets/{ticket_id}/refresh", response_model=TicketLinkOut)
+async def refresh_finding_ticket(
+    ticket_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> TicketLinkOut:
+    """Refresh one provider ticket and emit ticket-closed automation only on transition."""
+    ticket = await ticket_service.refresh_ticket_status(
+        session, principal, ticket_id, settings=settings, redis=redis
+    )
+    await session.commit()
+    return TicketLinkOut.model_validate(ticket)
+
+
 @router.post("/{finding_id}/analyze", response_model=FindingDetailOut)
 async def analyze_finding(
     finding_id: uuid.UUID,
@@ -227,6 +243,12 @@ async def create_finding_ticket(
     already linked rather than opening a duplicate.  Jira is the only supported tracker in
     this release (FR-028); an unreachable Jira surfaces as a 502, not a half-written link.
     """
+    if payload.provider != "jira":
+        from app.core.errors import InvalidConfigurationError
+
+        raise InvalidConfigurationError(
+            "Native findings support Jira tickets only; use the canonical finding workflow for multi-provider tickets."
+        )
     link = await ticket_service.create_ticket(
         session,
         principal,

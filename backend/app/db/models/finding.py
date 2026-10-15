@@ -381,6 +381,10 @@ class TicketLink(Base, TenantMixin, TimestampMixin):
     issue_type: Mapped[str | None] = mapped_column(String(60))
     #: Last known state in the tracker; refreshed on demand, not polled.
     external_status: Mapped[str | None] = mapped_column(String(80))
+    #: Monotonic closure cycle for automation idempotency.  A ticket can legitimately
+    #: be reopened and resolved again; each terminal transition deserves one fresh
+    #: evidence-based retest, while repeated polling of the same closed state does not.
+    closure_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -402,7 +406,7 @@ class TicketLink(Base, TenantMixin, TimestampMixin):
         # ticket. The value is half of the unique constraint above, so a variant
         # spelling ("Jira") is a second row for the same finding -- exactly the
         # duplicate this table exists to prevent.
-        CheckConstraint("provider IN ('jira','github','gitlab')", name="valid_ticket_provider"),
+        CheckConstraint("provider IN ('jira','github','gitlab','servicenow','azure_devops','linear')", name="valid_ticket_provider"),
         Index("ix_ticket_links_organization_id_provider", "organization_id", "provider"),
     )
 

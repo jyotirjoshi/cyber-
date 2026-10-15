@@ -80,3 +80,37 @@ async def test_configuration_preflight_does_not_mark_credential_used(monkeypatch
     assert scoped.github.api_token.get_secret_value() == "test-token"
     assert scoped.github.organization == "acme"
     assert credential.last_used_at is None
+
+
+@pytest.mark.asyncio
+async def test_llm_integration_ping_runs_a_bounded_completion_and_closes(monkeypatch) -> None:
+    from app.services import integration as service
+
+    calls: dict[str, object] = {}
+
+    class _Gateway:
+        def __init__(self, settings):
+            calls["settings"] = settings
+
+        async def complete(self, role, messages, **kwargs):
+            calls["role"] = role
+            calls["messages"] = messages
+            calls["kwargs"] = kwargs
+            return SimpleNamespace(text="OK")
+
+        async def aclose(self):
+            calls["closed"] = True
+
+    monkeypatch.setattr(service, "LLMGateway", _Gateway)
+    settings = Settings(
+        llm={
+            "provider": "openai",
+            "default_model": "test-model",
+            "openai_api_key": "test-key",
+        }
+    )
+
+    assert await service._ping(IntegrationKind.LLM, settings, None) is True
+    assert calls["role"] == "classification"
+    assert calls["kwargs"] == {"max_output_tokens": 8, "temperature": 0.0}
+    assert calls["closed"] is True

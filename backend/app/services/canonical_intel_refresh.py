@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
+import json
 import math
 import uuid
 from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -18,6 +21,7 @@ from app.db.enums import IntegrationKind, Role
 from app.db.models.asset import Asset
 from app.db.models.canonical import CanonicalFinding, FindingObservation
 from app.db.models.identity import Organization
+from app.db.models.threat_intelligence import VulnerabilityIntelligence
 from app.integrations.epss import EPSSClient
 from app.integrations.kev import KEVClient
 from app.integrations.nvd import NVDClient
@@ -26,6 +30,7 @@ from app.services.canonical_risk import score_canonical
 from app.services.context import ACTOR_WORKER, Principal
 from app.services.integration import resolve_settings
 from app.services.organization import load_policy
+from app.services.threat_feed import ThreatFeedObservation, ingest_observation
 
 
 def _bounded(value: Any, maximum: float) -> float | None:
@@ -69,6 +74,101 @@ async def fetch_cve_intelligence(
         probability = _bounded(epss_result.probability, 1.0)
         if probability is not None:
             snapshot["epss_score"] = probability
+    return snapshot
+
+
+async def cached_cve_intelligence(
+    session: AsyncSession,
+    cve_id: str,
+    *,
+    nvd: Any,
+    kev: Any,
+    epss: Any,
+    now: dt.datetime,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    """Return a durable public-feed snapshot, refreshing only when it expires.
+
+    Provider failures get a short retry window while verified prior positives are
+    retained.  The PostgreSQL upsert makes concurrent tenant refreshes converge on one
+    shared row without a uniqueness race.
+    """
+    normalized = normalize_cve(cve_id)
+    if CVE_RE.fullmatch(normalized) is None:
+        raise ValueError("Invalid CVE identifier")
+    cached = await session.get(VulnerabilityIntelligence, normalized)
+    if cached is not None and cached.expires_at > now:
+        return dict(cached.snapshot)
+
+    current = await fetch_cve_intelligence(normalized, nvd=nvd, kev=kev, epss=epss)
+    provider_facts = {
+        "nvd": {
+            key: current[key]
+            for key in ("cvss_score", "exploit_available", "exploit_references")
+            if key in current
+        },
+        "cisa_kev": {
+            **({"exploited": current["in_kev"]} if "in_kev" in current else {}),
+            **({"ransomware_use": current["ransomware_use"]} if "ransomware_use" in current else {}),
+        },
+        "epss": ({"epss_score": current["epss_score"]} if "epss_score" in current else {}),
+    }
+    source_status = {"nvd": "nvd_status", "cisa_kev": "kev_status", "epss": "epss_status"}
+    source_license = {
+        "nvd": "https://www.nist.gov/open/license",
+        "cisa_kev": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+        "epss": "https://www.first.org/epss/",
+    }
+    for source, facts in provider_facts.items():
+        if not facts:
+            continue
+        digest = hashlib.sha256(
+            json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:24]
+        await ingest_observation(
+            session,
+            ThreatFeedObservation(
+                entity_type="cve",
+                entity_key=normalized,
+                source=source,
+                source_reference=f"{source}:{normalized}:{digest}",
+                confidence=1.0 if source == "cisa_kev" else 0.9,
+                observed_at=now,
+                facts=facts,
+                freshness=(
+                    "fresh" if current.get(source_status[source]) == "complete" else "stale"
+                ),
+                license_reference=source_license[source],
+            ),
+            now=now,
+        )
+    prior = cached.snapshot if cached is not None and isinstance(cached.snapshot, dict) else {}
+    snapshot = merge_last_known_intelligence(current, prior)
+    unavailable = any(
+        snapshot.get(f"{provider}_status") == "unavailable"
+        for provider in ("nvd", "kev", "epss")
+    )
+    ttl_seconds = min(max_age_seconds, 900) if unavailable else max_age_seconds
+    expires_at = now + dt.timedelta(seconds=max(300, ttl_seconds))
+    statement = insert(VulnerabilityIntelligence).values(
+        cve_id=normalized,
+        snapshot=snapshot,
+        refreshed_at=now,
+        expires_at=expires_at,
+        created_at=now,
+        updated_at=now,
+    )
+    await session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[VulnerabilityIntelligence.cve_id],
+            set_={
+                "snapshot": snapshot,
+                "refreshed_at": now,
+                "expires_at": expires_at,
+                "updated_at": now,
+            },
+        )
+    )
     return snapshot
 
 
@@ -244,7 +344,15 @@ async def refresh_stale_intel_batch(
             prior_snapshots = finding.intel_evidence or {}
             snapshots = {}
             for cve in cve_ids:
-                current = await fetch_cve_intelligence(cve, nvd=nvd, kev=kev, epss=epss)
+                current = await cached_cve_intelligence(
+                    session,
+                    cve,
+                    nvd=nvd,
+                    kev=kev,
+                    epss=epss,
+                    now=now,
+                    max_age_seconds=age_seconds,
+                )
                 prior = prior_snapshots.get(cve)
                 snapshots[cve] = merge_last_known_intelligence(
                     current, prior if isinstance(prior, dict) else {}

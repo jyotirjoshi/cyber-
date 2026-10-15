@@ -79,6 +79,11 @@ class NucleiAdapter(ScannerAdapter):
     AUTH_NAME = "api-auth.yaml"
 
     def prepare(self, request: ScannerRequest) -> None:
+        document = request.option("scan_auth_document")
+        if isinstance(document, Secret):
+            auth_file = Path(request.workdir) / self.AUTH_NAME
+            auth_file.write_text(document.reveal(), encoding="utf-8")
+            auth_file.chmod(0o600)
         if prepare_openapi_spec(request):
             token = request.option("api_auth_token")
             if token is not None:
@@ -104,12 +109,14 @@ class NucleiAdapter(ScannerAdapter):
         argv: list[str] = []
         if request.option("api_spec") is not None:
             argv += ["-list", self.container_path(SPEC_FILENAME), "-im", "openapi", "-sfv"]
-            if request.option("api_auth_token") is not None:
+            if request.option("api_auth_token") is not None or request.option("scan_auth_document") is not None:
                 argv += ["-sf", self.container_path(self.AUTH_NAME), "-or"]
         elif len(request.targets) == 1:
             argv += ["-target", request.targets[0]]
         else:
             argv += ["-list", self.container_path(self.TARGETS_NAME)]
+        if request.option("scan_auth_document") is not None and "-sf" not in argv:
+            argv += ["-sf", self.container_path(self.AUTH_NAME), "-or"]
 
         argv += [
             #: One JSON object per line, written as findings are confirmed. See the module
@@ -170,6 +177,8 @@ class NucleiAdapter(ScannerAdapter):
         return clamped
 
     def collect(self, request: ScannerRequest) -> tuple[ArtifactFile, ...]:
+        auth_file = Path(request.workdir) / self.AUTH_NAME
+        auth_file.unlink(missing_ok=True)
         report = describe(
             request.out_dir / self.REPORT_NAME,
             kind=ArtifactKind.RAW_OUTPUT,

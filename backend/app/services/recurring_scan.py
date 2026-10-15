@@ -57,6 +57,43 @@ async def create_scan_profile(
     return profile
 
 
+async def deactivate_scan_profile(
+    session: AsyncSession,
+    principal: Principal,
+    profile_id: uuid.UUID,
+) -> tuple[ScanProfile, int]:
+    """Retire a profile and safely stop every enabled schedule that references it."""
+    principal.require(Permission.ASSESSMENT_CREATE)
+    profile = (
+        await session.execute(
+            tenant_select(ScanProfile, principal.organization_id)
+            .where(ScanProfile.id == profile_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise ResourceNotFoundError("Scan profile not found")
+
+    profile.is_active = False
+    schedules = list(
+        (
+            await session.execute(
+                tenant_select(RecurringScan, principal.organization_id)
+                .where(
+                    RecurringScan.profile_id == profile.id,
+                    RecurringScan.enabled.is_(True),
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+    )
+    for schedule in schedules:
+        schedule.enabled = False
+        schedule.last_error_code = "profile_deactivated"
+    await session.flush()
+    return profile, len(schedules)
+
+
 async def create_recurring_scan(
     session: AsyncSession,
     principal: Principal,

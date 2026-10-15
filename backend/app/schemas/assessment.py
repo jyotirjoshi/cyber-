@@ -20,7 +20,7 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from app.db.enums import (
     ApprovalDecision,
@@ -59,6 +59,40 @@ class AuthorizationIn(BaseModel):
     evidence_reference: str | None = Field(default=None, max_length=1024)
 
 
+class EngagementChecklistItemIn(BaseModel):
+    """One customer-visible PTaaS check with an evidence trail, never raw evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    title: str = Field(min_length=1, max_length=300)
+    required: bool = True
+    evidence_reference: str | None = Field(default=None, max_length=1024)
+
+    @field_validator("title", "evidence_reference")
+    @classmethod
+    def reject_controls(cls, value: str | None) -> str | None:
+        if value is not None and any(
+            ord(character) < 32 or ord(character) == 127 for character in value
+        ):
+            raise ValueError("engagement checklist text cannot contain control characters")
+        return value.strip() if value is not None else None
+
+
+class EngagementChecklistUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    completed: bool
+    evidence_reference: str | None = Field(default=None, max_length=1024)
+
+
+class EngagementChecklistItemOut(EngagementChecklistItemIn):
+    """A persisted PTaaS checklist item, including its tester completion state."""
+
+    completed: bool = False
+    completed_by_id: uuid.UUID | None = None
+    completed_at: dt.datetime | None = None
+
+
 class AssessmentCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -76,7 +110,13 @@ class AssessmentCreateIn(BaseModel):
     api_spec: dict[str, Any] | None = None
     api_target: str | None = Field(default=None, max_length=2048)
     api_auth_token: SecretStr | None = None
+    scan_auth_profile_id: uuid.UUID | None = None
     authorization: AuthorizationIn
+    #: Customer-facing engagement plan. Evidence references point to durable artifacts,
+    #: not raw PoCs or credentials in the request body.
+    engagement_checklist: list[EngagementChecklistItemIn] = Field(
+        default_factory=list, max_length=100
+    )
     #: Email addresses or Slack channels to notify. Resolved against the organization's
     #: notification policy; unknown recipients are dropped, not delivered blind.
     notify: list[str] = Field(default_factory=list, max_length=50)
@@ -140,6 +180,8 @@ class WorkerMetricsOut(BaseModel):
     runs: dict[str, int]
     pending_dispatches: int
     scanner_jobs: dict[str, int]
+    notification_deliveries: dict[str, int]
+    notification_retries_due: int
 
 
 class TargetOut(BaseModel):
@@ -300,6 +342,7 @@ class AssessmentOut(BaseModel):
 
 class AssessmentDetailOut(AssessmentOut):
     plan: list[PlanStepOut] = Field(default_factory=list)
+    engagement_checklist: list[EngagementChecklistItemOut] = Field(default_factory=list)
     #: The agent's structured reading of ``objective`` (FR-004): extracted targets,
     #: inferred scope, assumptions, and anything it could not resolve.
     request_interpretation: dict[str, Any] = Field(default_factory=dict)

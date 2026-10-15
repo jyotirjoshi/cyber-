@@ -37,18 +37,17 @@ def stage_assessment_run(
         )
     )
     assessment.agent_session_id = session_id
-    session.add(
-        AgentRun(
-            id=run_id,
-            organization_id=principal.organization_id,
-            session_id=session_id,
-            assessment_id=assessment.id,
-            triggered_by_id=principal.user_id,
-            thread_id=str(run_id),
-            graph="assessment",
-            status=AgentRunStatus.QUEUED.value,
-        )
+    run = AgentRun(
+        id=run_id,
+        organization_id=principal.organization_id,
+        session_id=session_id,
+        assessment_id=assessment.id,
+        triggered_by_id=principal.user_id,
+        thread_id=str(run_id),
+        graph="assessment",
+        status=AgentRunStatus.QUEUED.value,
     )
+    session.add(run)
     dispatch = stage_run_dispatch(
         session,
         organization_id=principal.organization_id,
@@ -56,6 +55,7 @@ def stage_assessment_run(
         action=RunAction.START,
         principal=principal,
     )
+    dispatch.run = run
     return run_id, dispatch.id
 
 

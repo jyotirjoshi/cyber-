@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import hashlib
+import ipaddress
 import re
 import time
 import uuid
@@ -75,20 +76,41 @@ from app.db.enums import AuditOutcome, IntegrationKind, IntegrationStatus, Permi
 from app.db.models.identity import Organization
 from app.db.models.integration import Integration, IntegrationCredential
 from app.db.repository import tenant_select
+from app.integrations.aws_inspector import AwsInspectorClient
+from app.integrations.aws_security_hub import AwsSecurityHubClient
+from app.integrations.azure_defender import AzureDefenderClient
+from app.integrations.azure_devops import AzureDevOpsClient
 from app.integrations.bitbucket import BitbucketClient
+from app.integrations.bugcrowd import BugcrowdClient
+from app.integrations.burp_dast import BurpDastClient
+from app.integrations.checkmarx import CheckmarxClient
 from app.integrations.circuit import CircuitBreaker
+from app.integrations.crowdstrike import CrowdStrikeClient
 from app.integrations.defectdojo import DefectDojoClient
 from app.integrations.dify import DifyClient
 from app.integrations.email import EmailSender
+from app.integrations.fortify import FortifySscClient
+from app.integrations.gcp_scc import GcpSccClient
 from app.integrations.github import GitHubClient
 from app.integrations.gitlab import GitLabClient
+from app.integrations.hackerone import HackerOneClient
 from app.integrations.jira import JiraClient
+from app.integrations.linear import LinearClient
 from app.integrations.misp import MISPClient
+from app.integrations.pagerduty import PagerDutyClient
+from app.integrations.prisma_cloud import PrismaCloudClient
+from app.integrations.qualys import QualysClient
+from app.integrations.rapid7 import Rapid7Client
+from app.integrations.servicenow import ServiceNowClient
 from app.integrations.slack import SlackClient
 from app.integrations.snyk import SnykClient
 from app.integrations.sonarqube import SonarQubeClient
+from app.integrations.splunk import SplunkHecClient
 from app.integrations.tenable import TenableClient
 from app.integrations.wazuh import WazuhClient
+from app.integrations.wiz import WizClient
+from app.llm.base import LLMMessage
+from app.llm.gateway import LLMGateway
 from app.scanners.base import ScannerRequest
 from app.scanners.prowler import AWS_ADAPTER, AZURE_ADAPTER, GCP_ADAPTER
 from app.schemas.integration import (
@@ -230,15 +252,66 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         section="github",
         base_url_field="base_url",
         credentials={"api_token": "api_token"},
-        config={"organization": "organization"},
+        config={"organization": "organization", "repository": "repository"},
         required=("api_token",),
     ),
     IntegrationKind.GITLAB: _KindSpec(
         section="gitlab",
         base_url_field="base_url",
         credentials={"api_token": "api_token"},
-        config={"project_ids": "project_ids"},
+        config={"project_ids": "project_ids", "issue_project": "issue_project"},
         required=("api_token",),
+    ),
+    IntegrationKind.SERVICENOW: _KindSpec(
+        section="servicenow",
+        base_url_field="base_url",
+        credentials={"api_token": "api_token"},
+        config={"table": "table", "assignment_group": "assignment_group"},
+        required=("api_token",),
+    ),
+    IntegrationKind.AZURE_DEVOPS: _KindSpec(
+        section="azure_devops",
+        base_url_field="base_url",
+        credentials={"api_token": "api_token"},
+        config={
+            "organization": "organization",
+            "project": "project",
+            "work_item_type": "work_item_type",
+        },
+        required=("api_token",),
+    ),
+    IntegrationKind.LINEAR: _KindSpec(
+        section="linear",
+        base_url_field="base_url",
+        credentials={"api_token": "api_token"},
+        config={"team_id": "team_id"},
+        required=("api_token",),
+    ),
+    IntegrationKind.PAGERDUTY: _KindSpec(
+        section="pagerduty",
+        base_url_field="base_url",
+        credentials={"routing_key": "routing_key"},
+        config={"source": "source"},
+        required=("routing_key",),
+    ),
+    IntegrationKind.SPLUNK: _KindSpec(
+        section="splunk",
+        base_url_field="base_url",
+        credentials={"hec_token": "hec_token"},
+        config={
+            "index": "index",
+            "source": "source",
+            "sourcetype": "sourcetype",
+            "host": "host",
+        },
+        required=("hec_token",),
+    ),
+    IntegrationKind.BURP_DAST: _KindSpec(
+        section="burp_dast",
+        base_url_field="base_url",
+        credentials={"api_key": "api_key"},
+        config={"site_ids": "site_ids"},
+        required=("api_key",),
     ),
     IntegrationKind.BITBUCKET: _KindSpec(
         section="bitbucket",
@@ -283,6 +356,84 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         config={"scan_ids": "scan_ids"},
         required=("access_key", "secret_key"),
     ),
+    IntegrationKind.QUALYS: _KindSpec(
+        section="qualys",
+        base_url_field="base_url",
+        credentials={"username": "username", "password": "password"},
+        config={"asset_ip": "asset_ip"},
+        required=("username", "password"),
+    ),
+    IntegrationKind.RAPID7: _KindSpec(
+        section="rapid7",
+        base_url_field="base_url",
+        credentials={"username": "username", "password": "password"},
+        config={"asset_ids": "asset_ids"},
+        required=("username", "password"),
+    ),
+    IntegrationKind.WIZ: _KindSpec(
+        section="wiz",
+        credentials={"client_id": "client_id", "client_secret": "client_secret"},
+        config={"region": "region", "project_ids": "project_ids"},
+        required=("client_id", "client_secret"),
+    ),
+    IntegrationKind.PRISMA_CLOUD: _KindSpec(
+        section="prisma_cloud",
+        base_url_field="base_url",
+        credentials={"access_key_id": "access_key_id", "secret_key": "secret_key"},
+        config={"cloud_account_ids": "cloud_account_ids"},
+        required=("access_key_id", "secret_key"),
+    ),
+    IntegrationKind.CROWDSTRIKE: _KindSpec(
+        section="crowdstrike",
+        base_url_field="base_url",
+        credentials={"client_id": "client_id", "client_secret": "client_secret"},
+        required=("client_id", "client_secret"),
+    ),
+    IntegrationKind.AWS_SECURITY_HUB: _KindSpec(
+        section="aws_security_hub",
+        credentials={
+            "access_key_id": "access_key_id",
+            "secret_access_key": "secret_access_key",
+            "session_token": "session_token",
+        },
+        config={"region": "region", "account_ids": "account_ids"},
+        required=("access_key_id", "secret_access_key"),
+    ),
+    IntegrationKind.AWS_INSPECTOR: _KindSpec(
+        section="aws_inspector",
+        credentials={
+            "access_key_id": "access_key_id",
+            "secret_access_key": "secret_access_key",
+            "session_token": "session_token",
+        },
+        config={"region": "region", "account_ids": "account_ids"},
+        required=("access_key_id", "secret_access_key"),
+    ),
+    IntegrationKind.HACKERONE: _KindSpec(
+        section="hackerone",
+        credentials={"api_username": "api_username", "api_token": "api_token"},
+        config={"program_handles": "program_handles"},
+        required=("api_username", "api_token"),
+    ),
+    IntegrationKind.BUGCROWD: _KindSpec(section="bugcrowd", credentials={"token_username": "token_username", "token_password": "token_password"}, config={"engagement_codes": "engagement_codes"}, required=("token_username", "token_password")),
+    IntegrationKind.CHECKMARX: _KindSpec(section="checkmarx", base_url_field="base_url", credentials={"client_id": "client_id", "client_secret": "client_secret"}, config={"auth_url": "auth_url", "tenant": "tenant", "projects": "projects"}, required=("client_id", "client_secret")),
+    IntegrationKind.FORTIFY: _KindSpec(section="fortify", base_url_field="base_url", credentials={"automation_token": "automation_token"}, config={"application_versions": "application_versions"}, required=("automation_token",)),
+    IntegrationKind.AZURE_DEFENDER: _KindSpec(
+        section="azure_defender",
+        credentials={
+            "tenant_id": "tenant_id",
+            "client_id": "client_id",
+            "client_secret": "client_secret",
+        },
+        config={"subscription_id": "subscription_id"},
+        required=("tenant_id", "client_id", "client_secret"),
+    ),
+    IntegrationKind.GCP_SCC: _KindSpec(
+        section="gcp_scc",
+        credentials={"service_account_json": "service_account_json"},
+        config={"project_id": "project_id", "location": "location"},
+        required=("service_account_json",),
+    ),
     IntegrationKind.PROWLER_AWS: _KindSpec(
         section="scanner",
         credentials={
@@ -316,11 +467,44 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
 #: one is told plainly rather than seeing a silent no-op.
 _UNIMPLEMENTED: frozenset[IntegrationKind] = frozenset()
 
+# Providers whose APIs expose bounded finding feeds and therefore support the
+# worker's durable continuous-ingestion scheduler.
+CONTINUOUS_SYNC_KINDS: frozenset[IntegrationKind] = frozenset(
+    {
+        IntegrationKind.GITHUB,
+        IntegrationKind.GITLAB,
+        IntegrationKind.WAZUH,
+        IntegrationKind.SONARQUBE,
+        IntegrationKind.SNYK,
+        IntegrationKind.TENABLE,
+        IntegrationKind.QUALYS,
+        IntegrationKind.RAPID7,
+        IntegrationKind.WIZ,
+        IntegrationKind.PRISMA_CLOUD,
+        IntegrationKind.CROWDSTRIKE,
+        IntegrationKind.AWS_SECURITY_HUB,
+        IntegrationKind.AWS_INSPECTOR,
+        IntegrationKind.HACKERONE,
+        IntegrationKind.BUGCROWD,
+        IntegrationKind.CHECKMARX,
+        IntegrationKind.FORTIFY,
+        IntegrationKind.AZURE_DEFENDER,
+        IntegrationKind.GCP_SCC,
+        IntegrationKind.BURP_DAST,
+    }
+)
+
 # These connectors act on customer-owned accounts. A deployment credential must never
 # become an implicit credential for an unrelated organization in a hosted SaaS.
 _TENANT_PRIVATE_KINDS: frozenset[IntegrationKind] = frozenset(
     {
         IntegrationKind.JIRA,
+        IntegrationKind.SERVICENOW,
+        IntegrationKind.AZURE_DEVOPS,
+        IntegrationKind.LINEAR,
+        IntegrationKind.PAGERDUTY,
+        IntegrationKind.SPLUNK,
+        IntegrationKind.BURP_DAST,
         IntegrationKind.DIFY,
         IntegrationKind.MISP,
         IntegrationKind.GITHUB,
@@ -330,6 +514,19 @@ _TENANT_PRIVATE_KINDS: frozenset[IntegrationKind] = frozenset(
         IntegrationKind.SONARQUBE,
         IntegrationKind.SNYK,
         IntegrationKind.TENABLE,
+        IntegrationKind.QUALYS,
+        IntegrationKind.RAPID7,
+        IntegrationKind.WIZ,
+        IntegrationKind.PRISMA_CLOUD,
+        IntegrationKind.CROWDSTRIKE,
+        IntegrationKind.AWS_SECURITY_HUB,
+        IntegrationKind.AWS_INSPECTOR,
+        IntegrationKind.HACKERONE,
+        IntegrationKind.BUGCROWD,
+        IntegrationKind.CHECKMARX,
+        IntegrationKind.FORTIFY,
+        IntegrationKind.AZURE_DEFENDER,
+        IntegrationKind.GCP_SCC,
         IntegrationKind.PROWLER_AWS,
         IntegrationKind.PROWLER_AZURE,
         IntegrationKind.PROWLER_GCP,
@@ -340,6 +537,12 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.LLM: "Bring your own AI provider",
     IntegrationKind.DEFECTDOJO: "DefectDojo",
     IntegrationKind.JIRA: "Jira",
+    IntegrationKind.SERVICENOW: "ServiceNow",
+    IntegrationKind.AZURE_DEVOPS: "Azure DevOps",
+    IntegrationKind.LINEAR: "Linear",
+    IntegrationKind.PAGERDUTY: "PagerDuty",
+    IntegrationKind.SPLUNK: "Splunk HEC",
+    IntegrationKind.BURP_DAST: "Burp Suite DAST",
     IntegrationKind.SLACK: "Slack",
     IntegrationKind.EMAIL: "Email",
     IntegrationKind.DIFY: "Dify Knowledge Base",
@@ -352,6 +555,19 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.SONARQUBE: "SonarQube",
     IntegrationKind.SNYK: "Snyk",
     IntegrationKind.TENABLE: "Tenable VM",
+    IntegrationKind.QUALYS: "Qualys VM",
+    IntegrationKind.RAPID7: "Rapid7 InsightVM",
+    IntegrationKind.WIZ: "Wiz",
+    IntegrationKind.PRISMA_CLOUD: "Prisma Cloud",
+    IntegrationKind.CROWDSTRIKE: "CrowdStrike Falcon Spotlight",
+    IntegrationKind.AWS_SECURITY_HUB: "AWS Security Hub",
+    IntegrationKind.AWS_INSPECTOR: "Amazon Inspector",
+    IntegrationKind.HACKERONE: "HackerOne",
+    IntegrationKind.BUGCROWD: "Bugcrowd",
+    IntegrationKind.CHECKMARX: "Checkmarx One",
+    IntegrationKind.FORTIFY: "Fortify SSC",
+    IntegrationKind.AZURE_DEFENDER: "Microsoft Defender for Cloud",
+    IntegrationKind.GCP_SCC: "Google Security Command Center",
     IntegrationKind.PROWLER_AWS: "Prowler AWS account",
     IntegrationKind.PROWLER_AZURE: "Prowler Azure subscription",
     IntegrationKind.PROWLER_GCP: "Prowler GCP project",
@@ -423,6 +639,170 @@ def validate_bitbucket_config(config: Mapping[str, Any]) -> None:
             raise InvalidConfigurationError(
                 f"invalid Bitbucket {config_field}",
                 user_message=f"Bitbucket {config_field} must be a repository identifier.",
+            )
+
+
+def validate_qualys_config(config: dict[str, Any]) -> None:
+    """Keep direct Qualys pulls bound to a single explicit IP asset."""
+    value = config.get("asset_ip")
+    if value is None:
+        return
+    try:
+        config["asset_ip"] = str(ipaddress.ip_address(value))
+    except ValueError as exc:
+        raise InvalidConfigurationError(
+            "invalid Qualys asset IP",
+            user_message="Qualys asset_ip must be one IPv4 or IPv6 address.",
+        ) from exc
+
+
+def validate_aws_security_hub_config(config: Mapping[str, Any]) -> None:
+    """Require an explicit region and bounded account allow-list before saving."""
+    region = config.get("region")
+    account_ids = config.get("account_ids")
+    if not isinstance(region, str) or re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-\d", region) is None:
+        raise InvalidConfigurationError(
+            "invalid AWS Security Hub region",
+            user_message="AWS Security Hub region must be an AWS region such as us-east-1.",
+        )
+    if not (
+        isinstance(account_ids, list)
+        and 1 <= len(account_ids) <= 20
+        and all(isinstance(item, str) and re.fullmatch(r"\d{12}", item) for item in account_ids)
+        and len(set(account_ids)) == len(account_ids)
+    ):
+        raise InvalidConfigurationError(
+            "invalid AWS Security Hub account scope",
+            user_message="AWS Security Hub account_ids must contain 1-20 unique 12-digit IDs.",
+        )
+
+
+def validate_rapid7_config(config: dict[str, Any]) -> None:
+    """Require a small, explicit InsightVM asset scope for every tenant."""
+    asset_ids = config.get("asset_ids")
+    valid = (
+        isinstance(asset_ids, list)
+        and 1 <= len(asset_ids) <= 20
+        and all(
+            isinstance(item, str)
+            and item.isdecimal()
+            and 0 < int(item) <= 9_223_372_036_854_775_807
+            for item in asset_ids
+        )
+        and len(set(asset_ids)) == len(asset_ids)
+    )
+    if not valid:
+        raise InvalidConfigurationError(
+            "invalid Rapid7 asset IDs",
+            user_message="Rapid7 asset_ids must be 1-20 unique positive InsightVM asset IDs.",
+        )
+
+
+def validate_wiz_config(config: dict[str, Any]) -> None:
+    """Bind every Wiz service account to a small explicit project set."""
+    region = config.get("region")
+    project_ids = config.get("project_ids")
+    valid = (
+        isinstance(region, str)
+        and re.fullmatch(r"[a-z][a-z0-9-]{1,23}", region) is not None
+        and isinstance(project_ids, list)
+        and 1 <= len(project_ids) <= 100
+        and all(
+            isinstance(item, str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item) is not None
+            for item in project_ids
+        )
+        and len(set(project_ids)) == len(project_ids)
+    )
+    if not valid:
+        raise InvalidConfigurationError(
+            "invalid Wiz scope",
+            user_message="Wiz requires a valid region and 1-100 unique project IDs.",
+        )
+
+
+def validate_prisma_cloud_config(config: dict[str, Any]) -> None:
+    """Require an explicit bounded cloud-account scope."""
+    account_ids = config.get("cloud_account_ids")
+    valid = (
+        isinstance(account_ids, list)
+        and 1 <= len(account_ids) <= 100
+        and all(
+            isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{2,256}", item) is not None
+            for item in account_ids
+        )
+        and len(set(account_ids)) == len(account_ids)
+    )
+    if not valid:
+        raise InvalidConfigurationError(
+            "invalid Prisma Cloud account scope",
+            user_message="Prisma Cloud requires 1-100 unique cloud account IDs.",
+        )
+
+
+def validate_ticket_repository_config(config: Mapping[str, Any], *, field: str) -> None:
+    """Ensure ticket destinations are a single safe repository/project coordinate."""
+    value = config.get(field)
+    if value is None:
+        return
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?", value) is None
+    ):
+        raise InvalidConfigurationError(
+            f"invalid {field}",
+            user_message=f"{field} must be a safe repository or project identifier.",
+        )
+
+
+def validate_servicenow_ticket_config(config: Mapping[str, Any]) -> None:
+    """Only permit the two incident tables whose correlation contract we implement."""
+    table = config.get("table")
+    if table is not None and table not in {"incident", "sn_si_incident"}:
+        raise InvalidConfigurationError(
+            "invalid ServiceNow table",
+            user_message="ServiceNow table must be incident or sn_si_incident.",
+        )
+    group = config.get("assignment_group")
+    if group is not None and (not isinstance(group, str) or not 1 <= len(group.strip()) <= 160):
+        raise InvalidConfigurationError(
+            "invalid ServiceNow assignment group",
+            user_message="ServiceNow assignment_group must be 1-160 characters.",
+        )
+
+
+def validate_azure_devops_ticket_config(config: Mapping[str, Any]) -> None:
+    """Reject malformed Azure DevOps destination names before outbound use."""
+    for config_field, maximum in (("organization", 128), ("project", 128), ("work_item_type", 80)):
+        value = config.get(config_field)
+        if value is not None and (
+            not isinstance(value, str)
+            or re.fullmatch(rf"[A-Za-z0-9][A-Za-z0-9_. -]{{0,{maximum - 1}}}", value) is None
+        ):
+            raise InvalidConfigurationError(
+                f"invalid Azure DevOps {config_field}",
+                user_message=f"Azure DevOps {config_field} must be a safe non-empty identifier.",
+            )
+
+
+def validate_splunk_config(config: Mapping[str, Any]) -> None:
+    """Keep tenant-controlled HEC metadata bounded and free of control characters."""
+    patterns = {
+        "index": (r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", 128),
+        "source": (r"[A-Za-z0-9][A-Za-z0-9_./:@-]{0,255}", 256),
+        "sourcetype": (r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", 256),
+        "host": (r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,254}", 255),
+    }
+    for field_name, (pattern, maximum) in patterns.items():
+        value = config.get(field_name)
+        if value is not None and (
+            not isinstance(value, str)
+            or len(value) > maximum
+            or re.fullmatch(pattern, value) is None
+        ):
+            raise InvalidConfigurationError(
+                f"invalid Splunk {field_name}",
+                user_message=f"Splunk {field_name} must be a safe non-empty identifier.",
             )
 
 
@@ -636,7 +1016,29 @@ def integration_out(integration: Integration) -> IntegrationOut:
         last_error=integration.last_error,
         last_error_at=integration.last_error_at,
         failure_count=integration.failure_count,
+        sync_interval_minutes=integration.sync_interval_minutes,
+        next_sync_at=integration.next_sync_at,
+        last_sync_at=integration.last_sync_at,
+        last_sync_status=integration.last_sync_status,
+        last_sync_error=integration.last_sync_error,
+        sync_failure_count=integration.sync_failure_count,
         created_at=integration.created_at,
+    )
+
+
+def mark_sync_succeeded(integration: Integration | None, *, completed_at: dt.datetime | None = None) -> None:
+    """Apply the shared success transition for manual, agent and scheduled pulls."""
+    if integration is None:
+        return
+    completed = completed_at or utcnow()
+    integration.last_sync_at = completed
+    integration.last_sync_status = "succeeded"
+    integration.last_sync_error = None
+    integration.sync_failure_count = 0
+    integration.next_sync_at = (
+        completed + dt.timedelta(minutes=integration.sync_interval_minutes)
+        if integration.is_enabled and integration.sync_interval_minutes is not None
+        else None
     )
 
 
@@ -669,6 +1071,10 @@ async def integration_health(
                 is_enabled=integration.is_enabled,
                 last_verified_at=integration.last_verified_at,
                 failure_count=integration.failure_count,
+                sync_interval_minutes=integration.sync_interval_minutes,
+                last_sync_at=integration.last_sync_at,
+                last_sync_status=integration.last_sync_status,
+                sync_failure_count=integration.sync_failure_count,
                 circuit_open=circuit_open,
             )
         )
@@ -845,6 +1251,11 @@ async def upsert_integration(
         )
     spec = _spec_for(kind)
     _reject_secret_shaped_config(payload.config)
+    if payload.sync_interval_minutes is not None and kind not in CONTINUOUS_SYNC_KINDS:
+        raise InvalidConfigurationError(
+            "continuous sync is unavailable for this integration",
+            user_message=f"{kind.value} does not provide a continuously ingested finding feed.",
+        )
 
     unknown_config = sorted(set(payload.config) - set(spec.config))
     if unknown_config:
@@ -916,6 +1327,148 @@ async def upsert_integration(
         payload.config["account_id"] = validate_gcp_project_config(payload.config)
     if kind is IntegrationKind.BITBUCKET:
         validate_bitbucket_config(payload.config)
+    if kind is IntegrationKind.QUALYS:
+        validate_qualys_config(payload.config)
+    if kind is IntegrationKind.RAPID7:
+        validate_rapid7_config(payload.config)
+    if kind is IntegrationKind.WIZ:
+        validate_wiz_config(payload.config)
+    if kind is IntegrationKind.PRISMA_CLOUD:
+        validate_prisma_cloud_config(payload.config)
+    if kind is IntegrationKind.AWS_SECURITY_HUB:
+        validate_aws_security_hub_config(payload.config)
+    if kind is IntegrationKind.AWS_INSPECTOR:
+        validate_aws_security_hub_config(payload.config)
+    if kind is IntegrationKind.HACKERONE:
+        handles = payload.config.get("program_handles")
+        if not (
+            isinstance(handles, list)
+            and 1 <= len(handles) <= 100
+            and all(
+                isinstance(handle, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", handle)
+                for handle in handles
+            )
+            and len(set(handles)) == len(handles)
+        ):
+            raise InvalidConfigurationError(
+                "invalid HackerOne program handles",
+                user_message="HackerOne program_handles must contain 1-100 unique handles.",
+            )
+    if kind is IntegrationKind.BUGCROWD:
+        codes = payload.config.get("engagement_codes")
+        if not (
+            isinstance(codes, list)
+            and 1 <= len(codes) <= 100
+            and all(
+                isinstance(code, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", code)
+                for code in codes
+            )
+            and len(set(codes)) == len(codes)
+        ):
+            raise InvalidConfigurationError(
+                "invalid Bugcrowd engagement codes",
+                user_message="Bugcrowd engagement_codes must contain 1-100 unique codes.",
+            )
+    if kind is IntegrationKind.CHECKMARX:
+        projects = payload.config.get("projects")
+        tenant = payload.config.get("tenant")
+        auth_url = payload.config.get("auth_url")
+        try:
+            projects_valid = (
+                isinstance(projects, dict)
+                and 1 <= len(projects) <= 100
+                and all(
+                    isinstance(project_id, str)
+                    and str(uuid.UUID(project_id)) == project_id.lower()
+                    and isinstance(asset, str)
+                    and 3 <= len(asset) <= 500
+                    and "/" in asset
+                    for project_id, asset in projects.items()
+                )
+            )
+        except (TypeError, ValueError):
+            projects_valid = False
+        if not projects_valid:
+            raise InvalidConfigurationError(
+                "invalid Checkmarx projects",
+                user_message="Checkmarx projects must map 1-100 project UUIDs to repository identities.",
+            )
+        if not isinstance(tenant, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", tenant) is None:
+            raise InvalidConfigurationError("invalid Checkmarx tenant")
+        if not isinstance(auth_url, str) or not auth_url:
+            raise InvalidConfigurationError("invalid Checkmarx identity URL")
+    if kind is IntegrationKind.FORTIFY:
+        versions = payload.config.get("application_versions")
+        if not (
+            isinstance(versions, dict)
+            and 1 <= len(versions) <= 100
+            and all(
+                isinstance(version_id, str)
+                and re.fullmatch(r"[1-9]\d{0,18}", version_id)
+                and isinstance(asset, str)
+                and 3 <= len(asset) <= 500
+                for version_id, asset in versions.items()
+            )
+        ):
+            raise InvalidConfigurationError(
+                "invalid Fortify application versions",
+                user_message="Fortify application_versions must map 1-100 SSC version IDs to asset identities.",
+            )
+    if kind is IntegrationKind.AZURE_DEFENDER:
+        payload.config["subscription_id"] = validate_azure_subscription_config(
+            {"account_id": payload.config.get("subscription_id")}
+        )
+    if kind is IntegrationKind.GCP_SCC:
+        project = payload.config.get("project_id")
+        location = payload.config.get("location", "global")
+        if not isinstance(project, str) or re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", project) is None:
+            raise InvalidConfigurationError(
+                "invalid GCP SCC project ID",
+                user_message="GCP SCC project_id must be a canonical project ID.",
+            )
+        if (
+            not isinstance(location, str)
+            or re.fullmatch(r"(?:global|[a-z][a-z0-9-]{1,30})", location) is None
+        ):
+            raise InvalidConfigurationError(
+                "invalid GCP SCC location",
+                user_message="GCP SCC location must be global or a supported data-residency location.",
+            )
+    if kind is IntegrationKind.BURP_DAST:
+        site_ids = payload.config.get("site_ids")
+        if not (
+            isinstance(site_ids, list)
+            and 1 <= len(site_ids) <= 100
+            and all(isinstance(value, str) and re.fullmatch(r"[1-9]\d{0,18}", value) for value in site_ids)
+            and len(set(site_ids)) == len(site_ids)
+        ):
+            raise InvalidConfigurationError(
+                "invalid Burp DAST site IDs",
+                user_message="Burp DAST site_ids must contain 1-100 unique numeric site IDs.",
+            )
+    if kind is IntegrationKind.SPLUNK:
+        validate_splunk_config(payload.config)
+    if kind is IntegrationKind.GITHUB:
+        validate_ticket_repository_config(payload.config, field="repository")
+    if kind is IntegrationKind.GITLAB:
+        validate_ticket_repository_config(payload.config, field="issue_project")
+    if kind is IntegrationKind.SERVICENOW:
+        validate_servicenow_ticket_config(payload.config)
+    if kind is IntegrationKind.AZURE_DEVOPS:
+        validate_azure_devops_ticket_config(payload.config)
+    if (
+        kind is IntegrationKind.LINEAR
+        and "team_id" in payload.config
+        and (
+            not isinstance(payload.config["team_id"], str)
+            or re.fullmatch(r"[0-9a-fA-F-]{8,64}", payload.config["team_id"]) is None
+        )
+    ):
+        raise InvalidConfigurationError(
+            "invalid Linear team ID", user_message="Linear team_id must be a team UUID."
+        )
 
     # Serialize connector creation per organization.  This prevents two concurrent settings
     # requests from both seeing the last available slot and storing more integrations than
@@ -947,6 +1500,12 @@ async def upsert_integration(
             is_enabled=payload.is_enabled,
             base_url=payload.base_url,
             config=dict(payload.config),
+            sync_interval_minutes=payload.sync_interval_minutes,
+            next_sync_at=(
+                now
+                if payload.is_enabled and payload.sync_interval_minutes is not None
+                else None
+            ),
             created_by_id=principal.user_id,
         )
         session.add(integration)
@@ -962,6 +1521,13 @@ async def upsert_integration(
         integration.is_enabled = payload.is_enabled
         # Merged, not replaced: a form that submits one field must not blank the rest.
         integration.config = {**(integration.config or {}), **payload.config}
+        if "sync_interval_minutes" in payload.model_fields_set:
+            integration.sync_interval_minutes = payload.sync_interval_minutes
+        integration.next_sync_at = (
+            now
+            if integration.is_enabled and integration.sync_interval_minutes is not None
+            else None
+        )
 
     changed = _apply_credentials(
         integration,
@@ -995,6 +1561,8 @@ async def upsert_integration(
             "created": created,
             "is_enabled": integration.is_enabled,
             "config_keys": sorted(payload.config),
+            "continuous_sync": integration.sync_interval_minutes is not None,
+            "sync_interval_minutes": integration.sync_interval_minutes,
         },
     )
     if changed:
@@ -1049,6 +1617,7 @@ async def disable_integration(
     integration = await get_integration(session, principal, kind)
     integration.is_enabled = False
     integration.status = IntegrationStatus.DISABLED.value
+    integration.next_sync_at = None
     await audit_service.record(
         session,
         action=AuditAction.INTEGRATION_DISABLE,
@@ -1067,6 +1636,21 @@ async def disable_integration(
 
 
 async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) -> bool:
+    if kind is IntegrationKind.LLM:
+        # Exercise the exact tenant-scoped provider/model path that assessments use.  A
+        # deliberately tiny completion verifies the key, model entitlement and endpoint
+        # together while keeping the operator's connectivity check inexpensive.
+        gateway = LLMGateway(scoped)
+        try:
+            response = await gateway.complete(
+                "classification",
+                [LLMMessage(role="user", content="Reply with exactly OK.")],
+                max_output_tokens=8,
+                temperature=0.0,
+            )
+            return bool(response.text.strip())
+        finally:
+            await gateway.aclose()
     if kind is IntegrationKind.PROWLER_AWS:
         account = validate_aws_account_config({"account_id": scoped.scanner.aws_account_id})
         access = scoped.scanner.aws_access_key_id
@@ -1138,6 +1722,34 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await DefectDojoClient(scoped, redis).ping()
     if kind is IntegrationKind.JIRA:
         return await JiraClient(scoped, redis).ping()
+    if kind is IntegrationKind.SERVICENOW:
+        client = ServiceNowClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
+    if kind is IntegrationKind.AZURE_DEVOPS:
+        client = AzureDevOpsClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
+    if kind is IntegrationKind.LINEAR:
+        client = LinearClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
+    if kind is IntegrationKind.PAGERDUTY:
+        # Events API v2 has no side-effect-free health endpoint. Treat a saved routing key
+        # as configured; the durable outbox records the real delivery result on first use.
+        return PagerDutyClient(scoped, redis).configured
+    if kind is IntegrationKind.SPLUNK:
+        client = SplunkHecClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
     if kind is IntegrationKind.SLACK:
         return await SlackClient(scoped, redis).ping()
     if kind is IntegrationKind.DIFY:
@@ -1176,6 +1788,90 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
             return await tenable_client.ping()
         finally:
             await tenable_client.aclose()
+    if kind is IntegrationKind.QUALYS:
+        qualys_client = QualysClient(scoped, redis)
+        try:
+            return await qualys_client.ping()
+        finally:
+            await qualys_client.aclose()
+    if kind is IntegrationKind.RAPID7:
+        rapid7_client = Rapid7Client(scoped, redis)
+        try:
+            return await rapid7_client.ping()
+        finally:
+            await rapid7_client.aclose()
+    if kind is IntegrationKind.WIZ:
+        wiz_client = WizClient(scoped, redis)
+        try:
+            return await wiz_client.ping()
+        finally:
+            await wiz_client.aclose()
+    if kind is IntegrationKind.PRISMA_CLOUD:
+        prisma_client = PrismaCloudClient(scoped, redis)
+        try:
+            return await prisma_client.ping()
+        finally:
+            await prisma_client.aclose()
+    if kind is IntegrationKind.CROWDSTRIKE:
+        crowdstrike_client = CrowdStrikeClient(scoped, redis)
+        try:
+            return await crowdstrike_client.ping()
+        finally:
+            await crowdstrike_client.aclose()
+    if kind is IntegrationKind.AWS_SECURITY_HUB:
+        security_hub_client = AwsSecurityHubClient(scoped)
+        try:
+            return await security_hub_client.ping()
+        finally:
+            await security_hub_client.aclose()
+    if kind is IntegrationKind.AWS_INSPECTOR:
+        inspector_client = AwsInspectorClient(scoped)
+        try:
+            return await inspector_client.ping()
+        finally:
+            await inspector_client.aclose()
+    if kind is IntegrationKind.HACKERONE:
+        hackerone_client = HackerOneClient(scoped, redis)
+        try:
+            return await hackerone_client.ping()
+        finally:
+            await hackerone_client.aclose()
+    if kind is IntegrationKind.BUGCROWD:
+        bugcrowd_client = BugcrowdClient(scoped, redis)
+        try:
+            return await bugcrowd_client.ping()
+        finally:
+            await bugcrowd_client.aclose()
+    if kind is IntegrationKind.CHECKMARX:
+        checkmarx_client = CheckmarxClient(scoped, redis)
+        try:
+            return await checkmarx_client.ping()
+        finally:
+            await checkmarx_client.aclose()
+    if kind is IntegrationKind.FORTIFY:
+        fortify_client = FortifySscClient(scoped, redis)
+        try:
+            return await fortify_client.ping()
+        finally:
+            await fortify_client.aclose()
+    if kind is IntegrationKind.AZURE_DEFENDER:
+        defender_client = AzureDefenderClient(scoped, redis)
+        try:
+            return await defender_client.ping()
+        finally:
+            await defender_client.aclose()
+    if kind is IntegrationKind.GCP_SCC:
+        scc_client = GcpSccClient(scoped, redis)
+        try:
+            return await scc_client.ping()
+        finally:
+            await scc_client.aclose()
+    if kind is IntegrationKind.BURP_DAST:
+        burp_client = BurpDastClient(scoped, redis)
+        try:
+            return await burp_client.ping()
+        finally:
+            await burp_client.aclose()
     # NVD needs no credential and has no cheap authenticated endpoint to probe; reporting
     # it healthy on the strength of its configuration is more honest than an unrelated
     # request that would count against the shared rate limit.
@@ -1205,8 +1901,6 @@ async def tenable_scan_status(
         return await client.latest_scan_status(scan_id)
     finally:
         await client.aclose()
-
-
 async def require_tenant_tenable_integration(
     session: AsyncSession,
     principal: Principal,

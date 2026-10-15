@@ -262,6 +262,11 @@ export type IntegrationKind =
   | "llm"
   | "defectdojo"
   | "jira"
+  | "servicenow"
+  | "azure_devops"
+  | "linear"
+  | "pagerduty"
+  | "splunk"
   | "slack"
   | "email"
   | "dify"
@@ -274,6 +279,20 @@ export type IntegrationKind =
   | "sonarqube"
   | "snyk"
   | "tenable"
+  | "qualys"
+  | "rapid7"
+  | "wiz"
+  | "prisma_cloud"
+  | "crowdstrike"
+  | "aws_security_hub"
+  | "aws_inspector"
+  | "hackerone"
+  | "bugcrowd"
+  | "checkmarx"
+  | "fortify"
+  | "azure_defender"
+  | "gcp_scc"
+  | "burp_dast"
   | "prowler_aws"
   | "prowler_azure"
   | "prowler_gcp";
@@ -417,11 +436,31 @@ export interface OrganizationOut {
   id: Uuid;
   name: string;
   slug: string;
+  parent_organization_id: Uuid | null;
   is_active: boolean;
   max_concurrent_scanner_jobs: number;
   entitlements: OrganizationEntitlements;
   policy: OrgPolicyOut;
   created_at: IsoDateTime;
+}
+
+export interface ClientOrganizationCreateIn {
+  name: string;
+  slug?: string | null;
+}
+
+/** Portfolio-only counters. Client assets and findings remain in their own tenant. */
+export interface ClientOrganizationPortfolioOut {
+  organization: OrganizationOut;
+  asset_count: number;
+  open_finding_count: number;
+  critical_open_finding_count: number;
+  open_risk_score: number;
+}
+
+export interface ClientOrganizationDelegateIn {
+  user_id: Uuid;
+  role?: Exclude<Role, "owner">;
 }
 
 export interface RiskWeights {
@@ -435,6 +474,9 @@ export interface RiskWeights {
 
 export interface OrgPolicyOut {
   risk_weights: RiskWeights;
+  pagerduty_enabled?: boolean;
+  codeowners?: string | null;
+  codeowner_members?: Record<string, Uuid>;
   [key: string]: unknown;
 }
 
@@ -533,6 +575,21 @@ export interface StageOut {
   detail: string | null;
 }
 
+export interface EngagementChecklistItemOut {
+  key: string;
+  title: string;
+  required: boolean;
+  evidence_reference: string | null;
+  completed: boolean;
+  completed_by_id: Uuid | null;
+  completed_at: IsoDateTime | null;
+}
+
+export interface EngagementChecklistUpdateIn {
+  completed: boolean;
+  evidence_reference?: string | null;
+}
+
 /** A dependency that failed without failing the assessment (FR-020, FR-039). */
 export interface DegradationOut {
   stage: string;
@@ -616,6 +673,7 @@ export interface AssessmentOut {
 
 export interface AssessmentDetailOut extends AssessmentOut {
   plan: PlanStepOut[];
+  engagement_checklist: EngagementChecklistItemOut[];
   request_interpretation: Record<string, unknown>;
   stages: StageOut[];
   degradations: DegradationOut[];
@@ -700,7 +758,7 @@ export interface AssetChangeOut {
   asset_id: Uuid;
   assessment_id: Uuid | null;
   asset_name: string;
-  change_type: "discovered" | "changed";
+  change_type: "discovered" | "changed" | "unreachable";
   changes: Record<string, { old: unknown; new: unknown }>;
   created_at: IsoDateTime;
 }
@@ -719,6 +777,7 @@ export interface ApplicationRiskOut {
   critical: number;
   high: number;
   max_risk_score: number;
+  aggregate_risk_score: number;
 }
 
 export interface ApplicationRiskPageOut {
@@ -759,6 +818,22 @@ export interface AssetCriticalityIn {
   rationale?: string | null;
 }
 
+export interface PolicyGateOut {
+  asset_id: Uuid;
+  decision: "pass" | "warn" | "block" | "unknown";
+  allow_deploy: boolean;
+  reason_code: string;
+  counts: Record<Severity, number>;
+  blockers: Array<{
+    id: Uuid;
+    title: string;
+    severity: "critical" | "high";
+    risk_score: number;
+  }>;
+  scan_imported_at: IsoDateTime | null;
+  evaluated_at: IsoDateTime;
+}
+
 export interface AssetFilter {
   criticality?: Criticality;
   environment?: AssetEnvironment;
@@ -766,7 +841,9 @@ export interface AssetFilter {
   internet_exposed?: boolean;
   status?: AssetStatus;
   assessment_id?: Uuid;
+  group?: string;
   q?: string;
+  query?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -836,7 +913,7 @@ export interface TicketLinkOut {
 /** Finding list row. */
 export interface ExternalAlertOut {
   id: Uuid;
-  provider: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable";
+  provider: string;
   category: string;
   title: string;
   severity: Severity;
@@ -851,7 +928,7 @@ export interface ExternalAlertOut {
 
 export interface ExposureOut {
   id: string;
-  source: "defectdojo" | "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable";
+  source: string;
   title: string;
   severity: Severity;
   status: string;
@@ -882,6 +959,7 @@ export interface CanonicalFindingOut {
   assignee_user_id: Uuid | null;
   due_at: IsoDateTime | null;
   remediation_plan: string | null;
+  remediation_group: string | null;
   custom_fields: Record<string, string | number | boolean>;
 }
 
@@ -889,6 +967,7 @@ export interface CanonicalObservationOut {
   id: Uuid;
   provider: string;
   external_id: string;
+  source_record_id: Uuid | null;
   cve_id: string;
   title: string;
   severity: Severity;
@@ -907,14 +986,284 @@ export interface CanonicalHistoryOut {
   occurred_at: IsoDateTime;
 }
 
+export interface FindingCollaborationCommentOut {
+  id: Uuid;
+  canonical_finding_id: Uuid;
+  author_user_id: Uuid | null;
+  kind: "note" | "evidence" | "remediation" | "retest" | "status_update";
+  body: string;
+  evidence_reference: string | null;
+  visible_to_client: boolean;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface FindingCollaborationCommentCreateIn {
+  body: string;
+  kind?: FindingCollaborationCommentOut["kind"];
+  evidence_reference?: string | null;
+  visible_to_client?: boolean;
+}
+
 export interface CanonicalFindingDetailOut extends CanonicalFindingOut {
   observations: CanonicalObservationOut[];
   history: CanonicalHistoryOut[];
   tickets: TicketLinkOut[];
 }
 
+export interface RiskAcceptanceOut {
+  id: Uuid;
+  canonical_finding_id: Uuid;
+  requested_by_id: Uuid;
+  approved_by_id: Uuid | null;
+  rationale: string;
+  status: "pending" | "approved" | "rejected" | "revoked" | "expired";
+  expires_at: IsoDateTime;
+  approved_at: IsoDateTime | null;
+}
+
+export interface RiskAcceptanceIn {
+  rationale: string;
+  expires_at: IsoDateTime;
+}
+
+export interface RetestRequestOut {
+  id: Uuid;
+  canonical_finding_id: Uuid;
+  assessment_id: Uuid | null;
+  status: "requested" | "scheduled" | "running" | "confirmed" | "not_confirmed" | "failed" | "cancelled";
+  request_note: string | null;
+  evidence: Record<string, unknown>;
+  completed_at: IsoDateTime | null;
+}
+
+export interface RetestRequestIn {
+  note?: string | null;
+}
+
+export interface CanonicalRemediationOperationOut {
+  finding: CanonicalFindingOut;
+  tickets: TicketLinkOut[];
+  latest_risk_acceptance: RiskAcceptanceOut | null;
+  latest_retest: RetestRequestOut | null;
+  next_action: string;
+  priority_reasons: string[];
+  source_observations: number;
+  sla_escalation_level: number;
+}
+
+export interface RiskTrendPointOut {
+  assessment_id: Uuid;
+  assessment_reference: number | null;
+  measured_at: IsoDateTime;
+  exposure_score: number;
+  findings_total: number;
+  assets_total: number;
+  new_findings: number;
+  resolved_findings: number;
+}
+
+export interface RiskTrendOut {
+  points: RiskTrendPointOut[];
+  source: "completed_assessment_reports";
+}
+
+export interface DashboardLayoutOut {
+  id: Uuid;
+  name: string;
+  audience: "executive" | "technical" | "team";
+  widgets: Array<{ key: string }>;
+  is_default: boolean;
+}
+
+export interface DashboardLayoutIn {
+  name: string;
+  audience?: DashboardLayoutOut["audience"];
+  widgets: string[];
+  is_default?: boolean;
+}
+
+export interface ReportShareLinkOut {
+  id: Uuid;
+  report_id: Uuid;
+  token_prefix: string;
+  expires_at: IsoDateTime;
+  revoked_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface ReportShareCreateIn {
+  expires_at: IsoDateTime;
+}
+
+/** The opaque token is returned once when a link is issued and is never stored client-side. */
+export interface ReportShareIssuedOut {
+  id: Uuid;
+  token: string;
+  expires_at: IsoDateTime;
+}
+
+export interface ReportScheduleCreateIn {
+  name: string;
+  assessment_id: Uuid;
+  title?: string | null;
+  format?: "html" | "pdf" | "json";
+  audience?: "executive" | "technical";
+  cron_expression: string;
+  timezone?: string;
+  recipients?: string[];
+  template_id?: Uuid | null;
+}
+
+export interface ReportScheduleOut {
+  id: Uuid;
+  assessment_id: Uuid;
+  name: string;
+  title: string | null;
+  format: "html" | "pdf" | "json";
+  audience: "executive" | "technical";
+  cron_expression: string;
+  timezone: string;
+  recipients: string[];
+  is_enabled: boolean;
+  next_run_at: IsoDateTime;
+  last_run_at: IsoDateTime | null;
+  last_report_id: Uuid | null;
+  created_at: IsoDateTime;
+  template_id: Uuid | null;
+}
+
+export interface ReportTemplateOut {
+  id: Uuid;
+  name: string;
+  version: number;
+  description: string | null;
+  definition: { blocks: Array<Record<string, unknown>>; theme?: Record<string, unknown> };
+  is_active: boolean;
+  created_at: IsoDateTime;
+}
+
+export interface ReportTemplateCreateIn {
+  name: string;
+  description?: string | null;
+  definition: { blocks: Array<Record<string, unknown>>; theme?: Record<string, unknown> };
+}
+
+export interface ScanProfileOut {
+  id: Uuid;
+  name: string;
+  config: Record<string, unknown>;
+  is_active: boolean;
+  created_at: IsoDateTime;
+}
+
+export interface ScanProfileCreateIn {
+  name: string;
+  scope?: Scope;
+  depth?: AssessmentDepth;
+  engagement_type?: EngagementType;
+  execution_mode?: ExecutionMode;
+  objective?: string | null;
+  notify?: string[];
+}
+
+export interface RecurringScanOut {
+  id: Uuid;
+  name: string;
+  profile_id: Uuid;
+  targets: string[];
+  cron_expression: string;
+  timezone: string;
+  authorization_expires_at: IsoDateTime;
+  enabled: boolean;
+  next_run_at: IsoDateTime;
+  last_run_at: IsoDateTime | null;
+  last_assessment_id: Uuid | null;
+  last_error_code: string | null;
+  created_at: IsoDateTime;
+}
+
+export interface RecurringScanCreateIn {
+  name: string;
+  profile_id: Uuid;
+  targets: string[];
+  cron_expression: string;
+  timezone?: string;
+  authorization: AuthorizationIn;
+  authorization_expires_at: IsoDateTime;
+}
+
+export interface WorkerMetricsOut {
+  runs: Record<string, number>;
+  pending_dispatches: number;
+  scanner_jobs: Record<string, number>;
+  notification_deliveries: Record<string, number>;
+  notification_retries_due: number;
+}
+
+export interface OidcConnectionUpsertIn {
+  issuer_url: string;
+  client_id: string;
+  client_secret: string;
+  redirect_uri: string;
+  allowed_email_domains?: string[];
+  is_enabled?: boolean;
+}
+
+export interface OidcConnectionOut {
+  id: Uuid;
+  issuer_url: string;
+  client_id: string;
+  redirect_uri: string;
+  allowed_email_domains: string[];
+  is_enabled: boolean;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface SamlConnectionUpsertIn {
+  sp_entity_id: string;
+  idp_entity_id: string;
+  idp_sso_url: string;
+  idp_certificate_pem: string;
+  acs_url: string;
+  allowed_email_domains?: string[];
+  is_enabled?: boolean;
+}
+
+export interface SamlConnectionOut {
+  id: Uuid;
+  sp_entity_id: string;
+  idp_entity_id: string;
+  idp_sso_url: string;
+  acs_url: string;
+  allowed_email_domains: string[];
+  is_enabled: boolean;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface ScimProvisioningTokenCreateIn {
+  name: string;
+  expires_at?: IsoDateTime | null;
+}
+
+export interface ScimProvisioningTokenOut {
+  id: Uuid;
+  name: string;
+  key_prefix: string;
+  expires_at: IsoDateTime | null;
+  revoked_at: IsoDateTime | null;
+  last_used_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface ScimProvisioningTokenIssuedOut extends ScimProvisioningTokenOut {
+  secret: string;
+}
+
 export interface CanonicalStatusDecisionIn {
-  status: "open" | "accepted_risk" | "false_positive";
+  status: "open" | "false_positive";
   reason: string;
   expected_version: number;
 }
@@ -924,7 +1273,20 @@ export interface CanonicalWorkIn {
   assignee_user_id?: Uuid | null;
   due_at?: IsoDateTime | null;
   remediation_plan?: string | null;
+  remediation_group?: string | null;
   custom_fields?: Record<string, string | number | boolean>;
+}
+
+export interface BulkCanonicalWorkIn {
+  items: Array<CanonicalWorkIn & { finding_id: Uuid }>;
+}
+
+export interface RemediationGroupOut {
+  name: string;
+  active_findings: number;
+  overdue_findings: number;
+  highest_risk_score: number;
+  last_seen_at: IsoDateTime;
 }
 
 export interface ExposureFilter {
@@ -1056,6 +1418,7 @@ export interface RemediateIn {
 }
 
 export interface JiraTicketIn {
+  provider?: "jira" | "github" | "gitlab" | "servicenow" | "azure_devops" | "linear";
   project_key?: string | null;
   issue_type?: string | null;
   assignee?: string | null;
@@ -1153,6 +1516,7 @@ export interface ReportGenerateIn {
   audience?: "executive" | "technical";
   title?: string | null;
   force?: boolean;
+  template_id?: Uuid | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1547,12 @@ export interface IntegrationOut {
   last_error: string | null;
   last_error_at: IsoDateTime | null;
   failure_count: number;
+  sync_interval_minutes: number | null;
+  next_sync_at: IsoDateTime | null;
+  last_sync_at: IsoDateTime | null;
+  last_sync_status: "succeeded" | "failed" | null;
+  last_sync_error: string | null;
+  sync_failure_count: number;
   created_at: IsoDateTime;
 }
 
@@ -1191,6 +1561,8 @@ export interface IntegrationUpsertIn {
   name?: string | null;
   base_url?: string | null;
   is_enabled?: boolean;
+  /** Null disables continuous finding ingestion. */
+  sync_interval_minutes?: number | null;
   config?: Record<string, unknown>;
   /** Write-only; encrypted on receipt, never returned. */
   credentials?: Record<string, string>;
@@ -1208,6 +1580,8 @@ export interface IntegrationTestOut {
 export interface IntegrationSyncOut {
   kind: IntegrationKind;
   alerts_staged: number;
+  absence_candidates: number;
+  missing_source_records: number;
 }
 
 export interface TenableScanStatusOut {
@@ -1227,6 +1601,10 @@ export interface IntegrationHealthOut {
   is_enabled: boolean;
   last_verified_at: IsoDateTime | null;
   failure_count: number;
+  sync_interval_minutes: number | null;
+  last_sync_at: IsoDateTime | null;
+  last_sync_status: "succeeded" | "failed" | null;
+  sync_failure_count: number;
   circuit_open: boolean;
 }
 
@@ -1255,7 +1633,7 @@ export interface AuditEventOut {
 
 export interface AuditFilter {
   actor_id?: Uuid;
-  actor_type?: "user" | "agent" | "worker" | "system";
+  actor_type?: "user" | "agent" | "worker" | "system" | "api_key";
   action?: string;
   resource_type?: string;
   resource_id?: string;
@@ -1281,6 +1659,18 @@ export interface ActivityOut {
   summary: string | null;
 }
 
+export interface DashboardFindingOut {
+  id: Uuid;
+  source_kind: "canonical" | "legacy";
+  title: string;
+  severity: Severity;
+  priority: Priority | null;
+  risk_score: number | null;
+  risk_factors: Record<string, unknown>;
+  in_kev: boolean | null;
+  first_seen_at: IsoDateTime;
+}
+
 export interface DashboardOut {
   assessments_total: number;
   assessments_active: number;
@@ -1298,10 +1688,81 @@ export interface DashboardOut {
   /** `null` when nothing has been remediated. Never coerce to zero. */
   mean_time_to_remediate_days: number | null;
   recent_assessments: AssessmentOut[];
-  top_findings: FindingOut[];
+  top_findings: DashboardFindingOut[];
   activity: ActivityOut[];
   integration_health: IntegrationHealthOut[];
   generated_at: IsoDateTime | null;
+}
+
+export interface TeamDashboardOut {
+  team_name: string;
+  assets_total: number;
+  assets_critical: number;
+  findings_open: number;
+  kev_findings: number;
+  highest_risk_score: number | null;
+  severity_breakdown: Record<string, number>;
+  priority_breakdown: Record<string, number>;
+}
+
+export interface AssetGroupRiskOut {
+  group_name: string;
+  assets_total: number;
+  internet_exposed_assets: number;
+  findings_open: number;
+  critical_or_high_findings: number;
+  highest_risk_score: number | null;
+  aggregate_risk_score: number;
+}
+
+// ---------------------------------------------------------------------------
+// Compliance (app/schemas/compliance.py).
+// ---------------------------------------------------------------------------
+
+export type ComplianceFramework =
+  | "pci_dss"
+  | "iso_27001"
+  | "soc_2"
+  | "hipaa"
+  | "nist_csf"
+  | "cis_controls";
+
+export type ComplianceControlStatus =
+  | "not_assessed"
+  | "satisfied"
+  | "partially_satisfied"
+  | "at_risk"
+  | "not_applicable";
+
+export interface ComplianceControlOut {
+  id: Uuid;
+  framework: ComplianceFramework;
+  control_id: string;
+  title: string;
+  family: string | null;
+  description: string | null;
+  owner_user_id: Uuid | null;
+  assessment_status: ComplianceControlStatus;
+  evidence: Record<string, unknown>;
+  mapped_finding_count: number;
+  active_finding_count: number;
+  highest_risk_score: number | null;
+  effective_status: ComplianceControlStatus;
+}
+
+export interface ComplianceFrameworkSummaryOut {
+  framework: ComplianceFramework;
+  control_count: number;
+  mapped_control_count: number;
+  at_risk_control_count: number;
+  partially_satisfied_control_count: number;
+  satisfied_control_count: number;
+  active_finding_count: number;
+  coverage_percent: number;
+}
+
+export interface ComplianceOverviewOut {
+  frameworks: ComplianceFrameworkSummaryOut[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,6 +1794,26 @@ export interface AgentMessageOut {
   created_at: IsoDateTime;
 }
 
+export interface AgentMemoryOut {
+  id: Uuid;
+  key: string;
+  category: "operational" | "architecture" | "remediation" | "scope" | "preference";
+  content: string;
+  source: "manual" | "approved_agent";
+  created_by_id: Uuid | null;
+  expires_at: IsoDateTime | null;
+  is_active: boolean;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface AgentMemoryUpsertIn {
+  key: string;
+  category?: AgentMemoryOut["category"];
+  content: string;
+  expires_at?: IsoDateTime | null;
+}
+
 export type AgentActionName =
   | "sync_github_alerts"
   | "sync_gitlab_alerts"
@@ -1340,9 +1821,29 @@ export type AgentActionName =
   | "sync_sonarqube_alerts"
   | "sync_snyk_issues"
   | "sync_tenable_vulnerabilities"
+  | "sync_qualys_host_detections"
+  | "sync_rapid7_vulnerabilities"
+  | "sync_wiz_issues"
+  | "sync_prisma_cloud_alerts"
+  | "sync_crowdstrike_vulnerabilities"
+  | "sync_aws_security_hub_findings"
+  | "sync_aws_inspector_findings"
+  | "sync_hackerone_reports"
+  | "sync_bugcrowd_submissions"
+  | "sync_checkmarx_results"
+  | "sync_fortify_issues"
+  | "sync_azure_defender_alerts"
+  | "sync_gcp_scc_findings"
+  | "sync_burp_dast_findings"
   | "update_github_alert"
   | "create_jira_ticket"
+  | "create_ticket"
+  | "refresh_ticket_status"
   | "update_canonical_work"
+  | "bulk_update_canonical_work"
+  | "request_retest"
+  | "request_remediation_group_retests"
+  | "request_risk_acceptance"
   | "start_assessment";
 
 export interface AssessmentWorkOut {
@@ -1375,6 +1876,7 @@ export interface AgentActionOut {
   resolved_at: IsoDateTime | null;
   executed_at: IsoDateTime | null;
   result_summary: string | null;
+  execution_evidence: Record<string, unknown>;
   created_at: IsoDateTime;
 }
 
@@ -1404,6 +1906,22 @@ export interface AgentStepOut {
   duration_ms: number | null;
 }
 
+export interface AgentSpecialistTaskOut {
+  id: Uuid;
+  plan_index: number;
+  specialist: "network" | "web" | "code" | "secrets" | "supply_chain" | "container" | "cloud";
+  scanner: string;
+  target_count: number;
+  status: "pending" | "running" | "completed" | "degraded" | "failed";
+  attempts: number;
+  max_attempts: number;
+  scanner_job_id: Uuid | null;
+  evidence: Record<string, unknown>;
+  failure_code: string | null;
+  started_at: IsoDateTime | null;
+  completed_at: IsoDateTime | null;
+}
+
 export interface AgentRunOut {
   id: Uuid;
   session_id: Uuid | null;
@@ -1424,6 +1942,7 @@ export interface AgentRunOut {
   started_at: IsoDateTime | null;
   completed_at: IsoDateTime | null;
   steps: AgentStepOut[];
+  specialist_tasks: AgentSpecialistTaskOut[];
 }
 
 export interface AgentSessionOut {
@@ -1431,9 +1950,14 @@ export interface AgentSessionOut {
   title: string;
   is_archived: boolean;
   message_count: number;
+  autonomy_mode: "supervised" | "monitored";
   agent_version_id: Uuid | null;
   last_activity_at: IsoDateTime | null;
   created_at: IsoDateTime;
+}
+
+export interface AgentSessionAutonomyIn {
+  autonomy_mode: AgentSessionOut["autonomy_mode"];
 }
 
 export interface AgentSessionDetailOut extends AgentSessionOut {
@@ -1549,3 +2073,425 @@ export type TypedAgentEvent =
   | (AgentEvent<AgentMessageOut> & { type: "agent_message" })
   | (AgentEvent<ProgressData> & { type: "agent_progress" })
   | (AgentEvent<Record<string, never>> & { type: "pong" });
+
+// ---------------------------------------------------------------------------
+// Attack Surface Management surfaces (app/schemas/asm.py).
+// ---------------------------------------------------------------------------
+
+export interface AsmSurfaceOut {
+  id: Uuid;
+  organization_id: Uuid;
+  name: string;
+  seeds: string[];
+  cron_expression: string;
+  timezone: string;
+  authorization_expires_at: IsoDateTime;
+  enabled: boolean;
+  next_run_at: IsoDateTime;
+  last_run_at: IsoDateTime | null;
+  last_asset_count: number;
+  last_new_count: number;
+  last_error_code: string | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface AsmSurfaceCreateIn {
+  name: string;
+  seeds: string[];
+  cron_expression: string;
+  timezone?: string;
+  authorization_text: string;
+  authorization_confirmed: boolean;
+  authorization_expires_at: IsoDateTime;
+}
+
+export interface AsmSurfaceUpdateIn {
+  name?: string;
+  seeds?: string[];
+  cron_expression?: string;
+  enabled?: boolean;
+  authorization_text?: string;
+  authorization_expires_at?: IsoDateTime;
+}
+
+// ---------------------------------------------------------------------------
+// Automation rules (app/schemas/automation.py).
+// ---------------------------------------------------------------------------
+
+export type AutomationTrigger =
+  | "finding.created"
+  | "finding.updated"
+  | "ticket.closed"
+  | "retest.confirmed"
+  | "retest.cleared"
+  | "sla.breached";
+
+export interface AutomationCondition {
+  field: string;
+  op: string;
+  value: unknown;
+}
+
+export interface AutomationAction {
+  type: string;
+  provider?: string;
+  channels?: string[];
+  assignee_user_id?: Uuid;
+  remediation_group?: string;
+  authorization_reference?: string;
+}
+
+export interface AutomationRuleOut {
+  id: Uuid;
+  name: string;
+  trigger: AutomationTrigger;
+  conditions: Record<string, unknown>;
+  actions: AutomationAction[];
+  cron_expression: string | null;
+  timezone: string;
+  next_run_at: IsoDateTime | null;
+  is_enabled: boolean;
+  dry_run: boolean;
+  created_at: IsoDateTime;
+}
+
+export interface AutomationRuleCreateIn {
+  name: string;
+  trigger: AutomationTrigger;
+  conditions?: Record<string, unknown>;
+  actions: AutomationAction[];
+  cron_expression?: string | null;
+  timezone?: string;
+  is_enabled?: boolean;
+  dry_run?: boolean;
+}
+
+export interface AutomationExecutionOut {
+  id: Uuid;
+  rule_id: Uuid;
+  canonical_finding_id: Uuid | null;
+  event_key: string;
+  status: "pending" | "skipped" | "dry_run" | "executed" | "failed";
+  dry_run: boolean;
+  attempts: number;
+  next_retry_at: IsoDateTime | null;
+  result: Record<string, unknown>;
+  created_at: IsoDateTime;
+}
+
+export type WorkflowNodeType = "trigger" | "condition" | "enrichment" | "action" | "branch" | "delay" | "approval";
+
+export interface WorkflowNodeIn {
+  id: string;
+  type: WorkflowNodeType;
+  config: Record<string, unknown>;
+}
+
+export interface WorkflowEdgeIn {
+  source: string;
+  target: string;
+  branch?: "true" | "false" | "always";
+}
+
+export interface WorkflowDefinitionIn {
+  name: string;
+  description?: string | null;
+  nodes: WorkflowNodeIn[];
+  edges: WorkflowEdgeIn[];
+  is_enabled?: boolean;
+  dry_run?: boolean;
+}
+
+export interface WorkflowDefinitionOut extends WorkflowDefinitionIn {
+  id: Uuid;
+  organization_id: Uuid;
+  version: number;
+  next_run_at: IsoDateTime | null;
+  created_by_id: Uuid | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface WorkflowRunOut {
+  id: Uuid;
+  workflow_id: Uuid;
+  organization_id: Uuid;
+  definition_version: number;
+  event_key: string;
+  trigger: string;
+  context: Record<string, unknown>;
+  status: "pending" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "dry_run";
+  dry_run: boolean;
+  attempts: number;
+  next_resume_at: IsoDateTime | null;
+  started_at: IsoDateTime | null;
+  completed_at: IsoDateTime | null;
+  error_code: string | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface ScanAuthProfileIn {
+  name: string;
+  auth_type: "basic" | "bearer" | "header" | "cookie" | "openapi_token" | "aws_static" | "aws_role" | "azure_service_principal" | "gcp_service_account";
+  target_patterns: string[];
+  permitted_scanners: string[];
+  metadata?: Record<string, unknown>;
+  secrets: Record<string, string>;
+  is_active?: boolean;
+}
+
+export interface ScanAuthProfileOut extends Omit<ScanAuthProfileIn, "secrets"> {
+  id: Uuid;
+  fingerprint: string;
+  hint: string | null;
+  last_validated_at: IsoDateTime | null;
+  rotated_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+// ---------------------------------------------------------------------------
+// Attack Simulation campaigns (app/schemas/attack_simulation.py).
+// ---------------------------------------------------------------------------
+
+export type AttackSimulationStatus = "draft" | "active" | "paused" | "completed" | "failed";
+
+export interface AttackSimulationCampaignOut {
+  id: Uuid;
+  name: string;
+  authorization_reference: string;
+  authorization_expires_at: IsoDateTime;
+  scenarios: string[];
+  targets: string[];
+  cron_expression: string | null;
+  timezone: string;
+  next_run_at: IsoDateTime | null;
+  last_run_at: IsoDateTime | null;
+  last_assessment_id: Uuid | null;
+  status: AttackSimulationStatus;
+  last_error_code: string | null;
+  created_at: IsoDateTime;
+}
+
+export interface AttackSimulationTechniqueCatalogOut {
+  key: string;
+  scenario: string;
+  title: string;
+  mitre_technique: string;
+  target_types: string[];
+  adapter: string;
+  risk_class: "low" | "medium" | "high";
+  approval_required: boolean;
+  timeout_seconds: number;
+  expected_evidence: string[];
+  cleanup: string;
+  catalog_version: string;
+}
+
+export interface AttackSimulationTechniqueRunOut {
+  id: Uuid;
+  technique_key: string;
+  scenario: string;
+  mitre_technique: string;
+  adapter: string;
+  target: string;
+  risk_class: "low" | "medium" | "high";
+  status: "queued" | "awaiting_approval" | "running" | "completed" | "failed" | "cancelled";
+  control_result: "detected" | "prevented" | "inconclusive" | "error" | null;
+  approval_id: Uuid | null;
+  scanner_job_id: Uuid | null;
+  expected_evidence: string[];
+  evidence_artifact_ids: string[];
+  evidence_summary: Record<string, unknown>;
+  error_code: string | null;
+  started_at: IsoDateTime | null;
+  completed_at: IsoDateTime | null;
+}
+
+export interface AttackSimulationRunOut {
+  id: Uuid;
+  campaign_id: Uuid;
+  assessment_id: Uuid;
+  baseline_run_id: Uuid | null;
+  status: "pending" | "awaiting_approval" | "running" | "completed" | "failed" | "cancelled";
+  catalog_version: string;
+  scenarios_snapshot: string[];
+  targets_snapshot: string[];
+  summary: Record<string, unknown>;
+  started_at: IsoDateTime | null;
+  completed_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface AttackSimulationRunDetailOut extends AttackSimulationRunOut {
+  techniques: AttackSimulationTechniqueRunOut[];
+}
+
+export interface AttackSimulationCampaignCreateIn {
+  name: string;
+  authorization_text: string;
+  authorization_reference: string;
+  authorization_expires_at: IsoDateTime;
+  scenarios: string[];
+  targets: string[];
+  cron_expression?: string | null;
+  timezone?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Platform API keys (app/schemas/platform.py).
+// ---------------------------------------------------------------------------
+
+export interface PlatformApiKeyOut {
+  id: Uuid;
+  name: string;
+  key_prefix: string;
+  scopes: string[];
+  expires_at: IsoDateTime | null;
+  revoked_at: IsoDateTime | null;
+  last_used_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface PlatformApiKeyCreateIn {
+  name: string;
+  scopes?: string[];
+  expires_at?: IsoDateTime | null;
+}
+
+export interface PlatformApiKeyCreatedOut extends PlatformApiKeyOut {
+  /** Shown once; never stored in plaintext. */
+  secret: string;
+}
+
+// ---------------------------------------------------------------------------
+// Saved views (app/schemas/saved_view.py).
+// ---------------------------------------------------------------------------
+
+export type SavedViewResource = "findings" | "assets";
+
+export interface SavedViewOut {
+  id: Uuid;
+  name: string;
+  resource: SavedViewResource;
+  filters: Record<string, unknown>;
+  created_at: IsoDateTime;
+}
+
+export interface SavedViewCreateIn {
+  name: string;
+  resource: SavedViewResource;
+  filters: Record<string, unknown>;
+}
+
+export interface SavedViewUpdateIn {
+  name?: string;
+  filters?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks (app/schemas/webhook.py).
+// ---------------------------------------------------------------------------
+
+export interface WebhookSubscriptionOut {
+  id: Uuid;
+  name: string;
+  url: string;
+  event_types: string[];
+  is_enabled: boolean;
+  created_at: IsoDateTime;
+}
+
+export interface WebhookSubscriptionCreateIn {
+  name: string;
+  url: string;
+  event_types: string[];
+}
+
+export interface WebhookSubscriptionIssuedOut extends WebhookSubscriptionOut {
+  /** Returned exactly once after creation or signing-secret rotation. */
+  secret: string;
+}
+
+export interface WebhookDeliveryOut {
+  id: Uuid;
+  event: string;
+  status: string;
+  subject: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  attempts: number;
+  sent_at: IsoDateTime | null;
+  next_retry_at: IsoDateTime | null;
+  last_error: string | null;
+  created_at: IsoDateTime;
+}
+
+export interface ExternalDeliveryOut {
+  id: Uuid;
+  event: string;
+  channel: "slack" | "email" | "pagerduty" | "webhook" | "splunk";
+  status: "pending" | "sent" | "failed";
+  recipient: string;
+  subject: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  attempts: number;
+  sent_at: IsoDateTime | null;
+  next_retry_at: IsoDateTime | null;
+  last_error: string | null;
+  created_at: IsoDateTime;
+}
+
+// ---------------------------------------------------------------------------
+// Shared vulnerability intelligence catalog.
+// ---------------------------------------------------------------------------
+
+export interface VulnerabilityIntelligenceOut {
+  cve_id: string;
+  snapshot: {
+    cvss_score?: number;
+    epss_score?: number;
+    in_kev?: boolean;
+    ransomware_use?: boolean;
+    exploit_available?: boolean;
+    exploit_references?: string[];
+    nvd_status?: string;
+    kev_status?: string;
+    epss_status?: string;
+    stale_providers?: string[];
+    [key: string]: unknown;
+  };
+  refreshed_at: IsoDateTime;
+  expires_at: IsoDateTime;
+}
+
+export type ThreatEntityType = "cve" | "product" | "actor" | "domain" | "brand";
+
+export interface ThreatWatchlistOut {
+  id: Uuid;
+  entity_type: ThreatEntityType;
+  entity_key: string;
+  label: string | null;
+  is_active: boolean;
+  last_matched_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface ThreatWatchlistCreateIn {
+  entity_type: ThreatEntityType;
+  entity_key: string;
+  label?: string | null;
+}
+
+export interface ThreatWatchlistMatchOut {
+  id: Uuid;
+  watchlist_id: Uuid;
+  observation_id: Uuid;
+  canonical_finding_id: Uuid | null;
+  asset_id: Uuid | null;
+  match_key: string;
+  matched_at: IsoDateTime;
+}

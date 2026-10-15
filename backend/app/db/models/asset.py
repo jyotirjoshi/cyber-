@@ -214,7 +214,10 @@ class AssetChange(Base, TenantMixin, TimestampMixin):
     changes: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
 
     __table_args__ = (
-        CheckConstraint("change_type IN ('discovered','changed')", name="valid_asset_change_type"),
+        CheckConstraint(
+            "change_type IN ('discovered','changed','unreachable')",
+            name="valid_asset_change_type",
+        ),
         UniqueConstraint(
             "organization_id",
             "assessment_id",

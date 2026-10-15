@@ -12,7 +12,12 @@ from app.core.errors import ConflictError, InvalidConfigurationError
 from app.db.enums import Role
 from app.db.models.asset import Asset
 from app.db.models.audit import AuditEvent
-from app.db.models.canonical import CanonicalFinding, FindingHistory, FindingObservation
+from app.db.models.canonical import (
+    AutomationRule,
+    CanonicalFinding,
+    FindingHistory,
+    FindingObservation,
+)
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.identity import Organization
 from app.services.canonical_identity import identity_for_observation
@@ -70,13 +75,18 @@ class _Session:
             )
         if entity is FindingObservation:
             return _Rows([row for row in self.added if isinstance(row, FindingObservation)])
+        if entity is AutomationRule:
+            return _Rows([])
         return _Rows([len([row for row in self.added if isinstance(row, Asset)])])
 
 
 @pytest.mark.asyncio
-async def test_two_providers_one_repo_cve_create_one_finding_two_observations() -> None:
+async def test_two_providers_one_repo_cve_create_one_finding_two_observations(monkeypatch) -> None:
+    from app.services import canonical_ingest
+
     organization_id = uuid.uuid4()
     session = _Session(organization_id)
+    session.organization.policy = {"sla_targets_days": {"critical": 2}}
     alerts = [
         SimpleNamespace(
             id=uuid.uuid4(),
@@ -106,6 +116,13 @@ async def test_two_providers_one_repo_cve_create_one_finding_two_observations() 
         ),
     ]
 
+    queued: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+
+    async def fake_queue(_session, *, finding, asset, trigger):
+        queued.append((finding.id, asset.id, trigger))
+        return 1
+
+    monkeypatch.setattr(canonical_ingest, "queue_finding_event", fake_queue, raising=False)
     await ingest_external_alerts(session, organization_id, alerts)
 
     assets = [row for row in session.added if isinstance(row, Asset)]
@@ -119,7 +136,10 @@ async def test_two_providers_one_repo_cve_create_one_finding_two_observations() 
     assert findings[0].severity == "critical"
     assert findings[0].asset_id == assets[0].id
     assert findings[0].risk_score > 0
+    assert findings[0].due_at is not None
+    assert findings[0].due_at - findings[0].first_seen_at == __import__("datetime").timedelta(days=2)
     assert findings[0].risk_factors["inputs"]["severity_label"] == "critical"
+    assert queued == [(findings[0].id, assets[0].id, "finding.created")]
     observation_lookup = next(
         statement
         for statement in session.statements

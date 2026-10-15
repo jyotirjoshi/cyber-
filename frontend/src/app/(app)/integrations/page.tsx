@@ -188,6 +188,13 @@ const SCAN_IMPORT_FORMATS = [
   ["prowler_ocsf", "Prowler JSON-OCSF (AWS, Azure, GCP account)"],
   ["hackerone_json", "HackerOne report detail JSON (structured scope required)"],
   ["bugcrowd_json", "Bugcrowd submissions API JSON (include=target)"],
+  ["wiz_json", "Wiz issues JSON"],
+  ["prisma_cloud_json", "Prisma Cloud alerts JSON"],
+  ["sonarqube_json", "SonarQube issues JSON"],
+  ["defectdojo_json", "DefectDojo findings JSON"],
+  ["checkmarx_xml", "Checkmarx XML"],
+  ["fortify_fvdl", "OpenText Fortify FVDL"],
+  ["fortify_fpr", "OpenText Fortify FPR"],
   ["trivy", "Trivy JSON"], ["gitleaks", "Gitleaks JSON"],
   ["cyclonedx", "CycloneDX JSON"], ["spdx", "SPDX JSON"],
   ["generic_csv", "Mapped CSV"], ["generic_json", "Mapped JSON"],
@@ -255,7 +262,7 @@ function ScanImportCard() {
       <CardHeader>
         <div>
           <CardTitle>Import scanner findings or SBOM</CardTitle>
-          <p className="mt-0.5 text-xs text-muted">SARIF, Nuclei, Nessus XML, Burp XML, Qualys VM XML, Rapid7 CSV, AWS Inspector CSV, Azure Defender JSON, Google SCC JSON, Prowler JSON-OCSF, HackerOne JSON, Bugcrowd JSON, Trivy, Gitleaks, CycloneDX, SPDX, or mapped CSV/JSON. Findings join the unified exposure model.</p>
+          <p className="mt-0.5 text-xs text-muted">Import code, cloud, vulnerability-management, DAST, bug-bounty and SBOM exports. Supported formats include SARIF, Nessus, Burp, Qualys, Rapid7, cloud-security feeds, Wiz, Prisma Cloud, SonarQube, DefectDojo, Checkmarx, Fortify, Trivy, Gitleaks, CycloneDX, SPDX and mapped CSV/JSON. Findings join the unified exposure model.</p>
         </div>
       </CardHeader>
       <CardBody>
@@ -309,6 +316,11 @@ function IntegrationCard({
   const [open, setOpen] = React.useState(false);
   const [baseUrl, setBaseUrl] = React.useState(integration.base_url ?? "");
   const [enabled, setEnabled] = React.useState(integration.is_enabled);
+  const [syncInterval, setSyncInterval] = React.useState(
+    integration.sync_interval_minutes === null
+      ? ""
+      : String(integration.sync_interval_minutes),
+  );
   const [configText, setConfigText] = React.useState(() =>
     Object.keys(integration.config).length > 0
       ? JSON.stringify(integration.config, null, 2)
@@ -329,7 +341,7 @@ function IntegrationCard({
       handleIntegrationTestSuccess(r, { refresh: onChanged, toast }),
   });
 
-  const sync = useMutation((kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable") => api.integrations.sync(kind), {
+  const sync = useMutation((kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable" | "qualys" | "rapid7" | "wiz" | "prisma_cloud" | "crowdstrike" | "aws_security_hub" | "aws_inspector" | "hackerone" | "bugcrowd" | "checkmarx" | "fortify" | "azure_defender" | "gcp_scc" | "burp_dast") => api.integrations.sync(kind), {
     onSuccess: (result: IntegrationSyncOut) => {
       handleIntegrationSyncSuccess(result, { toast });
       onChanged();
@@ -365,7 +377,7 @@ function IntegrationCard({
   const idBase = integration.kind;
   const tenableScans = integration.kind === "tenable" ? configuredTenableScanIds(integration.config) : [];
   const selectedScan = tenableScans.includes(scanChoice) ? scanChoice : (tenableScans[0] ?? "");
-  const setupHint = integration.kind === "sonarqube" || integration.kind === "snyk" || integration.kind === "tenable" || integration.kind === "prowler_aws" || integration.kind === "prowler_azure" || integration.kind === "prowler_gcp"
+  const setupHint = integration.kind === "sonarqube" || integration.kind === "snyk" || integration.kind === "tenable" || integration.kind === "qualys" || integration.kind === "rapid7" || integration.kind === "wiz" || integration.kind === "prisma_cloud" || integration.kind === "crowdstrike" || integration.kind === "aws_security_hub" || integration.kind === "aws_inspector" || integration.kind === "hackerone" || integration.kind === "bugcrowd" || integration.kind === "checkmarx" || integration.kind === "fortify" || integration.kind === "azure_defender" || integration.kind === "gcp_scc" || integration.kind === "burp_dast" || integration.kind === "prowler_aws" || integration.kind === "prowler_azure" || integration.kind === "prowler_gcp"
     ? INTEGRATION_SETUP_HINTS[integration.kind] : null;
   const syncKind =
     integration.kind === "github" ||
@@ -373,7 +385,21 @@ function IntegrationCard({
     integration.kind === "wazuh" ||
     integration.kind === "sonarqube" ||
     integration.kind === "snyk" ||
-    integration.kind === "tenable"
+    integration.kind === "tenable" ||
+    integration.kind === "qualys" ||
+    integration.kind === "rapid7" ||
+    integration.kind === "wiz" ||
+    integration.kind === "prisma_cloud" ||
+    integration.kind === "crowdstrike" ||
+    integration.kind === "aws_security_hub"
+    || integration.kind === "aws_inspector"
+    || integration.kind === "hackerone"
+    || integration.kind === "bugcrowd"
+    || integration.kind === "checkmarx"
+    || integration.kind === "fortify"
+    || integration.kind === "azure_defender"
+    || integration.kind === "gcp_scc"
+    || integration.kind === "burp_dast"
       ? integration.kind
       : null;
 
@@ -401,6 +427,15 @@ function IntegrationCard({
     }
     setFormError(null);
 
+    const parsedSyncInterval = syncInterval ? Number(syncInterval) : null;
+    if (
+      parsedSyncInterval !== null &&
+      (!Number.isInteger(parsedSyncInterval) || parsedSyncInterval < 5 || parsedSyncInterval > 10080)
+    ) {
+      setFormError("Continuous sync interval must be a whole number from 5 to 10,080 minutes.");
+      return;
+    }
+
     const creds: Record<string, string> = {};
     for (const row of credRows) {
       const key = row.key.trim();
@@ -411,6 +446,7 @@ function IntegrationCard({
       kind: integration.kind,
       base_url: baseUrl.trim() || null,
       is_enabled: enabled,
+      sync_interval_minutes: syncKind ? parsedSyncInterval : null,
       config: parsedConfig,
       credentials: creds,
     });
@@ -443,6 +479,35 @@ function IntegrationCard({
             <dt className="text-xs text-faint">Last verified</dt>
             <dd className="text-xs text-muted">{formatRelative(integration.last_verified_at)}</dd>
           </div>
+          {syncKind && (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-xs text-faint">Continuous sync</dt>
+                <dd className="text-xs text-muted">
+                  {integration.sync_interval_minutes
+                    ? `Every ${integration.sync_interval_minutes} min`
+                    : "Off"}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-xs text-faint">Last sync</dt>
+                <dd className="flex items-center gap-2 text-xs text-muted">
+                  {integration.last_sync_status && (
+                    <Badge tone={integration.last_sync_status === "succeeded" ? "ok" : "danger"}>
+                      {humanize(integration.last_sync_status)}
+                    </Badge>
+                  )}
+                  {formatRelative(integration.last_sync_at)}
+                </dd>
+              </div>
+              {integration.sync_interval_minutes && (
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-xs text-faint">Next sync</dt>
+                  <dd className="text-xs text-muted">{formatRelative(integration.next_sync_at)}</dd>
+                </div>
+              )}
+            </>
+          )}
           {integration.failure_count > 0 && (
             <div className="flex items-center justify-between gap-3">
               <dt className="text-xs text-faint">Recent failures</dt>
@@ -454,6 +519,11 @@ function IntegrationCard({
         {integration.last_error && (
           <p className="rounded-lg border border-danger/30 bg-danger/5 px-2.5 py-1.5 text-xs text-danger">
             {integration.last_error}
+          </p>
+        )}
+        {integration.last_sync_error && (
+          <p className="rounded-lg border border-danger/30 bg-danger/5 px-2.5 py-1.5 text-xs text-danger">
+            Continuous sync: {integration.last_sync_error}
           </p>
         )}
 
@@ -560,7 +630,7 @@ function IntegrationCard({
           <Field
             label="Base URL"
             htmlFor={`${idBase}-base_url`}
-            hint={integration.kind === "sonarqube" ? "SonarQube Server root URL, without /api. Leave blank to clear." : integration.kind === "snyk" ? "Optional regional Snyk API URL. Leave blank for api.snyk.io." : integration.kind === "tenable" ? "Tenable VM cloud URL is fixed at cloud.tenable.com." : "Leave blank to clear."}
+            hint={integration.kind === "sonarqube" ? "SonarQube Server root URL, without /api. Leave blank to clear." : integration.kind === "snyk" ? "Optional regional Snyk API URL. Leave blank for api.snyk.io." : integration.kind === "tenable" ? "Tenable VM cloud URL is fixed at cloud.tenable.com." : integration.kind === "qualys" ? "A supported Qualys regional API URL. Leave blank for qualysapi.qualys.com." : integration.kind === "rapid7" ? "Your HTTPS InsightVM Security Console origin, without /api/3." : integration.kind === "wiz" ? "Wiz derives its authenticated GraphQL endpoint from region; no base URL is needed." : integration.kind === "prisma_cloud" ? "Your regional Prisma Cloud API origin, such as https://api.eu.prismacloud.io." : integration.kind === "crowdstrike" ? "CrowdStrike Falcon cloud origin, such as https://api.crowdstrike.com." : "Leave blank to clear."}
             error={fieldError(upsert.error, "base_url")}
           >
             <Input
@@ -582,10 +652,29 @@ function IntegrationCard({
             Enabled
           </label>
 
+          {syncKind && (
+            <Field
+              label="Continuous sync interval"
+              htmlFor={`${idBase}-sync-interval`}
+              hint="Minutes between automatic provider pulls. Leave blank to sync manually."
+            >
+              <Input
+                id={`${idBase}-sync-interval`}
+                type="number"
+                min={5}
+                max={10080}
+                step={1}
+                placeholder="60"
+                value={syncInterval}
+                onChange={(event) => setSyncInterval(event.target.value)}
+              />
+            </Field>
+          )}
+
           <Field
             label="Config (JSON)"
             htmlFor={`${idBase}-config`}
-            hint={integration.kind === "sonarqube" ? "Enter the SonarQube project keys to sync; no secrets here." : integration.kind === "snyk" ? "Enter your Snyk organization UUID; no secrets here." : integration.kind === "tenable" ? "Enter up to 20 Tenable scan UUIDs; access and secret keys go in credentials." : integration.kind === "prowler_aws" ? "Enter the 12-digit AWS account ID; add read-only access_key_id and secret_access_key below." : integration.kind === "prowler_azure" ? "Enter the Azure subscription UUID; add the service-principal client_id, tenant_id, and client_secret below." : integration.kind === "prowler_gcp" ? "Enter the GCP project ID; add its service_account_json below as an encrypted credential." : "A JSON object of non-secret settings."}
+            hint={integration.kind === "sonarqube" ? "Enter the SonarQube project keys to sync; no secrets here." : integration.kind === "snyk" ? "Enter your Snyk organization UUID; no secrets here." : integration.kind === "tenable" ? "Enter up to 20 Tenable scan UUIDs; access and secret keys go in credentials." : integration.kind === "qualys" ? "Enter one explicit asset_ip. The connector only reads host detections for this IP." : integration.kind === "rapid7" ? "Enter 1-20 InsightVM numeric asset IDs. The connector only reads these assets' service vulnerabilities." : integration.kind === "wiz" ? "Enter the Wiz data-center region plus 1-100 explicit project IDs. The connector only reads Issues attached to these projects." : integration.kind === "prisma_cloud" ? "Enter 1-100 explicit cloud account IDs. Access-key credentials are stored encrypted and the connector is read-only." : integration.kind === "crowdstrike" ? "No non-secret scope is required; use a Falcon client with Vulnerabilities: READ." : integration.kind === "aws_security_hub" ? "Enter one AWS region and up to 20 account IDs; use credentials limited to securityhub:GetFindings." : integration.kind === "azure_defender" ? "Enter the subscription UUID and a service principal with read access to Microsoft.Security alerts." : integration.kind === "gcp_scc" ? "Enter a GCP project and SCC location; add a read-only service-account JSON key below." : integration.kind === "burp_dast" ? "Enter 1-100 numeric Burp DAST site IDs; add an API-user key below. Only the latest successful scan for each site is ingested." : integration.kind === "prowler_aws" ? "Enter the 12-digit AWS account ID; add read-only access_key_id and secret_access_key below." : integration.kind === "prowler_azure" ? "Enter the Azure subscription UUID; add the service-principal client_id, tenant_id, and client_secret below." : integration.kind === "prowler_gcp" ? "Enter the GCP project ID; add its service_account_json below as an encrypted credential." : "A JSON object of non-secret settings."}
             error={fieldError(upsert.error, "config")}
           >
             <Textarea

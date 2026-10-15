@@ -20,7 +20,7 @@ from app.services.context import Principal
 
 MAX_CMDB_BYTES = 1_000_000
 MAX_CMDB_ROWS = 1_000
-_COLUMNS = frozenset({"asset_type", "asset_value", "tier", "owner_team", "environment"})
+_COLUMNS = frozenset({"asset_type", "asset_value", "tier", "owner_team", "environment", "groups"})
 _TIERS = {
     "tier0": "critical",
     "tier1": "high",
@@ -41,6 +41,7 @@ class CmdbRow:
     criticality: str | None
     owner_team: str | None
     environment: str | None
+    groups: list[str] | None
 
 
 def parse_cmdb_csv(data: bytes) -> list[CmdbRow]:
@@ -57,7 +58,7 @@ def parse_cmdb_csv(data: bytes) -> list[CmdbRow]:
             raise ValueError(f"unknown column: {', '.join(sorted(unknown))}")
         if not {"asset_type", "asset_value"}.issubset(columns):
             raise ValueError("asset_type and asset_value columns are required")
-        if not ({"tier", "owner_team", "environment"} & set(columns)):
+        if not ({"tier", "owner_team", "environment", "groups"} & set(columns)):
             raise ValueError("at least one business context column is required")
         rows: list[CmdbRow] = []
         seen: set[tuple[str, str]] = set()
@@ -100,9 +101,15 @@ def parse_cmdb_csv(data: bytes) -> list[CmdbRow]:
             environment = (raw.get("environment") or "").strip().lower()
             if environment and environment not in _ENVIRONMENTS:
                 raise ValueError("invalid CMDB environment")
-            if not (tier or team or environment):
+            raw_groups = (raw.get("groups") or "").strip()
+            groups = [value.strip() for value in raw_groups.split(";") if value.strip()]
+            if len(groups) > 30 or any(len(value) > 60 for value in groups):
+                raise ValueError("CMDB groups must contain at most 30 names of 1 to 60 characters")
+            if len({value.casefold() for value in groups}) != len(groups):
+                raise ValueError("CMDB groups must be unique")
+            if not (tier or team or environment or groups):
                 raise ValueError("CMDB row has no business context")
-            rows.append(CmdbRow(kind, value, _TIERS.get(tier), team or None, environment or None))
+            rows.append(CmdbRow(kind, value, _TIERS.get(tier), team or None, environment or None, groups or None))
         if not rows:
             raise ValueError("CMDB CSV has no rows")
         return rows
@@ -164,6 +171,8 @@ async def apply_cmdb_csv(
         if row.environment is not None and asset.environment != row.environment:
             changes["environment"] = row.environment
             scoring_context_changed = True
+        if row.groups is not None and asset.groups != row.groups:
+            changes["groups"] = row.groups
         if not changes:
             continue
         updated += 1

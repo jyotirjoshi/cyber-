@@ -25,6 +25,7 @@ from app.db.base import utcnow
 from app.db.enums import ArtifactKind, JobStatus, Permission, ScannerName
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.scanner import ScannerJob
+from app.db.queries import pg_any
 from app.integrations.storage import ObjectStorage
 from app.services import audit as audit_service
 from app.services import external_alert
@@ -35,7 +36,6 @@ from app.services.external_alert import NormalizedExternalAlert
 
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_FINDINGS = 10_000
-_STAGE_BATCH = 250
 _PROVIDER = re.compile(r"[a-z][a-z0-9_-]{1,39}\Z")
 _CVE_IN_TEXT = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 _FIELD_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*){0,2}\Z")
@@ -90,6 +90,28 @@ def _severity(value: object, *, score: object = None) -> str:
     }.get(str(value or "").lower(), "info")
 
 
+def _sarif_index(items: list[Any], index: object, label: str) -> dict[str, Any]:
+    if type(index) is not int or index < 0 or index >= len(items):
+        raise ValueError(f"{label} index is outside the declared array")
+    return _object(items[index], label)
+
+
+def _sarif_artifact_uri(run: dict[str, Any], location: dict[str, Any]) -> str:
+    """Resolve inline/indexed artifact locations without accessing the filesystem."""
+    uri = str(location.get("uri") or "")
+    index = location.get("index", -1)
+    if index != -1:
+        artifact = _sarif_index(
+            _array(run.get("artifacts", []), "SARIF artifacts"), index, "SARIF artifact"
+        )
+        declared = _object(artifact.get("location", {}), "SARIF artifact location")
+        declared_uri = str(declared.get("uri") or "")
+        if uri and declared_uri and uri != declared_uri:
+            raise ValueError("SARIF artifact URI and index disagree")
+        uri = uri or declared_uri
+    return uri
+
+
 def _sarif(
     document: dict[str, Any],
     *,
@@ -104,27 +126,56 @@ def _sarif(
     for run in runs:
         run = _object(run, "SARIF run")
         driver = _object(_object(run.get("tool"), "SARIF tool").get("driver"), "SARIF driver")
+        rule_list = _array(driver.get("rules", []), "SARIF rules")
         rules = {
             str(rule.get("id")): rule
-            for rule in _array(driver.get("rules", []), "SARIF rules")
+            for rule in rule_list
             if isinstance(rule, dict) and rule.get("id")
         }
         for finding in _array(run.get("results"), "SARIF results"):
             finding = _object(finding, "SARIF result")
             rule_id = str(finding.get("ruleId") or "").strip()
+            rule_index = finding.get("ruleIndex", -1)
+            if rule_index != -1:
+                indexed_rule = _sarif_index(rule_list, rule_index, "SARIF rule")
+                indexed_id = str(indexed_rule.get("id") or "").strip()
+                if rule_id and indexed_id != rule_id:
+                    raise ValueError("SARIF rule ID and index disagree")
+                rule_id = rule_id or indexed_id
+            rule = _object(rules.get(rule_id, {}), "SARIF rule")
             message = _object(finding.get("message"), "SARIF message")
-            title = str(message.get("text") or message.get("markdown") or rule_id).strip()
+            # Some producers store message templates on the rule rather than
+            # repeating the same text in every result.
+            message_text = message.get("text") or message.get("markdown")
+            if not message_text and message.get("id"):
+                messages = _object(rule.get("messageStrings", {}), "SARIF rule messages")
+                template = _object(
+                    messages.get(str(message["id"]), {}), "SARIF message template"
+                )
+                message_text = template.get("text") or template.get("markdown")
+                if message_text:
+                    arguments = _array(message.get("arguments", []), "SARIF message arguments")
+                    # Replace only SARIF numeric placeholders, never evaluate
+                    # formatting expressions supplied by an imported document.
+                    message_text = re.sub(
+                        r"\{(\d+)\}",
+                        lambda match: str(arguments[int(match[1])])[:1000]
+                        if len(match[1]) < 6 and int(match[1]) < len(arguments)
+                        else match[0],
+                        str(message_text)[:1000],
+                    )
+            title = str(message_text or rule_id).strip()
             if not title:
                 raise ValueError("SARIF result has no title")
             locations = _array(finding.get("locations", []), "SARIF locations")
             physical = {}
             if locations:
                 physical = _object(
-                    _object(locations[0], "SARIF location").get("physicalLocation"),
+                    _object(locations[0], "SARIF location").get("physicalLocation", {}),
                     "SARIF physical location",
                 )
-            file_uri = str(
-                _object(physical.get("artifactLocation", {}), "SARIF artifact").get("uri") or ""
+            file_uri = _sarif_artifact_uri(
+                run, _object(physical.get("artifactLocation", {}), "SARIF artifact")
             )
             region = _object(physical.get("region", {}), "SARIF region")
             line = region.get("startLine")
@@ -135,8 +186,10 @@ def _sarif(
             )
             if not stable_fingerprint and not (rule_id and file_uri):
                 raise ValueError("SARIF result has no stable source identity")
-            rule = _object(rules.get(rule_id, {}), "SARIF rule")
             rule_properties = _object(rule.get("properties", {}), "SARIF rule properties")
+            configuration = _object(
+                rule.get("defaultConfiguration", {}), "SARIF rule configuration"
+            )
             tags = _array(rule_properties.get("tags", []), "SARIF rule tags")
             cves = valid_cves(_CVE_IN_TEXT.findall(" ".join([rule_id, *map(str, tags)])))
             external_id = _stable_id(
@@ -148,7 +201,8 @@ def _sarif(
                     category="sast",
                     title=title[:1000],
                     severity=_severity(
-                        finding.get("level"), score=rule_properties.get("security-severity")
+                        finding.get("level", configuration.get("level", "warning")),
+                        score=rule_properties.get("security-severity"),
                     ),
                     status="open",
                     resource=asset,
@@ -711,17 +765,21 @@ def _cyclonedx(
     }:
         raise ValueError("supported CycloneDX JSON is required")
     components: dict[str, dict[str, Any]] = {}
+    component_count = 0
     pending = list(_array(document.get("components", []), "CycloneDX components"))
     metadata = _object(document.get("metadata", {}), "CycloneDX metadata")
     if metadata.get("component") is not None:
         pending.append(metadata["component"])
     while pending:
         component = _object(pending.pop(), "CycloneDX component")
+        component_count += 1
+        if component_count > 50_000:
+            raise ValueError("CycloneDX has too many components")
         reference = str(component.get("bom-ref") or "").strip()
         if reference:
+            if reference in components:
+                raise ValueError("CycloneDX component references must be unique")
             components[reference] = component
-        if len(components) > 50_000:
-            raise ValueError("CycloneDX has too many components")
         pending.extend(_array(component.get("components", []), "nested CycloneDX components"))
 
     alerts: list[NormalizedExternalAlert] = []
@@ -731,13 +789,17 @@ def _cyclonedx(
         if not vuln_id:
             raise ValueError("CycloneDX vulnerability has no identifier")
         analysis = _object(vulnerability.get("analysis", {}), "CycloneDX analysis")
-        if analysis.get("state") in {
+        analysis_state = analysis.get("state")
+        if analysis_state in {
             "not_affected",
             "false_positive",
-            "resolved",
-            "resolved_with_pedigree",
         }:
             continue
+        # An explicit remediation assertion must update an earlier open source
+        # observation. Skipping it leaves the canonical finding open forever.
+        source_status = (
+            "fixed" if analysis_state in {"resolved", "resolved_with_pedigree"} else "open"
+        )
         ratings = _array(vulnerability.get("ratings", []), "CycloneDX ratings")
         rating = _object(ratings[0], "CycloneDX rating") if ratings else {}
         for affected in _array(vulnerability.get("affects", []), "CycloneDX affects"):
@@ -754,7 +816,7 @@ def _cyclonedx(
                     category="sca",
                     title=f"{vuln_id[:100]} in software component",
                     severity=_severity(rating.get("severity"), score=rating.get("score")),
-                    status="open",
+                    status=source_status,
                     resource=asset,
                     source_url=None,
                     cve_ids=valid_cves([vuln_id]),
@@ -766,6 +828,8 @@ def _cyclonedx(
                         "purl": str(component.get("purl") or "")[:500],
                         "bom_ref": reference[:500],
                         "vulnerability_id": vuln_id[:100],
+                        "analysis_state": str(analysis_state or "")[:60],
+                        "analysis_justification": str(analysis.get("justification") or "")[:100],
                     },
                     raw_payload={},
                 )
@@ -1446,6 +1510,638 @@ def _hackerone_json(
     return alerts
 
 
+def _wiz_json(
+    document: dict[str, Any],
+    *,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """Wiz Issues export (JSON) — single-page, resource-scoped.
+
+    Wiz exports a ``{issues: [...]}`` envelope from its GraphQL API or the Issues
+    CSV-to-JSON converter. Each issue carries a ``sourceRule`` with a control ID and
+    a ``projects``/``entitySnapshot`` with the target resource. We accept only issues
+    whose ``entitySnapshot.externalId`` or ``projects[*].name`` matches the selected
+    asset so a multi-tenant Wiz export cannot pollute a single-tenant scope.
+    """
+    if kind not in {"cloud", "cloud_account", "domain", "ip", "url"}:
+        raise ValueError("Wiz import requires a cloud, network, or web asset")
+    rows_raw = document.get("issues") or document.get("data")
+    if rows_raw is None:
+        raise ValueError("Wiz JSON has no issues array")
+    rows = _array(rows_raw, "Wiz issues")
+    if len(rows) > MAX_IMPORT_FINDINGS:
+        raise ValueError("scanner export has too many findings")
+    severities = {
+        "CRITICAL": "critical",
+        "HIGH": "high",
+        "MEDIUM": "medium",
+        "LOW": "low",
+        "INFORMATIONAL": "info",
+    }
+    statuses = {
+        "OPEN": "open",
+        "IN_PROGRESS": "open",
+        "RESOLVED": "fixed",
+        "REJECTED": "dismissed",
+    }
+    alerts: list[NormalizedExternalAlert] = []
+    matched_asset = False
+    for item in rows:
+        issue = _object(item, "Wiz issue")
+        issue_id = issue.get("id")
+        snapshot = issue.get("entitySnapshot") or {}
+        if not isinstance(snapshot, dict):
+            raise ValueError("Wiz issue entitySnapshot must be an object")
+        external_id_raw = str(snapshot.get("externalId") or "").strip()
+        # Accept any resource whose external id contains the selected asset value
+        # (Wiz external ids for cloud resources are ARNs, Azure IDs, etc.).
+        if kind in {"cloud", "cloud_account"}:
+            in_scope = asset.lower() in external_id_raw.lower() or external_id_raw.lower() == asset.lower()
+        else:
+            in_scope = external_id_raw.lower() == asset.lower()
+        if not in_scope:
+            continue
+        matched_asset = True
+        severity_raw = issue.get("severity")
+        severity = severities.get(severity_raw)
+        status_raw = issue.get("status")
+        status = statuses.get(status_raw)
+        source_rule = _object(issue.get("sourceRule") or {}, "Wiz sourceRule")
+        rule_id = str(source_rule.get("id") or "").strip()
+        title_raw = str(issue.get("name") or source_rule.get("name") or rule_id).strip()
+        if (
+            not isinstance(issue_id, str)
+            or not issue_id.strip()
+            or len(issue_id) > 300
+            or not title_raw
+            or len(title_raw) > 1000
+            or severity is None
+            or status is None
+        ):
+            raise ValueError("Wiz issue lacks valid identity, severity, or status")
+        cve_ids = valid_cves(_CVE_IN_TEXT.findall(title_raw + " " + rule_id))
+        alerts.append(
+            NormalizedExternalAlert(
+                external_id=_stable_id(provider, issue_id.strip()),
+                category="cloud",
+                title=redact_text(title_raw),
+                severity=severity,
+                status=status,
+                resource=asset,
+                source_url=None,
+                cve_ids=cve_ids,
+                evidence={
+                    "asset_type": kind,
+                    "asset_value": asset,
+                    "rule_id": rule_id[:200],
+                    "external_resource_id": external_id_raw[:500],
+                },
+                raw_payload={},
+            )
+        )
+        if len(alerts) > MAX_IMPORT_FINDINGS:
+            raise ValueError("scanner export has too many findings")
+    if not matched_asset:
+        raise ValueError("Wiz JSON has no issues for the selected asset")
+    return alerts
+
+
+def _prisma_cloud_json(
+    document: dict[str, Any],
+    *,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """Prisma Cloud Alerts export (JSON) — paged-aware, resource-scoped.
+
+    Prisma exports ``{items: [...]}`` from its Alerts v2 API. Each alert carries a
+    ``resource.rrn`` (Prisma resource name) and ``policy.name``/``severity``. We
+    require a single page (no ``nextPageToken``) so callers cannot silently import
+    a partial result.
+    """
+    if kind not in {"cloud", "cloud_account"}:
+        raise ValueError("Prisma Cloud import requires a cloud asset")
+    if document.get("nextPageToken"):
+        raise ValueError("Prisma Cloud export is incomplete; include all pages")
+    rows = _array(document.get("items") or document.get("data", []), "Prisma Cloud alerts")
+    if len(rows) > MAX_IMPORT_FINDINGS:
+        raise ValueError("scanner export has too many findings")
+    severities = {
+        "critical": "critical",
+        "high": "high",
+        "medium": "medium",
+        "low": "low",
+        "informational": "info",
+    }
+    statuses = {
+        "open": "open",
+        "resolved": "fixed",
+        "dismissed": "dismissed",
+        "snoozed": "dismissed",
+    }
+    alerts: list[NormalizedExternalAlert] = []
+    matched_asset = False
+    for item in rows:
+        alert = _object(item, "Prisma Cloud alert")
+        alert_id = alert.get("id")
+        resource = _object(alert.get("resource") or {}, "Prisma resource")
+        rrn = str(resource.get("rrn") or resource.get("id") or "").strip()
+        account_id = str(resource.get("accountId") or "").strip()
+        # Match on account ID embedded in the selected asset or on the full RRN
+        in_scope = (
+            (account_id and account_id in asset)
+            or rrn.lower() == asset.lower()
+            or asset.lower() in rrn.lower()
+        )
+        if not in_scope:
+            continue
+        matched_asset = True
+        policy = _object(alert.get("policy") or {}, "Prisma policy")
+        policy_id = str(policy.get("policyId") or "").strip()
+        title_raw = str(policy.get("name") or policy_id).strip()
+        severity = severities.get(str(policy.get("severity") or "").lower())
+        status = statuses.get(str(alert.get("status") or "").lower())
+        if (
+            not isinstance(alert_id, str)
+            or not alert_id.strip()
+            or len(alert_id) > 300
+            or not title_raw
+            or len(title_raw) > 1000
+            or severity is None
+            or status is None
+        ):
+            raise ValueError("Prisma Cloud alert lacks valid identity, severity, or status")
+        cve_ids = valid_cves(_CVE_IN_TEXT.findall(title_raw + " " + policy_id))
+        alerts.append(
+            NormalizedExternalAlert(
+                external_id=_stable_id(provider, alert_id.strip()),
+                category="cloud",
+                title=redact_text(title_raw),
+                severity=severity,
+                status=status,
+                resource=asset,
+                source_url=None,
+                cve_ids=cve_ids,
+                evidence={
+                    "asset_type": kind,
+                    "asset_value": asset,
+                    "policy_id": policy_id[:200],
+                    "rrn": rrn[:500],
+                },
+                raw_payload={},
+            )
+        )
+        if len(alerts) > MAX_IMPORT_FINDINGS:
+            raise ValueError("scanner export has too many findings")
+    if not matched_asset:
+        raise ValueError("Prisma Cloud JSON has no alerts for the selected asset")
+    return alerts
+
+
+def _checkmarx_xml(
+    data: bytes,
+    *,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """Checkmarx SAST XML report (CxXML format).
+
+    Checkmarx One / CxSAST exports ``<CxXMLResults>`` with ``<Query>`` groups each
+    containing ``<Result>`` elements. We extract path-level identity (file + line) to
+    make stable fingerprints. Checkmarx embeds target info in ``<CxXMLResults
+    ProjectName="...">``; we accept any export whose project or target matches the
+    selected asset (checked case-insensitively) or skip the check when the asset is
+    a repo (the export is always scoped to one project).
+    """
+    if kind not in {"repo", "application", "domain", "url"}:
+        raise ValueError("Checkmarx XML import requires a repo, application, or web asset")
+    try:
+        root = SafeET.fromstring(
+            data,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except (ParseError, DefusedXmlException) as exc:
+        raise ValueError("Checkmarx XML is malformed or contains unsafe XML") from exc
+    if root.tag != "CxXMLResults":
+        raise ValueError("Checkmarx XML must have a CxXMLResults root")
+    project_name = (root.get("ProjectName") or "").strip()
+    # Loose match: accept if the project name contains the asset value or vice versa
+    if project_name and kind in {"repo", "application"}:
+        asset_lower = asset.lower().split("/")[-1]  # bare repo name
+        if asset_lower not in project_name.lower() and project_name.lower() not in asset.lower():
+            raise ValueError("Checkmarx XML project does not match the selected asset")
+    alerts: list[NormalizedExternalAlert] = []
+    for query in root.findall("Query"):
+        query_id = (query.get("id") or "").strip()
+        query_name = (query.get("name") or query_id).strip()
+        if not query_id or not query_name:
+            raise ValueError("Checkmarx query lacks a stable ID or name")
+        severity_raw = (query.get("Severity") or "").strip()
+        severity = _severity(severity_raw)
+        for result in query.findall("Result"):
+            result_state = (result.get("state") or "0").strip()
+            # 0=TO_VERIFY, 1=NOT_EXPLOITABLE, 2=CONFIRMED, 3=URGENT, 4=PROPOSED_NOT_EXPLOITABLE
+            status = "dismissed" if result_state in {"1", "4"} else "open"
+            path = result.find("Path")
+            if path is None:
+                continue
+            path_id = (path.get("PathId") or "").strip()
+            first_node = path.find("PathNode")
+            file_name = ""
+            line = None
+            if first_node is not None:
+                file_name = (first_node.findtext("FileName") or "").strip()
+                try:
+                    line = int(first_node.findtext("Line") or "")
+                except ValueError:
+                    line = None
+            if not path_id or not file_name:
+                raise ValueError("Checkmarx result lacks stable path identity")
+            alerts.append(
+                NormalizedExternalAlert(
+                    external_id=_stable_id(provider, kind, asset, query_id, path_id),
+                    category="sast",
+                    title=redact_text(query_name[:1000]),
+                    severity=severity,
+                    status=status,
+                    resource=asset,
+                    source_url=None,
+                    cve_ids=valid_cves(_CVE_IN_TEXT.findall(query_name)),
+                    evidence={
+                        "asset_type": kind,
+                        "asset_value": asset,
+                        "query_id": query_id[:100],
+                        "file": file_name[:500],
+                        "line": line,
+                    },
+                    raw_payload={},
+                )
+            )
+            if len(alerts) > MAX_IMPORT_FINDINGS:
+                raise ValueError("scanner export has too many findings")
+    return alerts
+
+
+def _fortify_fvdl(
+    data: bytes,
+    *,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """Fortify Static Code Analyzer FVDL/FPR XML report.
+
+    Fortify FPR archives are ZIP files; the FVDL (findings) document inside is named
+    ``audit.fvdl``. Callers that have already extracted it may pass the raw XML bytes
+    directly. We detect ZIP by magic bytes and extract ``audit.fvdl`` automatically.
+    The FVDL schema uses ``<FVDL>`` as root with ``<Vulnerabilities>`` children.
+    """
+    import zipfile
+
+    if kind not in {"repo", "application"}:
+        raise ValueError("Fortify FPR/FVDL import requires a repo or application asset")
+    # Detect and unpack FPR (ZIP) automatically
+    if data[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                if "audit.fvdl" not in zf.namelist():
+                    raise ValueError("Fortify FPR archive does not contain audit.fvdl")
+                inner = zf.read("audit.fvdl")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Fortify FPR is not a valid ZIP archive") from exc
+        if len(inner) > MAX_IMPORT_BYTES:
+            raise ValueError("Fortify FVDL inside FPR exceeds the size limit")
+        data = inner
+    try:
+        root = SafeET.fromstring(
+            data,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except (ParseError, DefusedXmlException) as exc:
+        raise ValueError("Fortify FVDL is malformed or contains unsafe XML") from exc
+    # FVDL root may be namespaced; strip namespace for simpler matching
+    tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
+    if tag != "FVDL":
+        raise ValueError("Fortify FVDL must have an FVDL root element")
+
+    def ns(element: Any, local: str) -> Any:
+        """Find a child stripping any namespace prefix."""
+        for child in element:
+            child_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if child_tag == local:
+                return child
+        return None
+
+    def all_ns(element: Any, local: str) -> list[Any]:
+        return [
+            child
+            for child in element
+            if (child.tag.split("}")[-1] if "}" in child.tag else child.tag) == local
+        ]
+
+    vulnerabilities_container = ns(root, "Vulnerabilities")
+    if vulnerabilities_container is None:
+        return []
+    alerts: list[NormalizedExternalAlert] = []
+    for vuln in all_ns(vulnerabilities_container, "Vulnerability"):
+        class_info = ns(vuln, "ClassInfo")
+        analysis_info = ns(vuln, "AnalysisInfo")
+        if class_info is None or analysis_info is None:
+            raise ValueError("Fortify vulnerability lacks ClassInfo or AnalysisInfo")
+        vuln_id_el = ns(class_info, "ClassID")
+        vuln_id = (vuln_id_el.text or "").strip() if vuln_id_el is not None else ""
+        kingdom_el = ns(class_info, "Kingdom")
+        kingdom = (kingdom_el.text or "").strip() if kingdom_el is not None else ""
+        type_el = ns(class_info, "Type")
+        vuln_type = (type_el.text or "").strip() if type_el is not None else ""
+        subtype_el = ns(class_info, "Subtype")
+        subtype = (subtype_el.text or "").strip() if subtype_el is not None else ""
+        title_raw = ": ".join(filter(None, [kingdom, vuln_type, subtype])) or vuln_id
+        if not vuln_id or not title_raw:
+            raise ValueError("Fortify vulnerability lacks stable identity")
+        severity_raw_el = ns(class_info, "DefaultSeverity")
+        severity_raw = (severity_raw_el.text or "").strip() if severity_raw_el is not None else ""
+        try:
+            severity_float = float(severity_raw)
+        except ValueError:
+            severity_float = None
+        severity = _severity(None, score=severity_float * 2.5 if severity_float is not None else None)
+        unified = ns(analysis_info, "Unified")
+        trace = ns(unified, "Trace") if unified is not None else None
+        entry = ns(trace, "Entry") if trace is not None else None
+        node = ns(entry, "Node") if entry is not None else None
+        location = ns(node, "SourceLocation") if node is not None else None
+        file_path = ""
+        line = None
+        if location is not None:
+            file_path = (location.get("path") or "").strip()
+            try:
+                line = int(location.get("line") or "")
+            except ValueError:
+                line = None
+        if not file_path:
+            raise ValueError("Fortify vulnerability lacks source location")
+        instance_el = ns(vuln, "InstanceInfo")
+        instance_id = ""
+        if instance_el is not None:
+            iid_el = ns(instance_el, "InstanceID")
+            instance_id = (iid_el.text or "").strip() if iid_el is not None else ""
+        alerts.append(
+            NormalizedExternalAlert(
+                external_id=_stable_id(
+                    provider, kind, asset, vuln_id, instance_id or [file_path, line]
+                ),
+                category="sast",
+                title=redact_text(title_raw[:1000]),
+                severity=severity,
+                status="open",
+                resource=asset,
+                source_url=None,
+                cve_ids=valid_cves(_CVE_IN_TEXT.findall(title_raw)),
+                evidence={
+                    "asset_type": kind,
+                    "asset_value": asset,
+                    "vuln_id": vuln_id[:100],
+                    "file": file_path[:500],
+                    "line": line,
+                },
+                raw_payload={},
+            )
+        )
+        if len(alerts) > MAX_IMPORT_FINDINGS:
+            raise ValueError("scanner export has too many findings")
+    return alerts
+
+
+def _sonarqube_json(
+    document: dict[str, Any],
+    *,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """SonarQube Issues API JSON export — single page, project-scoped.
+
+    The SonarQube Issues search API returns ``{issues: [...], components: [...], ...}``.
+    We check ``paging.total <= issues.length`` to ensure completeness and bind to the
+    selected asset via the component ``key`` field.
+    """
+    if kind not in {"repo", "application"}:
+        raise ValueError("SonarQube JSON import requires a repo or application asset")
+    paging = document.get("paging") or {}
+    if isinstance(paging, dict):
+        total = paging.get("total") or 0
+        page_index = paging.get("pageIndex") or 1
+        page_size = paging.get("pageSize") or 500
+        if total > page_size * page_index:
+            raise ValueError("SonarQube JSON export is incomplete; include all pages")
+    rows = _array(document.get("issues"), "SonarQube issues")
+    if len(rows) > MAX_IMPORT_FINDINGS:
+        raise ValueError("scanner export has too many findings")
+    components_list = _array(document.get("components", []), "SonarQube components")
+    components: dict[str, str] = {}
+    for comp in components_list:
+        c = _object(comp, "SonarQube component")
+        key = str(c.get("key") or "").strip()
+        path = str(c.get("path") or c.get("longName") or "").strip()
+        if key:
+            components[key] = path
+    severities = {
+        "BLOCKER": "critical",
+        "CRITICAL": "high",
+        "MAJOR": "medium",
+        "MINOR": "low",
+        "INFO": "info",
+    }
+    statuses = {
+        "OPEN": "open",
+        "CONFIRMED": "open",
+        "REOPENED": "open",
+        "RESOLVED": "fixed",
+        "CLOSED": "fixed",
+        "WONTFIX": "dismissed",
+        "FALSE-POSITIVE": "dismissed",
+    }
+    alerts: list[NormalizedExternalAlert] = []
+    matched_asset = False
+    for item in rows:
+        issue = _object(item, "SonarQube issue")
+        issue_key = str(issue.get("key") or "").strip()
+        component = str(issue.get("component") or "").strip()
+        # The component key is "projectKey:path/to/file"; the root project key
+        # is the part before the first colon.
+        project_key = component.split(":")[0] if ":" in component else component
+        asset_tail = asset.split("/")[-1]  # bare project name from repo path
+        in_scope = (
+            project_key.lower() == asset.lower()
+            or project_key.lower() == asset_tail.lower()
+            or asset.lower().endswith("/" + project_key.lower())
+        )
+        if not in_scope:
+            continue
+        matched_asset = True
+        rule = str(issue.get("rule") or "").strip()
+        message = str(issue.get("message") or rule).strip()
+        severity_raw = str(issue.get("severity") or "").strip()
+        severity = severities.get(severity_raw, "info")
+        status_raw = str(issue.get("status") or "").strip()
+        resolution_raw = str(issue.get("resolution") or "").strip()
+        status = statuses.get(resolution_raw) or statuses.get(status_raw, "open")
+        if not issue_key or len(issue_key) > 300 or not message or len(message) > 1000:
+            raise ValueError("SonarQube issue lacks valid identity or message")
+        text_range = _object(issue.get("textRange") or {}, "SonarQube textRange")
+        line = text_range.get("startLine")
+        file_path = components.get(component, component)
+        alerts.append(
+            NormalizedExternalAlert(
+                external_id=_stable_id(provider, issue_key),
+                category="sast",
+                title=redact_text(message[:1000]),
+                severity=severity,
+                status=status,
+                resource=asset,
+                source_url=None,
+                cve_ids=valid_cves(_CVE_IN_TEXT.findall(rule)),
+                evidence={
+                    "asset_type": kind,
+                    "asset_value": asset,
+                    "rule": rule[:200],
+                    "file": redact_text(file_path[:500]),
+                    "line": line if isinstance(line, int) else None,
+                    "project": project_key[:200],
+                },
+                raw_payload={},
+            )
+        )
+        if len(alerts) > MAX_IMPORT_FINDINGS:
+            raise ValueError("scanner export has too many findings")
+    if not matched_asset:
+        raise ValueError("SonarQube JSON has no issues for the selected asset")
+    return alerts
+
+
+def _defectdojo_json(
+    document: dict[str, Any],
+    *,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """DefectDojo Findings export (paginated JSON API format).
+
+    DefectDojo's ``/api/v2/findings/`` endpoint returns ``{count, next, results: [...]}``.
+    We require a complete (single-page or merged) export: ``next`` must be null. Each
+    result maps to a canonical NormalizedExternalAlert so it flows through the same
+    intake pipeline as every other provider.
+    """
+    if document.get("next"):
+        raise ValueError("DefectDojo export is incomplete; include all pages")
+    rows = _array(document.get("results"), "DefectDojo findings")
+    if len(rows) > MAX_IMPORT_FINDINGS:
+        raise ValueError("scanner export has too many findings")
+    severities = {
+        "Critical": "critical",
+        "High": "high",
+        "Medium": "medium",
+        "Low": "low",
+        "Info": "info",
+        "Informational": "info",
+    }
+    statuses_map = {
+        "Active": "open",
+        "Verified": "open",
+        "Duplicate": "dismissed",
+        "False Positive": "dismissed",
+        "Out of Scope": "dismissed",
+        "Mitigated": "fixed",
+        "Risk Accepted": "dismissed",
+    }
+    alerts: list[NormalizedExternalAlert] = []
+    matched_asset = False
+    for item in rows:
+        finding = _object(item, "DefectDojo finding")
+        finding_id = finding.get("id")
+        title_raw = str(finding.get("title") or "").strip()
+        severity_raw = str(finding.get("severity") or "").strip()
+        severity = severities.get(severity_raw, "info")
+        # DefectDojo uses boolean active/verified/duplicate/false_p/mitigated flags
+        is_dup = finding.get("duplicate") is True
+        is_fp = finding.get("false_p") is True
+        is_mitigated = finding.get("mitigated") is not None or finding.get("is_mitigated") is True
+        is_out_of_scope = finding.get("out_of_scope") is True
+        is_risk_accepted = finding.get("risk_accepted") is True
+        is_active = finding.get("active") is True
+        if is_dup or is_fp or is_out_of_scope or is_risk_accepted:
+            status = "dismissed"
+        elif is_mitigated:
+            status = "fixed"
+        elif is_active:
+            status = "open"
+        else:
+            status = statuses_map.get(finding.get("status") or "", "open")
+        endpoint_str = ""
+        endpoints = finding.get("endpoints") or []
+        if isinstance(endpoints, list) and endpoints:
+            ep = endpoints[0]
+            if isinstance(ep, dict):
+                endpoint_str = str(ep.get("host") or ep.get("url") or "").strip()
+            elif isinstance(ep, str):
+                endpoint_str = ep.strip()
+        # Accept finding if its endpoint matches the selected asset
+        if endpoint_str:
+            try:
+                ep_kind, ep_value = normalized_asset_identity("domain", endpoint_str) if "." in endpoint_str else normalized_asset_identity("ip", endpoint_str)
+                in_scope = (ep_kind, ep_value) == (kind, asset)
+            except ValueError:
+                in_scope = asset.lower() in endpoint_str.lower()
+        else:
+            # No endpoint information; include finding without asset filter
+            in_scope = True
+        if not in_scope:
+            continue
+        matched_asset = True
+        if not isinstance(finding_id, int) or not title_raw or len(title_raw) > 1000:
+            raise ValueError("DefectDojo finding lacks valid identity or title")
+        cve_ids_raw = finding.get("cve") or finding.get("cve_list") or []
+        if isinstance(cve_ids_raw, str):
+            cve_ids_raw = [cve_ids_raw]
+        cve_ids_raw = _array(cve_ids_raw, "DefectDojo CVE list") if not isinstance(cve_ids_raw, list) else cve_ids_raw
+        cve_ids = valid_cves([str(c) for c in cve_ids_raw if c])
+        alerts.append(
+            NormalizedExternalAlert(
+                external_id=_stable_id(provider, str(finding_id)),
+                category="sast" if finding.get("scanner_confidence") or finding.get("sast_source_file_path") else "network",
+                title=redact_text(title_raw),
+                severity=severity,
+                status=status,
+                resource=asset,
+                source_url=None,
+                cve_ids=cve_ids,
+                evidence={
+                    "asset_type": kind,
+                    "asset_value": asset,
+                    "defectdojo_id": finding_id,
+                    "file": redact_text(str(finding.get("sast_source_file_path") or "")[:500]),
+                    "line": finding.get("line") if isinstance(finding.get("line"), int) else None,
+                },
+                raw_payload={},
+            )
+        )
+        if len(alerts) > MAX_IMPORT_FINDINGS:
+            raise ValueError("scanner export has too many findings")
+    if rows and not matched_asset:
+        raise ValueError("DefectDojo JSON has no findings for the selected asset")
+    return alerts
+
+
 def _bugcrowd_json(
     document: dict[str, Any],
     *,
@@ -1595,6 +2291,10 @@ def parse_scan_export(
         return _burp_xml(data, provider=provider, kind=kind, asset=asset)
     if format_name == "qualys_host_detection_xml":
         return _qualys_host_detection_xml(data, provider=provider, kind=kind, asset=asset)
+    if format_name in {"checkmarx_xml", "fortify_fvdl", "fortify_fpr"}:
+        return _checkmarx_and_fortify_binary_dispatch(
+            data, format_name=format_name, provider=provider, kind=kind, asset=asset
+        )
     try:
         parsed = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1643,7 +2343,31 @@ def parse_scan_export(
         return _hackerone_json(document, provider=provider, kind=kind, asset=asset)
     if format_name == "bugcrowd_json":
         return _bugcrowd_json(document, provider=provider, kind=kind, asset=asset)
+    if format_name == "wiz_json":
+        return _wiz_json(document, provider=provider, kind=kind, asset=asset)
+    if format_name == "prisma_cloud_json":
+        return _prisma_cloud_json(document, provider=provider, kind=kind, asset=asset)
+    if format_name == "sonarqube_json":
+        return _sonarqube_json(document, provider=provider, kind=kind, asset=asset)
+    if format_name == "defectdojo_json":
+        return _defectdojo_json(document, provider=provider, kind=kind, asset=asset)
     raise ValueError("unsupported scanner export format")
+
+
+def _checkmarx_and_fortify_binary_dispatch(
+    data: bytes,
+    *,
+    format_name: str,
+    provider: str,
+    kind: str,
+    asset: str,
+) -> list[NormalizedExternalAlert]:
+    """Separate dispatch path for binary/XML formats that cannot be JSON-parsed first."""
+    if format_name == "checkmarx_xml":
+        return _checkmarx_xml(data, provider=provider, kind=kind, asset=asset)
+    if format_name in {"fortify_fvdl", "fortify_fpr"}:
+        return _fortify_fvdl(data, provider=provider, kind=kind, asset=asset)
+    raise ValueError("unsupported binary scanner format")
 
 
 async def stage_scan_export(
@@ -1686,7 +2410,7 @@ async def stage_scan_export(
                         select(ExternalSecurityAlert.external_id).where(
                             ExternalSecurityAlert.organization_id == principal.organization_id,
                             ExternalSecurityAlert.provider == provider,
-                            ExternalSecurityAlert.external_id.in_(fixed_ids),
+                            pg_any(ExternalSecurityAlert.external_id, fixed_ids),
                         )
                     )
                 )
@@ -1698,25 +2422,25 @@ async def stage_scan_export(
                 for alert in alerts
                 if alert.status != "fixed" or alert.external_id in previously_seen
             ]
-    staged = 0
-    for offset in range(0, len(alerts), _STAGE_BATCH):
-        batch = alerts[offset : offset + _STAGE_BATCH]
-        staged += await external_alert._stage_normalized_alerts(
+    # The staging service batches SQL internally, then projects the entire
+    # upload once. Splitting here produces intermediate lifecycle transitions
+    # when observations for one canonical finding straddle batch boundaries.
+    staged = await external_alert._stage_normalized_alerts(
+        session,
+        organization_id=principal.organization_id,
+        integration_id=None,
+        provider=provider,
+        alerts=alerts,
+    )
+    if assessment_id is not None and job_id is not None:
+        await link_scan_observations(
             session,
             organization_id=principal.organization_id,
-            integration_id=None,
+            assessment_id=assessment_id,
+            job_id=job_id,
             provider=provider,
-            alerts=batch,
+            external_ids=[alert.external_id for alert in alerts],
         )
-        if assessment_id is not None and job_id is not None:
-            await link_scan_observations(
-                session,
-                organization_id=principal.organization_id,
-                assessment_id=assessment_id,
-                job_id=job_id,
-                provider=provider,
-                external_ids=[alert.external_id for alert in batch],
-            )
     await audit_service.record(
         session,
         action=audit_service.AuditAction.FINDING_IMPORT,

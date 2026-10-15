@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep, RedisDep, SettingsDep
 from app.schemas.common import Page
+from app.schemas.canonical import CanonicalFindingOut
 from app.schemas.external_alert import (
     ExternalAlertDetailOut,
     ExternalAlertOut,
@@ -17,6 +18,7 @@ from app.schemas.external_alert import (
     RelatedFindingOut,
 )
 from app.services.external_alert import (
+    canonical_findings_for_alert,
     get_external_alert,
     list_external_alerts,
     related_external_alerts_for_alert,
@@ -34,7 +36,12 @@ async def external_alert_inbox(
     session: DbSession,
     pagination: PaginationDep,
     provider: Annotated[
-        Literal["github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"] | None, Query()
+        str | None,
+        Query(
+            pattern=r"^[a-z][a-z0-9_-]{1,39}$",
+            max_length=40,
+            description="Normalized intake provider identifier.",
+        ),
     ] = None,
     severity: Annotated[
         Literal["critical", "high", "medium", "low", "info"] | None, Query()
@@ -82,6 +89,17 @@ async def external_alert_related_findings(
 ) -> list[RelatedFindingOut]:
     findings = await related_findings_for_alert(session, principal, alert_id)
     return [RelatedFindingOut.model_validate(finding) for finding in findings]
+
+
+@router.get("/{alert_id}/canonical-findings", response_model=list[CanonicalFindingOut])
+async def external_alert_canonical_findings(
+    alert_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> list[CanonicalFindingOut]:
+    """Expose the authoritative normalized records created from this alert."""
+    findings = await canonical_findings_for_alert(session, principal, alert_id)
+    return [CanonicalFindingOut.model_validate(finding) for finding in findings]
 
 
 @router.get("/{alert_id}/related-alerts", response_model=list[ExternalAlertOut])

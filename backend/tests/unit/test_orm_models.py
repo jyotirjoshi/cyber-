@@ -60,6 +60,7 @@ from app.db.enums import (
     AssessmentStatus,
     AssetEnvironment,
     AssetStatus,
+    AttackSimulationCampaignStatus,
     AuditOutcome,
     CanonicalFindingStatus,
     Criticality,
@@ -158,6 +159,7 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     EnumColumn("findings", "severity", Severity),
     EnumColumn("canonical_findings", "severity", Severity),
     EnumColumn("canonical_findings", "status", CanonicalFindingStatus),
+    EnumColumn("attack_simulation_campaigns", "status", AttackSimulationCampaignStatus),
     EnumColumn("findings", "status", FindingStatus),
     EnumColumn("findings", "priority", Priority),
     EnumColumn("findings", "asset_criticality", Criticality),
@@ -172,9 +174,9 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
         "ticket_links",
         "provider",
         IntegrationKind,
-        narrowed_to=frozenset({"jira", "github", "gitlab"}),
+        narrowed_to=frozenset({"jira", "github", "gitlab", "servicenow", "azure_devops", "linear"}),
         reason=(
-            "Only the three issue trackers of IntegrationKind's nine can hold a ticket. "
+            "Only the six issue trackers of IntegrationKind can hold a ticket. "
             "The column is half of unique_ticket_per_finding, so a variant spelling is a "
             "second row for the same finding -- the duplicate the table exists to prevent."
         ),
@@ -203,6 +205,7 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     # --- audit / reports --------------------------------------------------
     EnumColumn("audit_events", "outcome", AuditOutcome),
     EnumColumn("reports", "format", ReportFormat),
+    EnumColumn("report_schedules", "format", ReportFormat),
     EnumColumn("reports", "status", ReportStatus),
 )
 
@@ -213,10 +216,43 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
     {
         ("audit_events", "actor_type"),  # user / agent / system / worker
         ("reports", "audience"),  # executive / technical
+        ("report_schedules", "audience"),  # executive / technical
         ("external_security_alerts", "severity"),
         ("external_security_alerts", "status"),
         ("run_dispatches", "status"),
         ("asset_changes", "change_type"),
+        ("automation_executions", "status"),
+        ("automation_rules", "trigger"),
+        ("retest_requests", "status"),
+        ("risk_acceptances", "status"),
+        ("sla_escalations", "level"),
+        ("saved_views", "resource"),
+        ("agent_decisions", "status"),
+        ("agent_memories", "category"),
+        ("agent_memories", "source"),
+        ("agent_sessions", "autonomy_mode"),
+        ("agent_specialist_tasks", "specialist"),
+        ("agent_specialist_tasks", "status"),
+        ("compliance_controls", "assessment_status"),
+        ("compliance_controls", "framework"),
+        ("compliance_finding_mappings", "mapping_type"),
+        ("dashboard_layouts", "audience"),
+        ("finding_collaboration_comments", "kind"),
+        ("integrations", "last_sync_status"),
+        ("workflow_runs", "status"),
+        ("workflow_step_runs", "status"),
+        ("scan_auth_profiles", "auth_type"),
+        ("attack_simulation_runs", "status"),
+        ("attack_simulation_technique_runs", "status"),
+        ("attack_simulation_technique_runs", "risk_class"),
+        ("attack_simulation_technique_runs", "control_result"),
+        ("threat_observations", "entity_type"),
+        ("threat_observations", "freshness"),
+        ("threat_watchlists", "entity_type"),
+        ("report_distributions", "channel"),
+        ("report_distributions", "status"),
+        ("custom_connectors", "output_type"),
+        ("custom_connector_runs", "status"),
     }
 )
 

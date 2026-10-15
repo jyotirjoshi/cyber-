@@ -59,6 +59,16 @@ export default function FindingsPage() {
   const [offset, setOffset] = React.useState(0);
   const [view, setView] = React.useState<FindingView | null>(null);
   React.useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    const savedSeverity = query.get("severity") ?? "";
+    const savedPriority = query.get("priority") ?? "";
+    const savedStatus = query.get("status") ?? "";
+    setQ(query.get("q") ?? "");
+    if (SEVERITIES.includes(savedSeverity as Severity)) setSeverity(savedSeverity as Severity);
+    if (PRIORITIES.includes(savedPriority as Priority)) setPriority(savedPriority as Priority);
+    if (STATUSES.includes(savedStatus as FindingStatus)) setStatus(savedStatus as FindingStatus);
+  }, []);
+  React.useEffect(() => {
     const syncView = () => setView(findingViewFromSearch(window.location.search));
     syncView();
     window.addEventListener("popstate", syncView);

@@ -58,6 +58,11 @@ export default function JobsPage() {
     [scanner, status, activeOnly, offset],
     { enabled: canRead, refetchInterval: 15000 },
   );
+  const workerMetrics = useApiResource(
+    () => api.assessments.workerMetrics(),
+    [],
+    { enabled: canRead, refetchInterval: 15000 },
+  );
 
   const cancelMut = useMutation((id: string) => api.jobs.cancel(id), {
     onSuccess: () => {
@@ -154,6 +159,13 @@ export default function JobsPage() {
             />
             Active only
           </label>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="space-y-3">
+          <div><h2 className="text-sm font-semibold text-fg">Worker operations</h2><p className="text-xs text-muted">Live tenant-scoped queue and execution counts. Jobs remain durable even when a worker restarts.</p></div>
+          {workerMetrics.loading && !workerMetrics.data ? <LoadingState label="Loading worker metrics…" /> : workerMetrics.error ? <ErrorState message={workerMetrics.error} onRetry={workerMetrics.refetch} /> : workerMetrics.data ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><div className="rounded-lg border border-line p-3"><p className="text-xs text-muted">Pending dispatches</p><p className="mt-1 text-2xl font-semibold tabular-nums text-fg">{formatNumber(workerMetrics.data.pending_dispatches)}</p></div><div className="rounded-lg border border-line p-3"><p className="text-xs text-muted">Assessment runs</p><p className="mt-1 text-sm text-fg">{Object.entries(workerMetrics.data.runs).length ? Object.entries(workerMetrics.data.runs).map(([state, count]) => `${humanize(state)} ${count}`).join(" · ") : "None"}</p></div><div className="rounded-lg border border-line p-3"><p className="text-xs text-muted">Scanner jobs</p><p className="mt-1 text-sm text-fg">{Object.entries(workerMetrics.data.scanner_jobs).length ? Object.entries(workerMetrics.data.scanner_jobs).map(([state, count]) => `${humanize(state)} ${count}`).join(" · ") : "None"}</p></div><div className="rounded-lg border border-line p-3"><p className="text-xs text-muted">External deliveries</p><p className="mt-1 text-sm text-fg">{Object.entries(workerMetrics.data.notification_deliveries).length ? Object.entries(workerMetrics.data.notification_deliveries).map(([state, count]) => `${humanize(state)} ${count}`).join(" · ") : "None"}</p>{workerMetrics.data.notification_retries_due > 0 && <p className="mt-1 text-xs text-warn">{formatNumber(workerMetrics.data.notification_retries_due)} retry due</p>}</div></div> : null}
         </CardBody>
       </Card>
 

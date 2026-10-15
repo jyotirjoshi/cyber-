@@ -47,6 +47,14 @@ class AgentMessageIn(BaseModel):
     agent_definition_id: uuid.UUID | None = None
 
 
+class AgentSessionAutonomyIn(BaseModel):
+    """Select the session's operating mode without broadening action permissions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    autonomy_mode: Literal["supervised", "monitored"]
+
+
 class AgentMessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,9 +84,22 @@ AgentActionName = Literal[
     "sync_sonarqube_alerts",
     "sync_snyk_issues",
     "sync_tenable_vulnerabilities",
+    "sync_qualys_host_detections",
+    "sync_rapid7_vulnerabilities",
+    "sync_wiz_issues",
+    "sync_crowdstrike_vulnerabilities",
+    "sync_aws_security_hub_findings",
+    "sync_azure_defender_alerts",
+    "sync_gcp_scc_findings",
     "update_github_alert",
     "create_jira_ticket",
+    "create_ticket",
+    "refresh_ticket_status",
     "update_canonical_work",
+    "bulk_update_canonical_work",
+    "request_retest",
+    "request_remediation_group_retests",
+    "request_risk_acceptance",
     "start_assessment",
 ]
 
@@ -134,6 +155,7 @@ class AgentActionOut(BaseModel):
     resolved_at: dt.datetime | None = None
     executed_at: dt.datetime | None = None
     result_summary: str | None = None
+    execution_evidence: dict[str, Any] = Field(default_factory=dict)
     created_at: dt.datetime
 
 
@@ -157,6 +179,24 @@ class AgentStepOut(BaseModel):
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
     duration_ms: int | None = None
+
+
+class AgentSpecialistTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    plan_index: int
+    specialist: str
+    scanner: str
+    target_count: int
+    status: Literal["pending", "running", "completed", "degraded", "failed"]
+    attempts: int
+    max_attempts: int
+    scanner_job_id: uuid.UUID | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    failure_code: str | None = None
+    started_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None
 
 
 class AgentRunOut(BaseModel):
@@ -185,6 +225,7 @@ class AgentRunOut(BaseModel):
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
     steps: list[AgentStepOut] = Field(default_factory=list)
+    specialist_tasks: list[AgentSpecialistTaskOut] = Field(default_factory=list)
 
 
 class AgentSessionOut(BaseModel):
@@ -194,6 +235,7 @@ class AgentSessionOut(BaseModel):
     title: str
     is_archived: bool = False
     message_count: int = 0
+    autonomy_mode: Literal["supervised", "monitored"] = "supervised"
     agent_version_id: uuid.UUID | None = None
     last_activity_at: dt.datetime | None = None
     created_at: dt.datetime
@@ -362,6 +404,8 @@ __all__ = [
     "AgentMessageIn",
     "AgentMessageOut",
     "AgentRunOut",
+    "AgentSpecialistTaskOut",
+    "AgentSessionAutonomyIn",
     "AgentSessionDetailOut",
     "AgentSessionOut",
     "AgentStepOut",

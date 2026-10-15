@@ -31,11 +31,24 @@ const NAV: NavItem[] = [
   { href: "/agent/knowledge", label: "Knowledge", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/assessments", label: "Assessments", icon: <IconAssessments />, permission: "assessment:read" },
   { href: "/findings", label: "Findings", icon: <IconFindings />, permission: "finding:read" },
+  { href: "/remediation", label: "Remediation", icon: <IconRemediation />, permission: "finding:read" },
   { href: "/assets", label: "Assets", icon: <IconAssets />, permission: "asset:read" },
+  { href: "/asm", label: "Attack surface", icon: <IconASM />, permission: "asset:read" },
+  { href: "/compliance", label: "Compliance", icon: <IconCompliance />, permission: "finding:read" },
+  { href: "/threat-intelligence", label: "Threat intel", icon: <IconIntelligence />, permission: "finding:read" },
+  { href: "/automation", label: "Automation", icon: <IconAutomation />, permission: "finding:read" },
+  { href: "/workflows", label: "Workflows", icon: <IconAutomation />, permission: "finding:read" },
+  { href: "/attack-simulations", label: "Simulations", icon: <IconSimulation />, permission: "assessment:read" },
+  { href: "/reports", label: "Reports", icon: <IconReports />, permission: "report:read" },
   { href: "/jobs", label: "Scanner jobs", icon: <IconJobs />, permission: "assessment:read" },
   { href: "/integrations", label: "Integrations", icon: <IconIntegrations />, permission: "integration:read" },
   { href: "/audit", label: "Audit log", icon: <IconAudit />, permission: "audit:read" },
   { href: "/settings/organization", label: "Organization", icon: <IconSettings />, permission: "org:read" },
+  { href: "/settings/api-keys", label: "API keys", icon: <IconAPIKey />, permission: "org:manage" },
+  { href: "/settings/scan-auth", label: "Scan credentials", icon: <IconAPIKey />, permission: "integration:manage" },
+  { href: "/settings/webhooks", label: "Webhooks", icon: <IconWebhook />, permission: "org:manage" },
+  { href: "/settings/deliveries", label: "Delivery ops", icon: <IconWebhook />, permission: "org:manage" },
+  { href: "/settings/saved-views", label: "Saved views", icon: <IconSavedViews />, permission: "finding:read" },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -225,8 +238,17 @@ function IconAssessments() {
 function IconFindings() {
   return svg(<><path d="M10 2 3 5v5c0 4 3 6.5 7 8 4-1.5 7-4 7-8V5l-7-3Z" /><path d="M10 8v3M10 13h.01" /></>);
 }
+function IconRemediation() {
+  return svg(<><path d="M4 14 14 4" /><path d="M5 5h4v4H5zM11 11h4v4h-4z" /></>);
+}
 function IconAssets() {
   return svg(<><rect x="3" y="4" width="14" height="5" rx="1" /><rect x="3" y="11" width="14" height="5" rx="1" /><path d="M6 6.5h.01M6 13.5h.01" /></>);
+}
+function IconCompliance() {
+  return svg(<><path d="M10 2 4 4.5v5c0 3.8 2.5 6.4 6 8 3.5-1.6 6-4.2 6-8v-5L10 2Z" /><path d="m7 10 2 2 4-4" /></>);
+}
+function IconIntelligence() {
+  return svg(<><path d="M10 2 4 4.5v5c0 3.8 2.5 6.4 6 8 3.5-1.6 6-4.2 6-8v-5L10 2Z"/><path d="M7 10h6M10 7v6"/></>);
 }
 function IconJobs() {
   return svg(<><circle cx="10" cy="10" r="3" /><path d="M10 3v2M10 15v2M3 10h2M15 10h2M5 5l1.5 1.5M13.5 13.5 15 15M15 5l-1.5 1.5M6.5 13.5 5 15" /></>);
@@ -239,6 +261,27 @@ function IconAudit() {
 }
 function IconSettings() {
   return svg(<><circle cx="10" cy="10" r="2.5" /><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M15.4 4.6 14 6M6 14l-1.4 1.4" /></>);
+}
+function IconASM() {
+  return svg(<><circle cx="10" cy="10" r="7" /><path d="M10 3v14M3 10h14M5.3 5.3l9.4 9.4M14.7 5.3 5.3 14.7" /></>);
+}
+function IconAutomation() {
+  return svg(<><path d="M4 8h3l2-4 2 8 2-4h3" /><path d="M4 14h12" /></>);
+}
+function IconSimulation() {
+  return svg(<><path d="M10 2 3 6v4c0 3.5 3 6 7 7 4-1 7-3.5 7-7V6l-7-4Z" /><path d="M7 10l2 2 4-5" /></>);
+}
+function IconReports() {
+  return svg(<><path d="M5 3h7l3 3v11H5V3Z" /><path d="M12 3v3h3M8 10h4M8 13h4M8 7h2" /></>);
+}
+function IconAPIKey() {
+  return svg(<><circle cx="8" cy="10" r="3" /><path d="M11 10h6M15 8v4" /></>);
+}
+function IconWebhook() {
+  return svg(<><path d="M10 3c-3.9 0-7 3.1-7 7s3.1 7 7 7 7-3.1 7-7" /><path d="M14 3l3 3-3 3" /><path d="M17 6H10" /></>);
+}
+function IconSavedViews() {
+  return svg(<><path d="M4 6h12M4 10h8M4 14h5" /><circle cx="15" cy="14" r="2.5" /><path d="M17 16l1.5 1.5" /></>);
 }
 function IconMenu() {
   return <svg viewBox="0 0 20 20" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M3 6h14M3 10h14M3 14h14" /></svg>;

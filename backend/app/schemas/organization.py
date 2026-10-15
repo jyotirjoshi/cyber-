@@ -77,6 +77,9 @@ class OrgPolicy(BaseModel):
     slack_channel: str | None = Field(default=None, max_length=120)
     #: Copied on every assessment-completed email, in addition to the requester.
     email_recipients: list[EmailStr] = Field(default_factory=list, max_length=50)
+    #: Send immediate on-call pages for findings and SLA breaches that meet the severity floor.
+    #: The PagerDuty routing key itself remains in the tenant integration, never this policy.
+    pagerduty_enabled: bool = False
     #: Require approval even for a passive-only assessment. Active scanning always
     #: requires it; this only closes the passive exception.
     require_approval_for_passive: bool = False
@@ -87,7 +90,35 @@ class OrgPolicy(BaseModel):
     #: Skip Jira ticket creation for findings below ``notify_min_severity`` even when the
     #: integration is configured (FR-027). Reduces ticket noise without disabling it.
     ticket_min_severity: Severity | None = None
+    #: Per-severity days-to-remediate overrides. Missing levels retain platform defaults.
+    sla_targets_days: dict[str, int] = Field(default_factory=dict)
+    #: Standard CODEOWNERS content used by remediation automation. It is tenant-owned
+    #: routing metadata, never fetched from an untrusted repository at execution time.
+    codeowners: str | None = Field(default=None, max_length=50_000)
+    #: Maps a CODEOWNERS token (for example ``@payments-team``) to a tenant member id.
+    codeowner_members: dict[str, uuid.UUID] = Field(default_factory=dict, max_length=500)
     risk_weights: RiskWeights = Field(default_factory=RiskWeights)
+
+    @field_validator("sla_targets_days")
+    @classmethod
+    def validate_sla_targets_days(cls, value: dict[str, int]) -> dict[str, int]:
+        from app.core.errors import InvalidConfigurationError
+        from app.services.sla import validate_sla_targets
+
+        try:
+            validate_sla_targets(value)
+        except InvalidConfigurationError as exc:
+            raise ValueError(exc.user_message) from exc
+        return value
+
+    @field_validator("codeowners")
+    @classmethod
+    def validate_codeowners(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if "\x00" in value:
+            raise ValueError("CODEOWNERS content cannot contain null bytes")
+        return value
 
 
 class OrganizationOut(BaseModel):
@@ -96,6 +127,7 @@ class OrganizationOut(BaseModel):
     id: uuid.UUID
     name: str
     slug: str
+    parent_organization_id: uuid.UUID | None = None
     is_active: bool
     max_concurrent_scanner_jobs: int
     created_at: dt.datetime
@@ -124,6 +156,43 @@ class OrganizationCreateIn(BaseModel):
     slug: str | None = Field(
         default=None, min_length=2, max_length=80, pattern=r"^[a-z0-9][a-z0-9-]*$"
     )
+
+
+class ClientOrganizationCreateIn(BaseModel):
+    """A self-service customer tenant owned by the active MSSP organization."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=2, max_length=200)
+    slug: str | None = Field(
+        default=None, min_length=2, max_length=80, pattern=r"^[a-z0-9][a-z0-9-]*$"
+    )
+
+
+class ClientOrganizationPortfolioOut(BaseModel):
+    """Non-sensitive portfolio counters for one directly managed customer tenant."""
+
+    organization: OrganizationOut
+    asset_count: int = 0
+    open_finding_count: int = 0
+    critical_open_finding_count: int = 0
+    open_risk_score: float = 0.0
+
+
+class ClientOrganizationDelegateIn(BaseModel):
+    """Grant an existing parent-team member a role in one customer tenant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+    role: Role = Role.SECURITY_ENGINEER
+
+    @field_validator("role")
+    @classmethod
+    def disallow_client_owner_bootstrap(cls, value: Role) -> Role:
+        if value is Role.OWNER:
+            raise ValueError("delegate role cannot be owner")
+        return value
 
 
 class OrganizationUpdateIn(BaseModel):
@@ -180,6 +249,9 @@ class MemberRoleIn(BaseModel):
 
 
 __all__ = [
+    "ClientOrganizationCreateIn",
+    "ClientOrganizationDelegateIn",
+    "ClientOrganizationPortfolioOut",
     "MemberInviteIn",
     "MemberOut",
     "MemberRoleIn",

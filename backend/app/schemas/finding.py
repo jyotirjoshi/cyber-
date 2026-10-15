@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -245,7 +245,10 @@ class ValidateFindingIn(BaseModel):
 class JiraTicketIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    #: All three fall back to the organization's Jira integration config when omitted.
+    #: Jira remains the default for backward compatibility; canonical findings can also
+    #: create one idempotent work item per configured supported provider.
+    provider: Literal["jira", "github", "gitlab", "servicenow", "azure_devops", "linear"] = "jira"
+    #: Jira-specific fields fall back to the organization's Jira config when omitted.
     project_key: str | None = Field(default=None, max_length=40)
     issue_type: str | None = Field(default=None, max_length=60)
     assignee: str | None = Field(default=None, max_length=200)

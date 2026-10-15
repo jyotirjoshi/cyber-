@@ -111,6 +111,11 @@ class AssessmentState(TypedDict, total=False):
     scanned: bool
     findings_total: int
     report_id: str | None
+    #: Policy-accepted actions for the next adaptive specialist round. The decision
+    #: record in Postgres is authoritative; this JSON-safe list is only a graph cursor.
+    adaptive_actions: list[dict[str, Any]]
+    adaptive_rounds: int
+    adaptive_stop_reason: str | None
 
     # -- degradation and failure --------------------------------------------
     #: FR-039 degradations recorded so far, mirrored from the assessment row for events.
@@ -159,6 +164,9 @@ def initial_state(
         scanned=False,
         findings_total=0,
         report_id=None,
+        adaptive_actions=[],
+        adaptive_rounds=0,
+        adaptive_stop_reason=None,
         degradations=[],
         error=None,
     )

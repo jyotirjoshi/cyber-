@@ -250,6 +250,38 @@ def test_retest_finding_plans_assessment_only_with_explicit_authorization() -> N
     assert plan_chat_actions(request + f" Also retest finding {uuid.uuid4()}.") == []
 
 
+def test_request_retest_creates_governance_work_without_authorizing_a_scan() -> None:
+    from app.services.agent_chat_actions import plan_chat_actions
+
+    finding_id = uuid.uuid4()
+    plans = plan_chat_actions(f"Please request a retest for finding {finding_id}.")
+    assert [(plan.action, plan.payload) for plan in plans] == [
+        ("request_retest", {"finding_id": str(finding_id)})
+    ]
+
+
+def test_request_risk_acceptance_requires_explicit_expiry() -> None:
+    from app.services.agent_chat_actions import plan_chat_actions
+
+    finding_id = uuid.uuid4()
+    request = (
+        f"Please request risk acceptance for finding {finding_id} until "
+        "2026-11-01T00:00:00Z because compensating controls are active."
+    )
+    plans = plan_chat_actions(request)
+    assert [(plan.action, plan.payload) for plan in plans] == [
+        (
+            "request_risk_acceptance",
+            {
+                "finding_id": str(finding_id),
+                "rationale": "compensating controls are active",
+                "expires_at": "2026-11-01T00:00:00Z",
+            },
+        )
+    ]
+    assert plan_chat_actions(f"Please request risk acceptance for finding {finding_id}") == []
+
+
 @pytest.mark.asyncio
 async def test_retest_resolves_tenant_asset_before_approval(monkeypatch) -> None:
     from app.services import agent_chat_actions

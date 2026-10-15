@@ -16,7 +16,7 @@ class AssetChangeOut(BaseModel):
     asset_id: uuid.UUID
     assessment_id: uuid.UUID | None
     asset_name: str
-    change_type: Literal["discovered", "changed"]
+    change_type: Literal["discovered", "changed", "unreachable"]
     changes: dict[str, Any]
     created_at: dt.datetime
 

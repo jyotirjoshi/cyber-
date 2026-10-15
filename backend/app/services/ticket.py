@@ -21,6 +21,7 @@ refusal rather than a silent fall-through to Jira.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 
@@ -32,18 +33,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.errors import (
     ConflictError,
+    CynuxError,
     IntegrationError,
     InvalidConfigurationError,
     ResourceNotFoundError,
 )
+from app.db.base import utcnow
 from app.db.enums import AuditOutcome, IntegrationKind, Permission, Severity
 from app.db.models.asset import Asset
-from app.db.models.canonical import CanonicalFinding, FindingObservation
+from app.db.models.canonical import CanonicalFinding, FindingHistory, FindingObservation
 from app.db.models.finding import Finding, Remediation, TicketLink
 from app.db.repository import TenantRepository, tenant_select
+from app.integrations.azure_devops import AzureDevOpsClient
+from app.integrations.github import GitHubClient
+from app.integrations.gitlab import GitLabClient
 from app.integrations.jira import SEVERITY_PRIORITY, JiraClient, JiraIssue
+from app.integrations.linear import LinearClient
+from app.integrations.servicenow import ServiceNowClient
 from app.services import audit as audit_service
 from app.services import notification as notification_service
+from app.services.automation import queue_finding_event
 from app.services.context import Principal
 from app.services.finding import get_finding
 from app.services.integration import resolve_settings
@@ -52,11 +61,33 @@ from app.services.remediation import list_remediations
 
 log = structlog.get_logger(__name__)
 
+_TERMINAL_TICKET_STATUSES = frozenset({"closed", "done", "resolved", "complete", "completed"})
+
+
+def is_terminal_ticket_status(status: str | None) -> bool:
+    """Whether a tracker status represents completed remediation work."""
+    return bool(status and status.strip().casefold() in _TERMINAL_TICKET_STATUSES)
+
+
+def became_terminal_ticket_status(previous: str | None, current: str | None) -> bool:
+    """Return true only for the first transition into a completed tracker state."""
+    return not is_terminal_ticket_status(previous) and is_terminal_ticket_status(current)
+
+
+def became_reopened_ticket_status(previous: str | None, current: str | None) -> bool:
+    """Return true when a tracker moves from a terminal state back to active work."""
+    return is_terminal_ticket_status(previous) and not is_terminal_ticket_status(current)
+
 #: FR-028. Widened only when a provider is actually implemented -- an unimplemented value
 #: accepted here becomes a ticket_links row pointing at nothing.
-SUPPORTED_PROVIDERS: frozenset[str] = frozenset({"jira"})
+SUPPORTED_PROVIDERS: frozenset[str] = frozenset(
+    {"jira", "github", "gitlab", "servicenow", "azure_devops", "linear"}
+)
 
 _MAX_DESCRIPTION_CHARS = 24_000
+# Successful remote reads are cached on the ticket row for this interval. It keeps the
+# worker's maintenance loop from repeatedly spending a tenant's tracker API quota.
+_TICKET_STATUS_REFRESH_SECONDS = 15 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -366,13 +397,18 @@ async def create_canonical_ticket(
     assignee: str | None = None,
     include_remediation: bool = True,
     by_agent: bool = False,
+    provider: str = "jira",
 ) -> TicketLink:
-    """File one Jira ticket for a unified exposure, including canonical-only sources."""
+    """File one idempotent provider ticket for a unified exposure."""
     principal.require(Permission.TICKET_CREATE)
+    if provider not in SUPPORTED_PROVIDERS:
+        raise InvalidConfigurationError("Unsupported ticket provider")
     finding = await TenantRepository(
         session, CanonicalFinding, principal.organization_id
     ).get_or_404(canonical_finding_id)
-    existing = await find_canonical_ticket(session, principal, canonical_finding_id)
+    existing = await find_canonical_ticket(
+        session, principal, canonical_finding_id, provider=provider
+    )
     if existing is not None:
         return existing
     # Any native observation may already have filed Jira, not only the newest one.
@@ -380,7 +416,7 @@ async def create_canonical_ticket(
         (
             link
             for link in await list_canonical_tickets(session, principal, canonical_finding_id)
-            if link.provider == "jira"
+            if link.provider == provider
         ),
         None,
     )
@@ -409,7 +445,7 @@ async def create_canonical_ticket(
             .limit(1)
         )
     ).scalar_one_or_none()
-    if native_id is not None:
+    if native_id is not None and provider == "jira":
         return await create_ticket(
             session,
             principal,
@@ -445,25 +481,66 @@ async def create_canonical_ticket(
         .scalars()
         .all()
     )
-    scoped = await resolve_settings(session, principal, IntegrationKind.JIRA, settings=settings)
-    client = JiraClient(scoped, redis)
+    kind = IntegrationKind(provider)
+    scoped = await resolve_settings(session, principal, kind, settings=settings)
+    client = None
     try:
-        issue = await client.create_issue(
-            summary=f"[{finding.severity.upper()}] {finding.title}",
-            description=build_canonical_description(
-                finding,
-                asset_name=asset_name,
-                observations=observations,
-                settings=scoped,
-                include_remediation=include_remediation,
-            ),
-            finding_id=str(canonical_finding_id),
-            priority=SEVERITY_PRIORITY.get(Severity(finding.severity)),
-            labels=[f"severity-{finding.severity}"],
-            issue_type=issue_type,
-            project_key=project_key,
-            assignee_account_id=assignee,
+        description = build_canonical_description(
+            finding,
+            asset_name=asset_name,
+            observations=observations,
+            settings=scoped,
+            include_remediation=include_remediation,
         )
+        if provider == "jira":
+            client = JiraClient(scoped, redis)
+            issue = await client.create_issue(
+                summary=f"[{finding.severity.upper()}] {finding.title}",
+                description=description,
+                finding_id=str(canonical_finding_id),
+                priority=SEVERITY_PRIORITY.get(Severity(finding.severity)),
+                labels=[f"severity-{finding.severity}"],
+                issue_type=issue_type,
+                project_key=project_key,
+                assignee_account_id=assignee,
+            )
+        elif provider == "github":
+            client = GitHubClient(scoped, redis)
+            issue = await client.create_issue(
+                summary=f"[{finding.severity.upper()}] {finding.title}",
+                description=description,
+                finding_id=str(canonical_finding_id),
+                labels=[f"severity-{finding.severity}"],
+            )
+        elif provider == "gitlab":
+            client = GitLabClient(scoped, redis)
+            issue = await client.create_issue(
+                summary=f"[{finding.severity.upper()}] {finding.title}",
+                description=description,
+                finding_id=str(canonical_finding_id),
+                labels=[f"severity-{finding.severity}"],
+            )
+        elif provider == "servicenow":
+            client = ServiceNowClient(scoped, redis)
+            issue = await client.create_issue(
+                summary=f"[{finding.severity.upper()}] {finding.title}",
+                description=description,
+                finding_id=str(canonical_finding_id),
+                labels=[f"severity-{finding.severity}"],
+            )
+        elif provider == "azure_devops":
+            client = AzureDevOpsClient(scoped, redis)
+            issue = await client.create_issue(
+                summary=f"[{finding.severity.upper()}] {finding.title}",
+                description=description,
+                finding_id=str(canonical_finding_id),
+                labels=[f"severity-{finding.severity}"],
+            )
+        elif provider == "linear":
+            client = LinearClient(scoped, redis)
+            issue = await client.create_issue(summary=f"[{finding.severity.upper()}] {finding.title}", description=description, finding_id=str(canonical_finding_id), labels=[f"severity-{finding.severity}"])
+        else:  # Guard the enum-to-client boundary if a caller bypasses validation.
+            raise InvalidConfigurationError("Unsupported ticket provider")
     except IntegrationError as exc:
         await audit_service.record(
             session,
@@ -473,18 +550,21 @@ async def create_canonical_ticket(
             resource_id=canonical_finding_id,
             outcome=AuditOutcome.FAILURE,
             reason=exc.user_message,
-            detail={"provider": "jira", "by_agent": by_agent},
+            detail={"provider": provider, "by_agent": by_agent},
         )
         raise
     finally:
-        await client.aclose()
-    resolved_project_key = project_key or scoped.jira.project_key
-    resolved_issue_type = issue_type or scoped.jira.issue_type
+        if client is not None:
+            await client.aclose()
+    resolved_project_key = project_key or (
+        scoped.jira.project_key if provider == "jira" else None
+    )
+    resolved_issue_type = issue_type or (scoped.jira.issue_type if provider == "jira" else None)
     link = TicketLink(
         organization_id=principal.organization_id,
         canonical_finding_id=canonical_finding_id,
         finding_id=None,
-        provider="jira",
+        provider=provider,
         external_key=issue.key[:80],
         external_id=issue.id[:80] if issue.id else None,
         url=issue.url[:1000] if issue.url else None,
@@ -502,7 +582,7 @@ async def create_canonical_ticket(
         principal=principal,
         resource_type="canonical_finding",
         resource_id=canonical_finding_id,
-        detail={"provider": "jira", "issue_key": issue.key, "by_agent": by_agent},
+        detail={"provider": provider, "issue_key": issue.key, "by_agent": by_agent},
     )
     return link
 
@@ -556,6 +636,10 @@ async def create_ticket(
         )
         return existing
 
+    if provider != "jira":
+        raise InvalidConfigurationError(
+            "Native finding tickets currently require Jira; use canonical ticketing for repository trackers."
+        )
     scoped = await resolve_settings(session, principal, IntegrationKind.JIRA, settings=settings)
     client = JiraClient(scoped, redis)
 
@@ -650,17 +734,19 @@ async def refresh_ticket_status(
     settings: Settings,
     redis: Redis | None = None,
 ) -> TicketLink:
-    """Pull the tracker's current state onto the link row.
+    """Pull a confirmed tracker state, or propagate a provider failure.
 
-    On demand rather than polled. Cynux is not the system of record for issue state, and a
-    background poller over every open ticket would spend an organization's Jira rate limit
-    keeping a column fresh that only matters when somebody is looking at it.
-
-    A tracker error is swallowed: a stale status is a better answer to "show me this
-    finding" than an error page.
+    Used by explicit UI/agent actions and the bounded maintenance poller. A failed
+    lookup must never masquerade as successful work using an old cached status.
+    Serialize refreshes so one close transition produces one closure generation.
     """
     principal.require(Permission.FINDING_READ)
-    stmt = tenant_select(TicketLink, principal.organization_id).where(TicketLink.id == ticket_id)
+    stmt = (
+        tenant_select(TicketLink, principal.organization_id)
+        .where(TicketLink.id == ticket_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     link = (await session.execute(stmt)).scalar_one_or_none()
     if link is None:
         raise ResourceNotFoundError(
@@ -668,8 +754,25 @@ async def refresh_ticket_status(
             context={"ticket_id": str(ticket_id)},
         )
 
-    scoped = await resolve_settings(session, principal, IntegrationKind.JIRA, settings=settings)
-    client = JiraClient(scoped, redis)
+    if link.provider not in SUPPORTED_PROVIDERS:
+        raise InvalidConfigurationError("Unsupported ticket provider")
+    scoped = await resolve_settings(
+        session, principal, IntegrationKind(link.provider), settings=settings
+    )
+    if link.provider == "jira":
+        client = JiraClient(scoped, redis)
+    elif link.provider == "github":
+        client = GitHubClient(scoped, redis)
+    elif link.provider == "gitlab":
+        client = GitLabClient(scoped, redis)
+    elif link.provider == "servicenow":
+        client = ServiceNowClient(scoped, redis)
+    elif link.provider == "azure_devops":
+        client = AzureDevOpsClient(scoped, redis)
+    elif link.provider == "linear":
+        client = LinearClient(scoped, redis)
+    else:  # Defensive: SUPPORTED_PROVIDERS was checked above.
+        raise InvalidConfigurationError("Unsupported ticket provider")
     try:
         issue = await client.get_issue(link.external_key)
     except IntegrationError as exc:
@@ -678,14 +781,184 @@ async def refresh_ticket_status(
             ticket_id=str(ticket_id),
             reason=exc.user_message,
         )
-        return link
+        raise
     finally:
         await client.aclose()
 
+    previous_status = link.external_status
     link.external_status = issue.status[:80] if issue.status else None
+    # Record a successful check even when the status did not change, otherwise every
+    # maintenance pulse would refresh the same unchanged ticket again.
+    link.updated_at = utcnow()
     if issue.url:
         link.url = issue.url[:1000]
+    closed_transition = became_terminal_ticket_status(previous_status, link.external_status)
+    reopened_transition = became_reopened_ticket_status(previous_status, link.external_status)
+    if closed_transition:
+        # Increment for every remote close cycle, not just canonical links. The same
+        # generation is shared by automation and outbound webhook deduplication.
+        link.closure_generation = int(getattr(link, "closure_generation", 0) or 0) + 1
+    if (closed_transition or reopened_transition) and link.canonical_finding_id:
+        finding = (
+            await session.execute(
+                tenant_select(CanonicalFinding, principal.organization_id).where(
+                    CanonicalFinding.id == link.canonical_finding_id
+                )
+            )
+        ).scalar_one_or_none()
+        if closed_transition and finding is not None:
+            asset = (
+                await session.execute(
+                    tenant_select(Asset, principal.organization_id).where(Asset.id == finding.asset_id)
+                )
+            ).scalar_one_or_none()
+            if asset is not None:
+                await queue_finding_event(
+                    session,
+                    finding=finding,
+                    asset=asset,
+                    trigger="ticket.closed",
+                    event_key_suffix=f":{link.id}:{link.closure_generation}",
+                )
+            # A ticket closure is a remediation claim, not proof.  Always stage one
+            # verification assessment for a canonical finding, even when the tenant has not
+            # configured a no-code rule.  The scheduled assessment still pauses at the normal
+            # approval gate before an active scanner can run; the ticket identity is retained
+            # as the authorization/evidence reference.  The helper's retest request is
+            # idempotent, so a tracker close replay and a matching automation rule share one
+            # assessment rather than creating duplicate verification work.
+            try:
+                from app.services.automation import schedule_ticket_close_retest
+
+                await schedule_ticket_close_retest(
+                    session,
+                    principal=Principal.for_system(organization_id=principal.organization_id),
+                    finding=finding,
+                    authorization_reference=(
+                        f"ticket:{link.provider}:{link.id}:{link.closure_generation}"
+                    ),
+                    settings=settings,
+                )
+            except (CynuxError, ValueError) as exc:
+                # Ticket status remains authoritative if its asset is no longer a valid scan
+                # target or the finding cannot be retested.  The reason is observable in logs
+                # without turning an otherwise-successful two-way sync into a retry loop.
+                log.info(
+                    "ticket.close_retest_not_scheduled",
+                    ticket_id=str(link.id),
+                    reason=type(exc).__name__,
+                )
+        elif reopened_transition and finding is not None and finding.status in {"closed", "mitigated"}:
+            previous_finding_status = finding.status
+            finding.status = "reopened"
+            finding.status_version += 1
+            finding.closed_at = None
+            now = utcnow()
+            session.add(
+                FindingHistory(
+                    id=uuid.uuid4(),
+                    organization_id=principal.organization_id,
+                    canonical_finding_id=finding.id,
+                    previous_status=previous_finding_status,
+                    new_status="reopened",
+                    reason=f"Linked {link.provider} ticket reopened remotely",
+                    occurred_at=now,
+                )
+            )
+            await audit_service.record(
+                session,
+                action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
+                principal=principal,
+                resource_type="canonical_finding",
+                resource_id=finding.id,
+                detail={
+                    "from": previous_finding_status,
+                    "to": "reopened",
+                    "reason": "linked_ticket_reopened",
+                    "ticket_id": str(link.id),
+                    "provider": link.provider,
+                },
+            )
+            asset = (
+                await session.execute(
+                    tenant_select(Asset, principal.organization_id).where(
+                        Asset.id == finding.asset_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if asset is not None:
+                await queue_finding_event(
+                    session,
+                    finding=finding,
+                    asset=asset,
+                    trigger="finding.updated",
+                    event_key_suffix=f":version:{finding.status_version}",
+                )
+    if closed_transition:
+        await notification_service.notify_ticket_closed(
+            session,
+            principal,
+            ticket_id=link.id,
+            closure_generation=link.closure_generation,
+            ticket_key=link.external_key,
+            ticket_url=link.url or "",
+            settings=settings,
+            redis=redis,
+        )
     return link
+
+
+async def refresh_due_ticket_statuses(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    redis: Redis | None = None,
+    limit: int = 100,
+) -> int:
+    """Refresh a rate-bounded batch of linked tickets across tenants.
+
+    Reusing :func:`refresh_ticket_status` preserves the existing terminal-ticket
+    transition behavior: a remote closure queues ``ticket.closed`` automation, which
+    can schedule the authorized evidence-based retest already supported by Cynux.  Closed
+    tickets remain in the rotation because external trackers can reopen them; otherwise a
+    later close would never begin a fresh remediation-verification cycle.
+    """
+    cutoff = utcnow() - dt.timedelta(seconds=_TICKET_STATUS_REFRESH_SECONDS)
+    candidates = list(
+        (
+            await session.execute(
+                select(TicketLink)
+                .where(
+                    TicketLink.updated_at < cutoff,
+                )
+                .order_by(TicketLink.updated_at.asc(), TicketLink.id.asc())
+                .limit(max(1, min(limit, 500)))
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+    )
+    refreshed = 0
+    for link in candidates:
+        try:
+            await refresh_ticket_status(
+                session,
+                Principal.for_system(organization_id=link.organization_id),
+                link.id,
+                settings=settings,
+                redis=redis,
+            )
+            refreshed += 1
+        except CynuxError as exc:
+            # An unconfigured provider must not block other tenants. Advance the local
+            # poll window to prevent the same failed link consuming every pulse.
+            link.updated_at = utcnow()
+            log.info(
+                "ticket.background_status_refresh_skipped",
+                ticket_id=str(link.id),
+                provider=link.provider,
+                error_code=exc.code,
+            )
+    return refreshed
 
 
 async def comment_on_ticket(
@@ -711,9 +984,30 @@ async def comment_on_ticket(
             f"Ticket link {ticket_id} not found in this organization.",
             context={"ticket_id": str(ticket_id)},
         )
+    if link.provider not in SUPPORTED_PROVIDERS:
+        # The provider-specific clients intentionally expose only operations they can
+        # perform correctly.  Never fall through to Jira credentials for another
+        # provider: that would either fail confusingly or target an unrelated issue.
+        raise InvalidConfigurationError(
+            "Ticket comments are not available for this provider yet.",
+            user_message="Adding a comment is not supported for this ticket provider.",
+        )
 
-    scoped = await resolve_settings(session, principal, IntegrationKind.JIRA, settings=settings)
-    client = JiraClient(scoped, redis)
+    scoped = await resolve_settings(
+        session, principal, IntegrationKind(link.provider), settings=settings
+    )
+    if link.provider == "jira":
+        client = JiraClient(scoped, redis)
+    elif link.provider == "github":
+        client = GitHubClient(scoped, redis)
+    elif link.provider == "gitlab":
+        client = GitLabClient(scoped, redis)
+    elif link.provider == "servicenow":
+        client = ServiceNowClient(scoped, redis)
+    elif link.provider == "azure_devops":
+        client = AzureDevOpsClient(scoped, redis)
+    else:
+        client = LinearClient(scoped, redis)
     try:
         await client.add_comment(link.external_key, text[:16_000])
     finally:
@@ -809,5 +1103,6 @@ __all__ = [
     "list_tickets",
     "policy_ticket_floor",
     "refresh_ticket_status",
+    "refresh_due_ticket_statuses",
     "ticket_candidates",
 ]

@@ -31,7 +31,7 @@ import uuid
 from typing import Any
 
 import structlog
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -42,14 +42,19 @@ from app.db.models.asset import Asset
 from app.db.models.canonical import (
     AssessmentCanonicalFinding,
     CanonicalFinding,
+    FindingHistory,
     FindingObservation,
 )
+from app.db.models.compliance import ComplianceControl, ComplianceFindingMapping
 from app.db.models.finding import Finding, Remediation
+from app.db.models.report import Report
 from app.db.models.scanner import ScannerJob
+from app.db.queries import pg_any
 from app.db.repository import tenant_select
 from app.services import enrichment as enrichment_service
 from app.services import finding as finding_service
 from app.services.approval import granted_approval
+from app.services.canonical_metrics import RESOLVED_STATUSES, remediation_timestamp
 
 log = structlog.get_logger(__name__)
 
@@ -280,6 +285,16 @@ async def build_report_context(
         native_blocks,
         linked,
     )
+    compliance = await _assessment_compliance_summary(
+        session,
+        organization_id=org_id,
+        canonical_finding_ids=[finding.id for finding, _, _, _ in linked],
+    )
+    operational_metrics = await _operational_metrics(
+        session,
+        assessment=assessment,
+        report_findings=report_findings,
+    )
     targets = await _targets(session, org_id, assessment.id)
     authorizations = await _authorizations(session, org_id, assessment.id)
 
@@ -305,12 +320,232 @@ async def build_report_context(
         "attack_paths": _attack_paths_block(assessment),
         "compound_risks": _compound_risks_block(assessment),
         "coverage_gaps": _coverage_gaps_block(assessment),
+        "compliance": compliance,
+        "operational_metrics": operational_metrics,
     }
 
 
 # ---------------------------------------------------------------------------
 # Section builders -- each returns plain, JSON-safe data
 # ---------------------------------------------------------------------------
+
+
+async def _assessment_compliance_summary(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    canonical_finding_ids: list[uuid.UUID],
+) -> dict[str, Any]:
+    """Summarize only controls evidenced by this assessment's canonical findings."""
+    if not canonical_finding_ids:
+        return {"mapped_controls": 0, "at_risk_controls": 0, "frameworks": []}
+    rows = (
+        await session.execute(
+            select(
+                ComplianceControl.framework,
+                ComplianceControl.control_id,
+                ComplianceControl.title,
+                CanonicalFinding.status,
+                CanonicalFinding.risk_score,
+            )
+            .join(
+                ComplianceFindingMapping,
+                ComplianceFindingMapping.control_id == ComplianceControl.id,
+            )
+            .join(
+                CanonicalFinding,
+                CanonicalFinding.id == ComplianceFindingMapping.canonical_finding_id,
+            )
+            .where(
+                ComplianceControl.organization_id == organization_id,
+                ComplianceFindingMapping.organization_id == organization_id,
+                CanonicalFinding.organization_id == organization_id,
+                ComplianceFindingMapping.canonical_finding_id.in_(canonical_finding_ids),
+            )
+        )
+    ).all()
+    controls: dict[tuple[str, str], dict[str, Any]] = {}
+    for framework, control_id, title, finding_status, risk_score in rows:
+        key = (framework, control_id)
+        control = controls.setdefault(
+            key,
+            {
+                "framework": framework,
+                "control_id": control_id,
+                "title": title,
+                "active_finding_count": 0,
+                "highest_risk_score": None,
+            },
+        )
+        if finding_status not in {"closed", "mitigated", "false_positive"}:
+            control["active_finding_count"] += 1
+            risk = float(risk_score)
+            previous = control["highest_risk_score"]
+            control["highest_risk_score"] = risk if previous is None else max(previous, risk)
+    by_framework: dict[str, list[dict[str, Any]]] = {}
+    for control in controls.values():
+        control["effective_status"] = (
+            "at_risk"
+            if (control["highest_risk_score"] or 0) >= 70
+            else "partially_satisfied"
+            if control["active_finding_count"]
+            else "satisfied"
+        )
+        by_framework.setdefault(control["framework"], []).append(control)
+    frameworks = [
+        {
+            "framework": framework,
+            "mapped_control_count": len(items),
+            "at_risk_control_count": sum(item["effective_status"] == "at_risk" for item in items),
+            "controls": sorted(items, key=lambda item: (item["control_id"], item["title"])),
+        }
+        for framework, items in sorted(by_framework.items())
+    ]
+    return {
+        "mapped_controls": len(controls),
+        "at_risk_controls": sum(
+            control["effective_status"] == "at_risk" for control in controls.values()
+        ),
+        "frameworks": frameworks,
+    }
+
+
+async def _operational_metrics(
+    session: AsyncSession,
+    *,
+    assessment: Assessment,
+    report_findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build board-ready remediation metrics scoped to the assessment's canonical set."""
+    organization_id = assessment.organization_id
+    finding_ids = list(
+        (
+            await session.scalars(
+                select(AssessmentCanonicalFinding.canonical_finding_id).where(
+                    AssessmentCanonicalFinding.organization_id == organization_id,
+                    AssessmentCanonicalFinding.assessment_id == assessment.id,
+                )
+            )
+        ).all()
+    )
+    scores = [
+        float(item["risk_score"])
+        for item in report_findings
+        if isinstance(item.get("risk_score"), int | float)
+    ]
+    exposure_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+    prior_report = (
+        await session.execute(
+            tenant_select(Report, organization_id)
+            .where(Report.assessment_id == assessment.id, Report.status == "ready")
+            .order_by(Report.generated_at.desc().nullslast(), Report.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    prior_metrics = (
+        (prior_report.content_digest or {}).get("operational_metrics", {})
+        if prior_report is not None
+        else {}
+    )
+    prior_exposure = prior_metrics.get("exposure_score")
+    prior_exposure_score = (
+        float(prior_exposure) if isinstance(prior_exposure, int | float) else None
+    )
+    baseline = assessment.started_at or assessment.created_at
+    if not finding_ids:
+        return {
+            "exposure_score": exposure_score,
+            "previous_exposure_score": prior_exposure_score,
+            "exposure_delta": (
+                round(exposure_score - prior_exposure_score, 2)
+                if prior_exposure_score is not None
+                else None
+            ),
+            "new_findings": 0,
+            "resolved_findings": 0,
+            "mean_time_to_remediate_days": None,
+            "sla": {"tracked": 0, "within_sla": 0, "overdue": 0, "compliance_percent": None},
+        }
+    histories = (
+        await session.execute(
+            select(
+                func.count(func.distinct(FindingHistory.canonical_finding_id)).filter(
+                    FindingHistory.previous_status.is_(None)
+                ),
+                func.count(func.distinct(FindingHistory.canonical_finding_id)).filter(
+                    FindingHistory.new_status.in_(RESOLVED_STATUSES),
+                    FindingHistory.previous_status.is_distinct_from(FindingHistory.new_status),
+                ),
+            ).where(
+                FindingHistory.organization_id == organization_id,
+                pg_any(FindingHistory.canonical_finding_id, finding_ids),
+                FindingHistory.occurred_at >= baseline,
+            )
+        )
+    ).one()
+    now = _now()
+    resolved_at = remediation_timestamp()
+    resolved = CanonicalFinding.status.in_(RESOLVED_STATUSES)
+    active = CanonicalFinding.status.in_(("new", "open", "reopened"))
+    sla = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(
+                    (active & (CanonicalFinding.due_at > now))
+                    | (resolved & (resolved_at <= CanonicalFinding.due_at))
+                ),
+                func.count().filter(
+                    (active & (CanonicalFinding.due_at <= now))
+                    | (resolved & (resolved_at > CanonicalFinding.due_at))
+                ),
+            ).where(
+                CanonicalFinding.organization_id == organization_id,
+                pg_any(CanonicalFinding.id, finding_ids),
+                CanonicalFinding.due_at.is_not(None),
+                CanonicalFinding.status.not_in(("false_positive", "accepted_risk")),
+            )
+        )
+    ).one()
+    remediation_seconds = await session.scalar(
+        select(
+            func.avg(
+                func.greatest(
+                    0, func.extract("epoch", resolved_at - CanonicalFinding.first_seen_at)
+                )
+            )
+        ).where(
+            CanonicalFinding.organization_id == organization_id,
+            pg_any(CanonicalFinding.id, finding_ids),
+            resolved,
+            resolved_at.is_not(None),
+            CanonicalFinding.first_seen_at.is_not(None),
+        )
+    )
+    tracked, within_sla, overdue = (int(value or 0) for value in sla)
+    mttr = (
+        round(max(0.0, float(remediation_seconds)) / 86_400.0, 2)
+        if remediation_seconds is not None
+        else None
+    )
+    return {
+        "exposure_score": exposure_score,
+        "previous_exposure_score": prior_exposure_score,
+        "exposure_delta": (
+            round(exposure_score - prior_exposure_score, 2)
+            if prior_exposure_score is not None
+            else None
+        ),
+        "new_findings": int(histories[0] or 0),
+        "resolved_findings": int(histories[1] or 0),
+        "mean_time_to_remediate_days": mttr,
+        "sla": {
+            "tracked": tracked,
+            "within_sla": within_sla,
+            "overdue": overdue,
+            "compliance_percent": round((within_sla / tracked) * 100, 2) if tracked else None,
+        },
+    }
 
 
 def _assessment_block(assessment: Assessment) -> dict[str, Any]:

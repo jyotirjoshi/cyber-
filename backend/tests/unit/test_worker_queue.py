@@ -361,11 +361,15 @@ async def test_failed_graph_run_updates_action_receipt_before_ack(monkeypatch) -
     async def receipt(self, current_context, current_run_id, outcome):
         events.append(("receipt", current_context.organization_id, current_run_id, outcome))
 
+    async def retest(self, current_context, current_run_id, outcome):
+        events.append(("retest", current_context.organization_id, current_run_id, outcome))
+
     async def ack(self, message_id):
         events.append(("ack", message_id))
 
     monkeypatch.setattr(AgentWorker, "_monitor", monitor)
     monkeypatch.setattr(AgentWorker, "_record_terminal_action_receipt", receipt, raising=False)
+    monkeypatch.setattr(AgentWorker, "_record_terminal_retest_outcome", retest, raising=False)
     monkeypatch.setattr(AgentWorker, "_ack", ack)
     worker = object.__new__(AgentWorker)
     worker._runner = Runner()
@@ -373,8 +377,47 @@ async def test_failed_graph_run_updates_action_receipt_before_ack(monkeypatch) -
     await worker._run("1-0", run_id, context, None)
     assert events == [
         ("receipt", tenant, run_id, "failed"),
+        ("retest", tenant, run_id, "failed"),
         ("ack", "1-0"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_completed_graph_run_finalizes_retest_before_ack(monkeypatch) -> None:
+    """The change that would break this is acknowledging a completed retest before recording evidence."""
+    from app.agent.runner import RunOutcome
+    from app.db.enums import AgentRunStatus
+    from app.worker.worker import AgentWorker, _RunContext
+
+    events = []
+    run_id, tenant = uuid.uuid4(), uuid.uuid4()
+    context = _RunContext(
+        run_status=AgentRunStatus.RUNNING, organization_id=tenant,
+        assessment_id=uuid.uuid4(), session_id=uuid.uuid4(),
+        heartbeat_at=None, assessment_status=None,
+    )
+
+    class Runner:
+        async def advance(self, current_run_id, *, principal):
+            return RunOutcome(run_id=current_run_id, status=AgentRunStatus.COMPLETED)
+
+    async def monitor(self, *args):
+        await args[-1].stop.wait()
+
+    async def retest(self, current_context, current_run_id):
+        events.append(("retest", current_context.organization_id, current_run_id))
+
+    async def ack(self, message_id):
+        events.append(("ack", message_id))
+
+    monkeypatch.setattr(AgentWorker, "_monitor", monitor)
+    monkeypatch.setattr(AgentWorker, "_record_completed_retest", retest, raising=False)
+    monkeypatch.setattr(AgentWorker, "_ack", ack)
+    worker = object.__new__(AgentWorker)
+    worker._runner = Runner()
+    worker._stopping = False
+    await worker._run("1-0", run_id, context, None)
+    assert events == [("retest", tenant, run_id), ("ack", "1-0")]
 
 
 @pytest.mark.asyncio
@@ -1373,6 +1416,10 @@ def test_assessment_creation_stages_run_dispatch_in_same_unit_of_work() -> None:
     assert dispatch.id == dispatch_id
     assert dispatch.organization_id == org_id
     assert dispatch.run_id == run_id
+    # The object relationship is load-bearing for a brand-new run: without it,
+    # SQLAlchemy may flush the dispatch before the parent AgentRun and PostgreSQL
+    # rejects the transaction on fk_run_dispatches_run_id_agent_runs.
+    assert dispatch.run is run
     assert dispatch.status == "pending"
 
 

@@ -49,9 +49,14 @@ from app.core.errors import (
 from app.core.security import hash_password
 from app.db.base import utcnow
 from app.db.enums import Permission, Role
+from app.db.models.asset import Asset
+from app.db.models.canonical import CanonicalFinding
 from app.db.models.identity import Membership, Organization, User
 from app.schemas.common import PaginationParams
 from app.schemas.organization import (
+    ClientOrganizationCreateIn,
+    ClientOrganizationDelegateIn,
+    ClientOrganizationPortfolioOut,
     MemberInviteIn,
     MembershipOut,
     OrganizationUpdateIn,
@@ -136,6 +141,7 @@ async def create_organization(
     owner: User,
     slug: str | None = None,
     principal: Principal | None = None,
+    parent_organization_id: uuid.UUID | None = None,
 ) -> tuple[Organization, Membership]:
     """Create an organization and its first owner membership.
 
@@ -166,6 +172,7 @@ async def create_organization(
         slug=await allocate_slug(session, candidate),
         policy={},
         entitlements=DEFAULT_ENTITLEMENTS.model_dump(),
+        parent_organization_id=parent_organization_id,
         is_active=True,
     )
     session.add(organization)
@@ -215,6 +222,180 @@ async def create_organization(
         owner_id=str(owner.id),
     )
     return organization, membership
+
+
+async def create_client_organization(
+    session: AsyncSession,
+    principal: Principal,
+    payload: ClientOrganizationCreateIn,
+) -> Organization:
+    """Create an isolated customer tenant below an MSSP tenant.
+
+    The creator becomes the client tenant's owner.  That is intentional: existing
+    organization switching continues to be the sole way a user enters a tenant, and
+    prevents a parent token from reading a customer tenant without an explicit
+    membership.
+    """
+    principal.require(Permission.ORG_MANAGE)
+    parent = await get_organization(session, principal)
+    client, _membership = await create_organization(
+        session,
+        name=payload.name,
+        slug=payload.slug,
+        owner=await _user_for_principal(session, principal),
+        principal=principal,
+        parent_organization_id=parent.id,
+    )
+    await audit.record(
+        session,
+        action=AuditAction.MSSP_CLIENT_CREATE,
+        principal=principal,
+        resource_type="organization",
+        resource_id=client.id,
+        detail={"client_organization_id": str(client.id), "client_slug": client.slug},
+    )
+    return client
+
+
+async def list_client_portfolio(
+    session: AsyncSession,
+    principal: Principal,
+) -> list[ClientOrganizationPortfolioOut]:
+    """Return direct client tenants and aggregate counters, never their raw records."""
+    principal.require(Permission.ORG_MANAGE)
+    clients = list(
+        (
+            await session.scalars(
+                select(Organization)
+                .where(Organization.parent_organization_id == principal.organization_id)
+                .order_by(Organization.name.asc(), Organization.id.asc())
+            )
+        ).all()
+    )
+    if not clients:
+        return []
+
+    client_ids = [client.id for client in clients]
+    asset_counts = dict(
+        (
+            await session.execute(
+                select(Asset.organization_id, func.count(Asset.id))
+                .where(Asset.organization_id.in_(client_ids))
+                .group_by(Asset.organization_id)
+            )
+        ).all()
+    )
+    open_statuses = ("new", "open", "reopened")
+    finding_rows = (
+        await session.execute(
+            select(
+                CanonicalFinding.organization_id,
+                func.count(CanonicalFinding.id),
+                func.count(CanonicalFinding.id).filter(CanonicalFinding.severity == "critical"),
+                func.coalesce(func.sum(CanonicalFinding.risk_score), 0.0),
+            )
+            .where(
+                CanonicalFinding.organization_id.in_(client_ids),
+                CanonicalFinding.status.in_(open_statuses),
+            )
+            .group_by(CanonicalFinding.organization_id)
+        )
+    ).all()
+    finding_counts = {row[0]: row[1:] for row in finding_rows}
+    return [
+        ClientOrganizationPortfolioOut(
+            organization=client,
+            asset_count=int(asset_counts.get(client.id, 0)),
+            open_finding_count=int(finding_counts.get(client.id, (0, 0, 0.0))[0]),
+            critical_open_finding_count=int(finding_counts.get(client.id, (0, 0, 0.0))[1]),
+            open_risk_score=float(finding_counts.get(client.id, (0, 0, 0.0))[2]),
+        )
+        for client in clients
+    ]
+
+
+async def delegate_client_access(
+    session: AsyncSession,
+    principal: Principal,
+    client_organization_id: uuid.UUID,
+    payload: ClientOrganizationDelegateIn,
+) -> tuple[Membership, User]:
+    """Grant a parent-team member a least-privilege role in one direct client tenant.
+
+    A delegate must already belong to the parent organization.  This gives an MSSP a
+    practical staffing model while preventing a parent administrator from using an
+    arbitrary global account id as an invisible cross-tenant grant mechanism.
+    """
+    principal.require(Permission.ORG_MANAGE)
+    client = (
+        await session.execute(
+            select(Organization).where(
+                Organization.id == client_organization_id,
+                Organization.parent_organization_id == principal.organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if client is None:
+        raise ResourceNotFoundError(
+            "client organization not found",
+            user_message="That client organization is not in your managed portfolio.",
+            context={"client_organization_id": str(client_organization_id)},
+        )
+    parent_membership = (
+        await session.execute(
+            select(Membership).where(
+                Membership.organization_id == principal.organization_id,
+                Membership.user_id == payload.user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if parent_membership is None:
+        raise ResourceNotFoundError(
+            "parent team member not found",
+            user_message="Choose an active member of this organization to delegate.",
+            context={"user_id": str(payload.user_id)},
+        )
+    user = await session.get(User, payload.user_id)
+    if user is None or not user.is_active:
+        raise ConflictError(
+            "delegate user inactive",
+            user_message="That team member is not active.",
+            context={"user_id": str(payload.user_id)},
+        )
+    membership = (
+        await session.execute(
+            select(Membership).where(
+                Membership.organization_id == client.id,
+                Membership.user_id == payload.user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        membership = Membership(
+            organization_id=client.id,
+            user_id=user.id,
+            role=payload.role.value,
+            is_default=False,
+            invited_by_id=principal.user_id,
+            accepted_at=utcnow(),
+        )
+        session.add(membership)
+    else:
+        membership.role = payload.role.value
+    await session.flush()
+    await audit.record(
+        session,
+        action=AuditAction.MEMBER_ROLE_CHANGE,
+        principal=principal,
+        resource_type="membership",
+        resource_id=membership.id,
+        detail={
+            "client_organization_id": str(client.id),
+            "target_user_id": str(user.id),
+            "delegated_role": payload.role.value,
+        },
+    )
+    return membership, user
 
 
 async def get_organization(session: AsyncSession, principal: Principal) -> Organization:
@@ -713,14 +894,28 @@ async def _has_any_membership(session: AsyncSession, user_id: uuid.UUID) -> bool
     return int((await session.execute(stmt)).scalar_one()) > 0
 
 
+async def _user_for_principal(session: AsyncSession, principal: Principal) -> User:
+    """Load the actor behind a membership-backed principal for tenant creation."""
+    user = await session.get(User, principal.user_id)
+    if user is None:
+        raise TenantIsolationError(
+            "principal user not found",
+            context={"user_id": str(principal.user_id)},
+        )
+    return user
+
+
 __all__ = [
     "allocate_slug",
     "change_member_role",
+    "create_client_organization",
     "create_organization",
     "default_membership",
+    "delegate_client_access",
     "get_organization",
     "invite_member",
     "list_members",
+    "list_client_portfolio",
     "load_policy",
     "membership_out",
     "memberships_for_user",

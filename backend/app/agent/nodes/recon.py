@@ -81,7 +81,13 @@ from app.services import asset_change as asset_change_service
 from app.services import audit as audit_service
 from app.services.assessment import record_degradation, transition
 from app.services.asset import upsert_assets
-from app.services.job import claim_slot, enqueue_job, organization_scanner_limit, release_slot
+from app.services.job import (
+    claim_slot,
+    enqueue_job,
+    finalize_cancelled_job,
+    organization_scanner_limit,
+    release_slot,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -421,6 +427,19 @@ async def _execute_recon(
         # A refused invocation (>50 targets), an unreachable daemon, a crash or a timeout are
         # all this class. None of them fail the assessment -- they degrade it.
         fatal = exc
+    except asyncio.CancelledError:
+        # Match the active scanner lifecycle: an operator cancellation gets a durable terminal
+        # job row immediately, while a process shutdown remains reclaimable by the worker.
+        if await _cancel_requested(settings, job_id):
+            await asyncio.shield(
+                finalize_cancelled_job(
+                    settings,
+                    job_id=job_id,
+                    organization_id=org_id,
+                )
+            )
+            await asyncio.shield(asyncio.to_thread(purge_workdir, workdir))
+        raise
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

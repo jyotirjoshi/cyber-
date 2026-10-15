@@ -404,6 +404,93 @@ class JiraSettings(BaseSettings):
         return bool(self.base_url and self.user_email and self.api_token and self.project_key)
 
 
+class ServiceNowSettings(BaseSettings):
+    """OAuth-backed ServiceNow incident destination for a single tenant."""
+
+    model_config = _cfg("CYNUX_SERVICENOW__")
+
+    base_url: str | None = None
+    api_token: SecretStr | None = None
+    table: str = "incident"
+    assignment_group: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_token)
+
+
+class AzureDevOpsSettings(BaseSettings):
+    """PAT-backed Azure DevOps work-item destination for a single tenant."""
+
+    model_config = _cfg("CYNUX_AZURE_DEVOPS__")
+
+    base_url: str = "https://dev.azure.com"
+    api_token: SecretStr | None = None
+    organization: str | None = None
+    project: str | None = None
+    work_item_type: str = "Issue"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token and self.organization and self.project)
+
+
+class LinearSettings(BaseSettings):
+    model_config = _cfg("CYNUX_LINEAR__")
+    base_url: str = "https://api.linear.app/graphql"
+    api_token: SecretStr | None = None
+    team_id: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_token and self.team_id)
+
+
+class PagerDutySettings(BaseSettings):
+    """Events API v2 routing key for a single organization's escalation service."""
+
+    model_config = _cfg("CYNUX_PAGERDUTY__")
+
+    base_url: str = "https://events.pagerduty.com"
+    routing_key: SecretStr | None = None
+    source: str = "Cynux"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.routing_key)
+
+
+class SplunkSettings(BaseSettings):
+    """Tenant or deployment defaults for Splunk HTTP Event Collector export."""
+
+    model_config = _cfg("CYNUX_SPLUNK__")
+
+    base_url: str = "https://localhost:8088"
+    hec_token: SecretStr | None = None
+    index: str | None = None
+    source: str = "cynux"
+    sourcetype: str = "cynux:notification"
+    host: str = "cynux"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.hec_token)
+
+
+class BurpDastSettings(BaseSettings):
+    """Read-only Burp Suite DAST GraphQL access scoped to selected sites."""
+
+    model_config = _cfg("CYNUX_BURP_DAST__")
+
+    base_url: str = "https://localhost:8072"
+    api_key: SecretStr | None = None
+    site_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_key and self.site_ids)
+
+
 class WazuhSettings(BaseSettings):
     """Read-only access to a Wazuh manager API.
 
@@ -443,6 +530,7 @@ class GitHubSettings(BaseSettings):
     base_url: str = "https://api.github.com"
     api_token: SecretStr | None = None
     organization: str | None = None
+    repository: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -457,6 +545,7 @@ class GitLabSettings(BaseSettings):
     base_url: str = "https://gitlab.com/api/v4"
     api_token: SecretStr | None = None
     project_ids: StrList = Field(default_factory=list)
+    issue_project: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -504,6 +593,67 @@ class SnykSettings(BaseSettings):
         return bool(self.api_token and self.organization_id)
 
 
+class HackerOneSettings(BaseSettings):
+    """Read-only HackerOne customer report ingestion for selected programs."""
+
+    model_config = _cfg("CYNUX_HACKERONE__")
+
+    base_url: str = "https://api.hackerone.com"
+    api_username: SecretStr | None = None
+    api_token: SecretStr | None = None
+    program_handles: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_username and self.api_token and self.program_handles)
+
+
+class BugcrowdSettings(BaseSettings):
+    """Read-only Bugcrowd submissions ingestion for selected engagements."""
+
+    model_config = _cfg("CYNUX_BUGCROWD__")
+
+    base_url: str = "https://api.bugcrowd.com"
+    token_username: SecretStr | None = None
+    token_password: SecretStr | None = None
+    engagement_codes: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.token_username and self.token_password and self.engagement_codes)
+
+
+class CheckmarxSettings(BaseSettings):
+    """Read-only Checkmarx One results for explicitly mapped projects."""
+
+    model_config = _cfg("CYNUX_CHECKMARX__")
+
+    base_url: str = "https://ast.checkmarx.net"
+    auth_url: str = "https://iam.checkmarx.net"
+    tenant: str | None = None
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+    projects: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.tenant and self.client_id and self.client_secret and self.projects)
+
+
+class FortifySettings(BaseSettings):
+    """Read-only Fortify SSC issues for explicitly mapped application versions."""
+
+    model_config = _cfg("CYNUX_FORTIFY__")
+
+    base_url: str | None = None
+    automation_token: SecretStr | None = None
+    application_versions: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.automation_token and self.application_versions)
+
+
 class TenableSettings(BaseSettings):
     """Read-only Tenable VM scan ingestion."""
 
@@ -517,6 +667,145 @@ class TenableSettings(BaseSettings):
     @property
     def configured(self) -> bool:
         return bool(self.access_key and self.secret_key and self.scan_ids)
+
+
+class QualysSettings(BaseSettings):
+    """Read-only Qualys VM host-detection ingestion for one explicitly selected IP."""
+
+    model_config = _cfg("CYNUX_QUALYS__")
+
+    base_url: str = "https://qualysapi.qualys.com"
+    username: SecretStr | None = None
+    password: SecretStr | None = None
+    asset_ip: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.username and self.password and self.asset_ip)
+
+
+class Rapid7Settings(BaseSettings):
+    """Read-only InsightVM Console API ingestion for explicitly selected assets."""
+
+    model_config = _cfg("CYNUX_RAPID7__")
+
+    base_url: str | None = None
+    username: SecretStr | None = None
+    password: SecretStr | None = None
+    asset_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.username and self.password and self.asset_ids)
+
+
+class WizSettings(BaseSettings):
+    """Read-only Wiz Issues ingestion with a tenant-scoped service account."""
+
+    model_config = _cfg("CYNUX_WIZ__")
+
+    region: str | None = None
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+    project_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.region and self.client_id and self.client_secret and self.project_ids)
+
+
+class PrismaCloudSettings(BaseSettings):
+    """Read-only Prisma Cloud CSPM ingestion for selected cloud accounts."""
+
+    model_config = _cfg("CYNUX_PRISMA_CLOUD__")
+
+    base_url: str = "https://api.prismacloud.io"
+    access_key_id: SecretStr | None = None
+    secret_key: SecretStr | None = None
+    cloud_account_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.access_key_id and self.secret_key and self.cloud_account_ids)
+
+
+class CrowdStrikeSettings(BaseSettings):
+    """Read-only Falcon Spotlight vulnerability ingestion."""
+
+    model_config = _cfg("CYNUX_CROWDSTRIKE__")
+
+    base_url: str = "https://api.crowdstrike.com"
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self.client_secret)
+
+
+class AwsSecurityHubSettings(BaseSettings):
+    """Read-only AWS Security Hub ASFF ingestion for selected accounts."""
+
+    model_config = _cfg("CYNUX_AWS_SECURITY_HUB__")
+
+    region: str | None = None
+    access_key_id: SecretStr | None = None
+    secret_access_key: SecretStr | None = None
+    session_token: SecretStr | None = None
+    account_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.region and self.access_key_id and self.secret_access_key and self.account_ids
+        )
+
+
+class AwsInspectorSettings(BaseSettings):
+    """Read-only Inspector2 ingestion for selected AWS accounts."""
+
+    model_config = _cfg("CYNUX_AWS_INSPECTOR__")
+
+    region: str | None = None
+    access_key_id: SecretStr | None = None
+    secret_access_key: SecretStr | None = None
+    session_token: SecretStr | None = None
+    account_ids: StrList = Field(default_factory=list)
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.region and self.access_key_id and self.secret_access_key and self.account_ids
+        )
+
+
+class AzureDefenderSettings(BaseSettings):
+    """Read-only Microsoft Defender for Cloud alert ingestion."""
+
+    model_config = _cfg("CYNUX_AZURE_DEFENDER__")
+
+    tenant_id: SecretStr | None = None
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+    subscription_id: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.tenant_id and self.client_id and self.client_secret and self.subscription_id)
+
+
+class GcpSccSettings(BaseSettings):
+    """Read-only Google Security Command Center project ingestion."""
+
+    model_config = _cfg("CYNUX_GCP_SCC__")
+
+    project_id: str | None = None
+    location: str = "global"
+    service_account_json: SecretStr | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.project_id and self.location and self.service_account_json)
 
 
 class NotificationSettings(BaseSettings):
@@ -588,6 +877,11 @@ class AgentSettings(BaseSettings):
     model_config = _cfg("CYNUX_AGENT__")
 
     max_concurrent_runs_per_org: int = Field(default=1, ge=1, le=32)
+    #: Hard budgets for the post-evidence adaptive specialist loop.  These are
+    #: deterministic server policy; a model cannot raise them in its response.
+    adaptive_max_rounds: int = Field(default=3, ge=0, le=12)
+    adaptive_max_actions_per_round: int = Field(default=3, ge=1, le=12)
+    adaptive_max_elapsed_seconds: int = Field(default=7_200, ge=60, le=28_800)
 
     #: FR-010: how many assets the agent may recommend for deep scanning by default.
     default_scope_budget: int = 50
@@ -670,13 +964,32 @@ class Settings(BaseSettings):
     dify: DifySettings = Field(default_factory=DifySettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     jira: JiraSettings = Field(default_factory=JiraSettings)
+    servicenow: ServiceNowSettings = Field(default_factory=ServiceNowSettings)
+    azure_devops: AzureDevOpsSettings = Field(default_factory=AzureDevOpsSettings)
+    linear: LinearSettings = Field(default_factory=LinearSettings)
+    pagerduty: PagerDutySettings = Field(default_factory=PagerDutySettings)
+    splunk: SplunkSettings = Field(default_factory=SplunkSettings)
+    burp_dast: BurpDastSettings = Field(default_factory=BurpDastSettings)
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     gitlab: GitLabSettings = Field(default_factory=GitLabSettings)
     bitbucket: BitbucketSettings = Field(default_factory=BitbucketSettings)
     sonarqube: SonarQubeSettings = Field(default_factory=SonarQubeSettings)
     snyk: SnykSettings = Field(default_factory=SnykSettings)
+    hackerone: HackerOneSettings = Field(default_factory=HackerOneSettings)
+    bugcrowd: BugcrowdSettings = Field(default_factory=BugcrowdSettings)
+    checkmarx: CheckmarxSettings = Field(default_factory=CheckmarxSettings)
+    fortify: FortifySettings = Field(default_factory=FortifySettings)
     tenable: TenableSettings = Field(default_factory=TenableSettings)
+    qualys: QualysSettings = Field(default_factory=QualysSettings)
+    rapid7: Rapid7Settings = Field(default_factory=Rapid7Settings)
+    wiz: WizSettings = Field(default_factory=WizSettings)
+    prisma_cloud: PrismaCloudSettings = Field(default_factory=PrismaCloudSettings)
+    crowdstrike: CrowdStrikeSettings = Field(default_factory=CrowdStrikeSettings)
+    aws_security_hub: AwsSecurityHubSettings = Field(default_factory=AwsSecurityHubSettings)
+    aws_inspector: AwsInspectorSettings = Field(default_factory=AwsInspectorSettings)
+    azure_defender: AzureDefenderSettings = Field(default_factory=AzureDefenderSettings)
+    gcp_scc: GcpSccSettings = Field(default_factory=GcpSccSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
@@ -847,7 +1160,9 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
 __all__ = [
     "REQUIRED_LLM_ROLES",
     "AgentSettings",
+    "AzureDevOpsSettings",
     "BitbucketSettings",
+    "BurpDastSettings",
     "DatabaseSettings",
     "DefectDojoSettings",
     "DifySettings",
@@ -855,6 +1170,7 @@ __all__ = [
     "FeatureSettings",
     "IntelSettings",
     "JiraSettings",
+    "LinearSettings",
     "LLMProvider",
     "LLMRole",
     "LLMSettings",
@@ -865,10 +1181,13 @@ __all__ = [
     "RedisSettings",
     "ScannerSettings",
     "SecuritySettings",
+    "ServiceNowSettings",
     "Settings",
     "SonarQubeSettings",
     "SnykSettings",
+    "SplunkSettings",
     "TenableSettings",
+    "WizSettings",
     "StorageSettings",
     "TargetPolicySettings",
     "get_settings",

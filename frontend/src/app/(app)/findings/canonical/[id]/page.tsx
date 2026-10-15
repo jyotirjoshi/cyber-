@@ -8,7 +8,7 @@ import { SeverityBadge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Field, Select, Textarea } from "@/components/ui/Input";
+import { Field, Input, Select, Textarea } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, LoadingState } from "@/components/ui/States";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
@@ -22,6 +22,23 @@ import { parseCustomFields } from "@/lib/custom-fields";
 import { formatDateTime, humanize } from "@/lib/format";
 import { safeExternalUrl } from "@/lib/safe-external-url";
 
+const TICKET_PROVIDERS = ["jira", "github", "gitlab", "servicenow", "azure_devops", "linear"] as const;
+
+function priorityReasons(factors: { inputs?: Record<string, unknown> }, riskScore: number): string[] {
+  const inputs = factors.inputs ?? {};
+  const reasons: string[] = [];
+  if (riskScore >= 80) reasons.push(`Composite exposure score is ${riskScore.toFixed(1)} out of 100.`);
+  if (inputs.in_kev === true) reasons.push("CISA KEV identifies this as known exploited.");
+  else if (inputs.observed_in_the_wild === true) reasons.push("Exploitation has been observed in the wild.");
+  else if (inputs.exploit_available === true) reasons.push("Public exploit evidence is available.");
+  if (inputs.ransomware_use === true) reasons.push("Threat intelligence associates this issue with ransomware activity.");
+  if (inputs.internet_exposed === true) reasons.push("The affected asset is internet exposed.");
+  if (inputs.asset_criticality === "critical" || inputs.asset_criticality === "high") reasons.push("The affected asset has high business criticality.");
+  const epss = inputs.epss_score;
+  if (typeof epss === "number" && Number.isFinite(epss) && epss >= 0.5) reasons.push(`EPSS estimates a ${Math.round(epss * 100)}% exploitation probability.`);
+  return reasons.slice(0, 4);
+}
+
 export default function CanonicalFindingPage() {
   const params = useParams();
   const rawId = params.id;
@@ -32,12 +49,21 @@ export default function CanonicalFindingPage() {
   const canDecide = can("finding:validate");
   const canRemediate = can("finding:remediate");
   const canTicket = can("ticket:create");
-  const [decision, setDecision] = React.useState<"open" | "accepted_risk" | "false_positive" | "">("");
+  const [decision, setDecision] = React.useState<"open" | "false_positive" | "">("");
   const [reason, setReason] = React.useState("");
   const [assignee, setAssignee] = React.useState("");
   const [dueLocal, setDueLocal] = React.useState("");
   const [plan, setPlan] = React.useState("");
+  const [remediationGroup, setRemediationGroup] = React.useState("");
   const [customFieldsText, setCustomFieldsText] = React.useState("{}");
+  const [commentBody, setCommentBody] = React.useState("");
+  const [commentKind, setCommentKind] = React.useState<"note" | "evidence" | "remediation" | "retest" | "status_update">("note");
+  const [evidenceReference, setEvidenceReference] = React.useState("");
+  const [visibleToClient, setVisibleToClient] = React.useState(false);
+  const [ticketProvider, setTicketProvider] = React.useState<(typeof TICKET_PROVIDERS)[number]>("jira");
+  const [exceptionRationale, setExceptionRationale] = React.useState("");
+  const [exceptionExpiry, setExceptionExpiry] = React.useState("");
+  const [retestNote, setRetestNote] = React.useState("");
   const { data, error, loading, refetch } = useApiResource(
     () => api.canonicalFindings.get(id), [id], { enabled: canRead && !!id },
   );
@@ -45,15 +71,19 @@ export default function CanonicalFindingPage() {
     () => api.organization.members({ limit: 100 }), [canRemediate],
     { enabled: canRemediate },
   );
+  const comments = useApiResource(
+    () => api.canonicalFindings.comments(id), [id], { enabled: canRead && !!id },
+  );
   React.useEffect(() => {
     if (!data) return;
     setAssignee(data.assignee_user_id ?? "");
     setDueLocal(toLocalDateTimeInput(data.due_at));
     setPlan(data.remediation_plan ?? "");
+    setRemediationGroup(data.remediation_group ?? "");
     setCustomFieldsText(JSON.stringify(data.custom_fields ?? {}, null, 2));
   }, [data]);
   const mutation = useMutation(
-    (status: "open" | "accepted_risk" | "false_positive", rationale: string, version: number) =>
+    (status: "open" | "false_positive", rationale: string, version: number) =>
       api.canonicalFindings.decide(id, { status, reason: rationale, expected_version: version }),
     { onSuccess: () => { setDecision(""); setReason(""); refetch(); toast({ title: "Finding decision saved", tone: "ok" }); } },
   );
@@ -63,11 +93,15 @@ export default function CanonicalFindingPage() {
     { onSuccess: () => { refetch(); toast({ title: "Remediation work saved", tone: "ok" }); } },
   );
   const ticketMutation = useMutation(
-    () => api.canonicalFindings.createTicket(id),
+    (provider: (typeof TICKET_PROVIDERS)[number]) => api.canonicalFindings.createTicket(id, { provider }),
     { onSuccess: (ticket) => {
       refetch();
-      toast({ title: "Jira ticket linked", description: ticket.external_key, tone: "ok" });
+      toast({ title: `${humanize(ticket.provider)} ticket linked`, description: ticket.external_key, tone: "ok" });
     } },
+  );
+  const refreshTicketMutation = useMutation(
+    (ticketId: string) => api.findings.refreshTicket(ticketId),
+    { onSuccess: (ticket) => { void refetch(); toast({ title: `${humanize(ticket.provider)} ticket refreshed`, description: ticket.external_status ?? "Status unavailable", tone: "ok" }); } },
   );
   const customFieldsMutation = useMutation(
     () => api.canonicalFindings.updateWork(id, {
@@ -76,19 +110,54 @@ export default function CanonicalFindingPage() {
     }),
     { onSuccess: () => { refetch(); toast({ title: "Finding custom fields saved", tone: "ok" }); } },
   );
+  const commentMutation = useMutation(
+    () => api.canonicalFindings.addComment(id, {
+      body: commentBody,
+      kind: commentKind,
+      evidence_reference: evidenceReference.trim() || null,
+      visible_to_client: visibleToClient,
+    }),
+    { onSuccess: () => {
+      setCommentBody("");
+      setEvidenceReference("");
+      setCommentKind("note");
+      setVisibleToClient(false);
+      void comments.refetch();
+      toast({ title: "Collaboration update added", tone: "ok" });
+    } },
+  );
+  const riskAcceptanceMutation = useMutation(
+    () => api.canonicalFindings.requestRiskAcceptance(id, {
+      rationale: exceptionRationale.trim(),
+      expires_at: new Date(exceptionExpiry).toISOString(),
+    }),
+    { onSuccess: () => {
+      setExceptionRationale("");
+      setExceptionExpiry("");
+      toast({ title: "Risk acceptance submitted for independent approval", tone: "ok" });
+    } },
+  );
+  const retestMutation = useMutation(
+    () => api.canonicalFindings.requestRetest(id, { note: retestNote.trim() || null }),
+    { onSuccess: () => {
+      setRetestNote("");
+      toast({ title: "Evidence-based retest requested", tone: "ok" });
+    } },
+  );
   if (!canRead) return <EmptyState title="No access" description="You don't have permission to view this." />;
   if (loading && !data) return <LoadingState label="Loading canonical finding…" />;
   if (error && !data) return <ErrorState message={error} onRetry={refetch} />;
   if (!data) return <EmptyState title="Finding not found" description="This finding may have been removed." />;
 
   const allowed = data.status === "new" || data.status === "reopened"
-    ? (["open", "accepted_risk", "false_positive"] as const)
+    ? (["open", "false_positive"] as const)
     : data.status === "open"
-      ? (["accepted_risk", "false_positive"] as const)
+      ? (["false_positive"] as const)
       : data.status === "accepted_risk" || data.status === "false_positive"
         ? (["open"] as const)
         : ([] as const);
-  const workUpdate = buildCanonicalWorkUpdate(data, { assignee, dueLocal, plan });
+  const workUpdate = buildCanonicalWorkUpdate(data, { assignee, dueLocal, plan, remediationGroup });
+  const riskReasons = priorityReasons(data.risk_factors, data.risk_score);
   const activeMembers = (members.data?.items ?? []).filter((member) => member.is_active && member.accepted_at);
   const selectedMember = activeMembers.find((member) => member.user_id === data.assignee_user_id);
 
@@ -113,6 +182,7 @@ export default function CanonicalFindingPage() {
             <dl className="grid gap-3 sm:grid-cols-2">
               <div><dt className="text-muted">Assignee</dt><dd>{selectedMember?.email ?? data.assignee_user_id ?? "Unassigned"}</dd></div>
               <div><dt className="text-muted">Due</dt><dd>{data.due_at ? formatDateTime(data.due_at) : "Not set"}</dd></div>
+              <div><dt className="text-muted">Remediation group</dt><dd>{data.remediation_group || "Not grouped"}</dd></div>
               <div className="sm:col-span-2"><dt className="text-muted">Plan</dt><dd className="whitespace-pre-wrap">{data.remediation_plan || "No plan recorded"}</dd></div>
             </dl>
           ) : (
@@ -135,6 +205,9 @@ export default function CanonicalFindingPage() {
               <Field label="Remediation plan" htmlFor="canonical-plan">
                 <Textarea id="canonical-plan" value={plan} maxLength={4000} onChange={(event) => setPlan(event.target.value)} placeholder="Describe the change, owner action, and evidence expected after the fix." />
               </Field>
+              <Field label="Remediation group" htmlFor="canonical-remediation-group" hint="Use the same name for findings resolved by one patch, configuration change, or dependency upgrade.">
+                <Input id="canonical-remediation-group" value={remediationGroup} maxLength={160} onChange={(event) => setRemediationGroup(event.target.value)} placeholder="Example: upgrade log4j to 2.17.1" />
+              </Field>
               {members.error && <p className="text-muted">Member list unavailable: {members.error}</p>}
               {workMutation.errorMessage && <p role="alert" className="text-sm text-danger">{workMutation.errorMessage}</p>}
               <Button type="submit" disabled={!workUpdate} loading={workMutation.loading}>Save remediation work</Button>
@@ -151,15 +224,91 @@ export default function CanonicalFindingPage() {
               return <li key={ticket.id} className="rounded-lg border border-line p-3">
                 {url ? <a href={url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{ticket.external_key} ↗</a> : ticket.external_key}
                 <span className="ml-2 text-muted">{humanize(ticket.external_status || "linked")}</span>
+                <div className="mt-2"><Button size="sm" variant="outline" loading={refreshTicketMutation.loading} onClick={() => void refreshTicketMutation.run(ticket.id)}>Refresh tracker status</Button></div>
               </li>;
             })}</ul>
           )}
-          {canCreateCanonicalTicket(data.status, data.tickets, canTicket) && (
-            <Button loading={ticketMutation.loading} onClick={() => void ticketMutation.run()}>
-              Create Jira ticket
-            </Button>
-          )}
+          {canTicket && !["closed", "false_positive", "accepted_risk"].includes(data.status) && <div className="flex flex-wrap items-center gap-2"><Select aria-label="Ticket provider" value={ticketProvider} onChange={(event) => setTicketProvider(event.target.value as (typeof TICKET_PROVIDERS)[number])}>{TICKET_PROVIDERS.map((provider) => <option key={provider} value={provider}>{humanize(provider)}</option>)}</Select><Button loading={ticketMutation.loading} disabled={!canCreateCanonicalTicket(data.status, data.tickets, canTicket, ticketProvider)} onClick={() => void ticketMutation.run(ticketProvider)}>{canCreateCanonicalTicket(data.status, data.tickets, canTicket, ticketProvider) ? `Create ${humanize(ticketProvider)} ticket` : `${humanize(ticketProvider)} ticket already linked`}</Button></div>}
           {ticketMutation.errorMessage && <p role="alert" className="text-danger">{ticketMutation.errorMessage}</p>}
+        </CardBody>
+      </Card>
+      {(canRemediate || canDecide) && !["closed", "false_positive"].includes(data.status) && (
+        <Card>
+          <CardHeader><CardTitle>Exception and verification</CardTitle></CardHeader>
+          <CardBody className="grid gap-6 lg:grid-cols-2">
+            {canRemediate && (
+              <form className="space-y-3" onSubmit={(event) => {
+                event.preventDefault();
+                if (exceptionRationale.trim() && exceptionExpiry) void riskAcceptanceMutation.run();
+              }}>
+                <div><h4 className="font-medium text-fg">Request time-bound risk acceptance</h4><p className="mt-1 text-sm text-muted">A separate authorized reviewer must approve it before the exception becomes active.</p></div>
+                <Field label="Business rationale" htmlFor="exception-rationale"><Textarea id="exception-rationale" value={exceptionRationale} maxLength={2000} onChange={(event) => setExceptionRationale(event.target.value)} placeholder="Explain the business reason, compensating controls, and planned review." /></Field>
+                <Field label="Exception expiry" htmlFor="exception-expiry"><Input id="exception-expiry" type="datetime-local" value={exceptionExpiry} onChange={(event) => setExceptionExpiry(event.target.value)} /></Field>
+                {riskAcceptanceMutation.errorMessage && <p role="alert" className="text-sm text-danger">{riskAcceptanceMutation.errorMessage}</p>}
+                <Button type="submit" loading={riskAcceptanceMutation.loading} disabled={!exceptionRationale.trim() || !exceptionExpiry}>Request approval</Button>
+              </form>
+            )}
+            {canDecide && (
+              <form className="space-y-3" onSubmit={(event) => {
+                event.preventDefault();
+                void retestMutation.run();
+              }}>
+                <div><h4 className="font-medium text-fg">Request remediation retest</h4><p className="mt-1 text-sm text-muted">The result stays linked to the assessment evidence and can close the finding only when the rescan verifies absence.</p></div>
+                <Field label="Verification note (optional)" htmlFor="retest-note"><Textarea id="retest-note" value={retestNote} maxLength={2000} onChange={(event) => setRetestNote(event.target.value)} placeholder="State the expected fix and verification scope." /></Field>
+                {retestMutation.errorMessage && <p role="alert" className="text-sm text-danger">{retestMutation.errorMessage}</p>}
+                <Button type="submit" loading={retestMutation.loading}>Request retest</Button>
+              </form>
+            )}
+          </CardBody>
+        </Card>
+      )}
+      <Card>
+        <CardHeader><CardTitle>Engagement collaboration</CardTitle></CardHeader>
+        <CardBody className="space-y-4 text-sm">
+          <p className="text-muted">Keep tester evidence, remediation updates, and retest context with the unified finding. Internal notes remain private unless explicitly marked for the client portal.</p>
+          {comments.loading && !comments.data ? <LoadingState label="Loading collaboration…" /> : comments.error ? (
+            <ErrorState message={comments.error} onRetry={comments.refetch} />
+          ) : comments.data?.length ? (
+            <ol className="space-y-3">
+              {comments.data.map((comment) => {
+                const evidenceUrl = safeExternalUrl(comment.evidence_reference);
+                return <li key={comment.id} className="rounded-lg border border-line p-3">
+                  <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
+                    <span className="font-medium text-fg">{humanize(comment.kind)}</span>
+                    <span>{formatDateTime(comment.created_at)}</span>
+                    <span>{comment.visible_to_client ? "Client-visible" : "Internal"}</span>
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap">{comment.body}</p>
+                  {comment.evidence_reference && <div className="mt-2 text-xs">
+                    {evidenceUrl ? <a href={evidenceUrl} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Open evidence reference ↗</a> : <span className="text-muted">Evidence: {comment.evidence_reference}</span>}
+                  </div>}
+                </li>;
+              })}
+            </ol>
+          ) : <p className="text-muted">No collaboration updates yet.</p>}
+          {canRemediate && (
+            <form className="space-y-3 border-t border-line pt-4" onSubmit={(event) => {
+              event.preventDefault();
+              if (commentBody.trim()) void commentMutation.run();
+            }}>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Update type" htmlFor="collaboration-kind">
+                  <Select id="collaboration-kind" value={commentKind} onChange={(event) => setCommentKind(event.target.value as typeof commentKind)}>
+                    <option value="note">Note</option><option value="evidence">Evidence</option><option value="remediation">Remediation</option><option value="retest">Retest</option><option value="status_update">Status update</option>
+                  </Select>
+                </Field>
+                <Field label="Evidence reference (optional)" htmlFor="collaboration-evidence">
+                  <input id="collaboration-evidence" value={evidenceReference} maxLength={2048} onChange={(event) => setEvidenceReference(event.target.value)} className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-fg" placeholder="https://… or evidence ID" />
+                </Field>
+              </div>
+              <Field label="Collaboration update" htmlFor="collaboration-body">
+                <Textarea id="collaboration-body" value={commentBody} maxLength={4000} onChange={(event) => setCommentBody(event.target.value)} placeholder="Record the test result, fix status, or next action." />
+              </Field>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={visibleToClient} onChange={(event) => setVisibleToClient(event.target.checked)} /> Mark this update client-visible</label>
+              {commentMutation.errorMessage && <p role="alert" className="text-danger">{commentMutation.errorMessage}</p>}
+              <Button type="submit" loading={commentMutation.loading} disabled={!commentBody.trim()}>Add update</Button>
+            </form>
+          )}
         </CardBody>
       </Card>
       <Card>
@@ -180,6 +329,7 @@ export default function CanonicalFindingPage() {
       <Card>
         <CardHeader><CardTitle>Risk calculation</CardTitle></CardHeader>
         <CardBody className="space-y-4 text-sm">
+          {riskReasons.length > 0 && <div className="rounded-lg border border-primary/25 bg-primary/5 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-primary">Why prioritize this</p><ul className="mt-2 space-y-1 text-sm text-fg">{riskReasons.map((item) => <li key={item}>• {item}</li>)}</ul></div>}
           <dl className="grid gap-3 sm:grid-cols-2">
             {Object.entries(data.risk_factors.components ?? {}).map(([name, points]) => (
               <div key={name} className="flex justify-between gap-3 border-b border-line pb-2">
@@ -200,9 +350,14 @@ export default function CanonicalFindingPage() {
             <THead><TR><TH>Provider</TH><TH>Source status</TH><TH>Source record</TH><TH>Last seen</TH></TR></THead>
             <TBody>{data.observations.map((item) => {
               const url = safeExternalUrl(item.source_url);
+              const sourceRecord = item.source_record_id
+                ? <Link href={`/findings/external/${item.source_record_id}`} className="text-primary hover:underline">Open synchronized alert</Link>
+                : url
+                  ? <a href={url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{item.external_id} ↗</a>
+                  : item.external_id;
               return <TR key={item.id}>
                 <TD>{humanize(item.provider)}</TD><TD>{humanize(item.source_status)}</TD>
-                <TD>{url ? <a href={url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{item.external_id} ↗</a> : item.external_id}</TD>
+                <TD>{sourceRecord}</TD>
                 <TD>{formatDateTime(item.last_seen_at)}</TD>
               </TR>;
             })}</TBody>

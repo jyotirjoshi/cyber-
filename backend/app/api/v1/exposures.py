@@ -20,8 +20,12 @@ async def exposure_feed(
     session: DbSession,
     pagination: PaginationDep,
     source: Annotated[
-        Literal["defectdojo", "github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"] | None,
-        Query(),
+        str | None,
+        Query(
+            pattern=r"^[a-z][a-z0-9_-]{1,39}$",
+            max_length=40,
+            description="Normalized intake provider identifier.",
+        ),
     ] = None,
     severity: Annotated[
         Literal["critical", "high", "medium", "low", "info"] | None, Query()

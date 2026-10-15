@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Field, Input, Select } from "@/components/ui/Input";
@@ -12,7 +13,7 @@ import { ErrorState, LoadingState } from "@/components/ui/States";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import { useApiResource } from "@/hooks/useApi";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
-import { api } from "@/lib/api";
+import { api, saveBlob } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/cn";
 import { formatDateTime, humanize } from "@/lib/format";
@@ -23,7 +24,7 @@ const PAGE_SIZE = 50;
 const OUTCOMES: readonly AuditOutcome[] = ["success", "failure", "denied"];
 
 type ActorTypeChoice = NonNullable<AuditFilter["actor_type"]>;
-const ACTOR_TYPES: readonly ActorTypeChoice[] = ["user", "agent", "worker", "system"];
+const ACTOR_TYPES: readonly ActorTypeChoice[] = ["user", "agent", "worker", "system", "api_key"];
 
 /** Outcome → semantic Badge tone (static; never interpolated into a class name). */
 const OUTCOME_TONE: Record<AuditOutcome, "ok" | "danger" | "warn"> = {
@@ -40,8 +41,12 @@ export default function AuditPage() {
   const [actorType, setActorType] = React.useState<ActorTypeChoice | "">("");
   const [action, setAction] = React.useState("");
   const [resourceType, setResourceType] = React.useState("");
+  const [since, setSince] = React.useState("");
+  const [until, setUntil] = React.useState("");
   const [offset, setOffset] = React.useState(0);
   const [open, setOpen] = React.useState<Set<string>>(new Set());
+  const [exporting, setExporting] = React.useState(false);
+  const [exportError, setExportError] = React.useState<string | null>(null);
 
   const debouncedQ = useDebouncedValue(q);
   const debouncedAction = useDebouncedValue(action);
@@ -58,8 +63,10 @@ export default function AuditPage() {
         actor_type: actorType || undefined,
         action: debouncedAction.trim() || undefined,
         resource_type: debouncedResourceType.trim() || undefined,
+        since: since ? new Date(since).toISOString() : undefined,
+        until: until ? new Date(until).toISOString() : undefined,
       }),
-    [debouncedQ, outcome, actorType, debouncedAction, debouncedResourceType, offset],
+    [debouncedQ, outcome, actorType, debouncedAction, debouncedResourceType, since, until, offset],
     { enabled: canRead },
   );
 
@@ -71,6 +78,27 @@ export default function AuditPage() {
       return next;
     });
   }, []);
+
+  const exportCurrentView = React.useCallback(async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const file = await api.audit.exportCsv({
+        q: debouncedQ.trim() || undefined,
+        outcome: outcome || undefined,
+        actor_type: actorType || undefined,
+        action: debouncedAction.trim() || undefined,
+        resource_type: debouncedResourceType.trim() || undefined,
+        since: since ? new Date(since).toISOString() : undefined,
+        until: until ? new Date(until).toISOString() : undefined,
+      });
+      saveBlob(file);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Unable to export the audit log.");
+    } finally {
+      setExporting(false);
+    }
+  }, [actorType, debouncedAction, debouncedQ, debouncedResourceType, outcome, since, until]);
 
   if (!canRead) {
     return (
@@ -86,7 +114,10 @@ export default function AuditPage() {
       <PageHeader
         title="Audit log"
         description="Security-relevant actions across your organization, with full request context."
+        actions={<Button variant="outline" onClick={() => void exportCurrentView()} loading={exporting}>Export CSV</Button>}
       />
+
+      {exportError && <p role="alert" className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{exportError}</p>}
 
       <Card>
         <CardBody className="space-y-4">
@@ -103,7 +134,7 @@ export default function AuditPage() {
             />
           </Field>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Outcome" htmlFor="a-outcome">
               <Select
                 id="a-outcome"
@@ -161,6 +192,30 @@ export default function AuditPage() {
                 value={resourceType}
                 onChange={(e) => {
                   setResourceType(e.target.value);
+                  setOffset(0);
+                }}
+              />
+            </Field>
+
+            <Field label="From" htmlFor="a-since">
+              <Input
+                id="a-since"
+                type="datetime-local"
+                value={since}
+                onChange={(e) => {
+                  setSince(e.target.value);
+                  setOffset(0);
+                }}
+              />
+            </Field>
+
+            <Field label="Until" htmlFor="a-until">
+              <Input
+                id="a-until"
+                type="datetime-local"
+                value={until}
+                onChange={(e) => {
+                  setUntil(e.target.value);
                   setOffset(0);
                 }}
               />

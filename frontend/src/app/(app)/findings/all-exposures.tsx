@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { SeverityBadge } from "@/components/ui/Badge";
 import { Card, CardBody } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Field, Select } from "@/components/ui/Input";
+import { Field, Input, Select } from "@/components/ui/Input";
 import { Pagination } from "@/components/ui/Pagination";
 import { ErrorState, LoadingState } from "@/components/ui/States";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
@@ -15,7 +15,6 @@ import { api } from "@/lib/api";
 import { formatRelative, humanize } from "@/lib/format";
 import type { ExposureOut, Severity } from "@/lib/types";
 
-const SOURCES: readonly ExposureOut["source"][] = ["defectdojo", "github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"];
 const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
 const PAGE_SIZE = 25;
 
@@ -40,11 +39,9 @@ export function AllExposuresPanel() {
         One view of assessment findings and connected-tool alerts. Records keep their source identity and status; similar records are not automatically merged.
       </p>
       <Card><CardBody className="grid gap-3 sm:grid-cols-2">
-        <Field label="Source" htmlFor="exposure-source">
-          <Select id="exposure-source" value={source} onChange={(event) => { setSource(event.target.value as typeof source); setOffset(0); }}>
-            <option value="">All sources</option>
-            {SOURCES.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
-          </Select>
+        <Field label="Source" htmlFor="exposure-source" hint="Any normalized intake provider">
+          <Input id="exposure-source" value={source} placeholder="e.g. rapid7, wiz, burp"
+            onChange={(event) => { setSource(event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "")); setOffset(0); }} />
         </Field>
         <Field label="Severity" htmlFor="exposure-severity">
           <Select id="exposure-severity" value={severity} onChange={(event) => { setSeverity(event.target.value as typeof severity); setOffset(0); }}>

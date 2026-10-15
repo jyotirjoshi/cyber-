@@ -71,6 +71,29 @@ GRACEFUL_STOP_SECONDS = 10
 MAX_LOG_BYTES = 4 * 1024 * 1024
 
 
+class ScannerExecutionCancelled(asyncio.CancelledError):
+    """Cancellation receipt; retry is safe only after confirmed container removal."""
+
+    def __init__(self, *, cleanup_confirmed: bool) -> None:
+        super().__init__("Scanner execution interrupted")
+        self.cleanup_confirmed = cleanup_confirmed
+
+
+async def _drain_docker_task(task: asyncio.Task[Any]) -> Any:
+    """Finish an owned Docker call after cancellation without losing its result.
+
+    Thread cancellation cannot stop Docker. Repeated shutdown requests must not
+    discard a late container handle or abandon its removal. Docker calls have
+    their own client timeout; this does not restart the call or the scanner.
+    """
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+
+
 class DockerRunner:
     """Runs one scanner container at a time, per call.
 
@@ -237,13 +260,30 @@ class DockerRunner:
         exit_code = -1
         stdout_text = ""
         stderr_text = ""
+        interrupted: asyncio.CancelledError | None = None
+        cleanup_confirmed = False
 
         try:
             container_error: ScannerContainerError | DockerUnavailableError | None = None
             try:
-                container = await asyncio.to_thread(
-                    client.containers.run, command=list(argv), **sandbox
+                creation = asyncio.create_task(
+                    asyncio.to_thread(client.containers.run, command=list(argv), **sandbox)
                 )
+                try:
+                    container = await asyncio.shield(creation)
+                except asyncio.CancelledError as exc:
+                    # The Docker thread may still create and start a container.
+                    # Retrieve its handle before entering the removal path.
+                    try:
+                        container = await _drain_docker_task(creation)
+                    except Exception as creation_error:
+                        # An API error may contain credential environment values.
+                        # No handle means cleanup cannot be confirmed or retried.
+                        logger.warning(
+                            "scanner.interrupted_start_failed",
+                            error=type(creation_error).__name__,
+                        )
+                    raise exc
             except Exception as exc:
                 if credentials:
                     # Docker may echo the serialized environment in an API error. Construct
@@ -276,11 +316,21 @@ class DockerRunner:
 
             if capture_logs:
                 stdout_text, stderr_text = await self._read_logs(container)
+        except asyncio.CancelledError as exc:
+            interrupted = exc
         finally:
             if container is not None:
                 #: Shielded: a cancelled outer task must not skip the cleanup. Leaving the
                 #: container alive would keep the bind mount busy and leak scan output.
-                await asyncio.shield(self._remove(container))
+                removal = asyncio.create_task(self._remove(container))
+                try:
+                    cleanup_confirmed = await asyncio.shield(removal)
+                except asyncio.CancelledError as exc:
+                    interrupted = interrupted or exc
+                    cleanup_confirmed = await _drain_docker_task(removal)
+
+        if interrupted is not None:
+            raise ScannerExecutionCancelled(cleanup_confirmed=cleanup_confirmed) from interrupted
 
         duration = time.monotonic() - started
 
@@ -446,16 +496,18 @@ class DockerRunner:
 
         return await asyncio.to_thread(_op)
 
-    async def _remove(self, container: Any) -> None:
-        def _op() -> None:
+    async def _remove(self, container: Any) -> bool:
+        def _op() -> bool:
             try:
                 container.remove(force=True, v=True)
             except Exception as exc:
                 if _is_not_found(exc):
-                    return
+                    return True
                 logger.warning("scanner.remove_failed", error=type(exc).__name__)
+                return False
+            return True
 
-        await asyncio.to_thread(_op)
+        return await asyncio.to_thread(_op)
 
     def _container_error(
         self,

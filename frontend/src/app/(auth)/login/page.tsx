@@ -9,6 +9,7 @@ import { Card, CardBody } from "@/components/ui/Card";
 import { Field, Input } from "@/components/ui/Input";
 import { InlineError } from "@/components/ui/States";
 import { useMutation } from "@/hooks/useApi";
+import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { fieldError } from "@/lib/errors";
 
@@ -20,6 +21,7 @@ function LoginForm() {
 
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
+  const [organizationSlug, setOrganizationSlug] = React.useState("");
 
   const { run, loading, error, errorMessage } = useMutation(
     (body: { email: string; password: string }) => login(body),
@@ -69,6 +71,16 @@ function LoginForm() {
             Sign in
           </Button>
         </form>
+
+        <div className="border-t border-line pt-5">
+          <p className="text-sm font-medium text-fg">Sign in with your organization identity provider</p>
+          <p className="mt-1 text-xs text-muted">Enter the organization slug configured by your administrator.</p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+            <Input aria-label="Organization slug" value={organizationSlug} onChange={(event) => setOrganizationSlug(event.target.value)} placeholder="acme-security" />
+            <Button type="button" variant="outline" disabled={!organizationSlug.trim()} onClick={() => window.location.assign(api.auth.ssoStartUrl(organizationSlug.trim()))}>OIDC SSO</Button>
+            <Button type="button" variant="outline" disabled={!organizationSlug.trim()} onClick={() => window.location.assign(api.auth.samlSsoStartUrl(organizationSlug.trim()))}>SAML SSO</Button>
+          </div>
+        </div>
 
         <p className="text-center text-sm text-muted">
           No account?{" "}

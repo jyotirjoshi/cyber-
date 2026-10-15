@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Semgrep Demo",
+          "rules": [
+            {
+              "id": "CVE-2021-44228",
+              "shortDescription": {"text": "Vulnerable Log4j dependency usage"},
+              "properties": {
+                "security-severity": "9.8",
+                "tags": ["security", "CVE-2021-44228"]
+              }
+            },
+            {
+              "id": "java.lang.security.audit.sqli.jdbc-sqli",
+              "shortDescription": {"text": "Unparameterized SQL query"},
+              "properties": {
+                "security-severity": "8.1",
+                "tags": ["security", "injection"]
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "CVE-2021-44228",
+          "level": "error",
+          "message": {"text": "Application code loads a vulnerable Log4j component."},
+          "partialFingerprints": {"primaryLocationLineHash": "demo-log4j-001"},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "src/main/java/com/cynux/App.java"},
+                "region": {"startLine": 18}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "java.lang.security.audit.sqli.jdbc-sqli",
+          "level": "error",
+          "message": {"text": "User input is concatenated into a SQL query."},
+          "partialFingerprints": {"primaryLocationLineHash": "demo-sqli-001"},
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "src/main/java/com/cynux/OrderRepository.java"},
+                "region": {"startLine": 42}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

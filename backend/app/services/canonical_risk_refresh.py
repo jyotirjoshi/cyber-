@@ -79,12 +79,12 @@ async def refresh_stale_risk_batch(session: AsyncSession, *, limit: int = 100) -
             asset,
             [
                 *evidence_by_finding.get(finding.id, []),
-                *verified_intel_evidence(finding.intel_evidence or {}),
+                    *verified_intel_evidence(getattr(finding, "intel_evidence", None) or {}),
             ],
             load_policy(organization).risk_weights,
         )
         finding.risk_factors = with_stale_intel_provenance(
-            finding.risk_factors, finding.intel_evidence or {}
+                finding.risk_factors, getattr(finding, "intel_evidence", None) or {}
         )
         finding.risk_policy_version = organization.risk_policy_version
     await session.flush()

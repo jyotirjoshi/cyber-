@@ -28,6 +28,7 @@ RUN apt-get update \
         libffi8 \
         fonts-dejavu-core \
         fonts-liberation \
+        xmlsec1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

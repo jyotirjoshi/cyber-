@@ -24,6 +24,7 @@ import { SSVCBadge, SSVCMatrix } from "@/components/ui/SSVCBadge";
 import { useApiResource, useMutation } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { duplicateCandidate } from "@/lib/duplicate-candidate";
 import { getErrorMessage } from "@/lib/errors";
 import { falsePositiveCandidate } from "@/lib/false-positive-candidate";
 import { formatDate, formatDateTime, humanize } from "@/lib/format";
@@ -198,6 +199,14 @@ export default function FindingDetailPage() {
     onError: (e) =>
       toast({ title: "Couldn't create ticket", description: getErrorMessage(e), tone: "danger" }),
   });
+  const refreshTicketMut = useMutation((ticketId: string) => api.findings.refreshTicket(ticketId), {
+    onSuccess: (ticket) => {
+      refetch();
+      toast({ title: "Ticket refreshed", description: ticket.external_status ?? "Status unavailable", tone: "ok" });
+    },
+    onError: (e) =>
+      toast({ title: "Couldn't refresh ticket", description: getErrorMessage(e), tone: "danger" }),
+  });
   const [validationStatus, setValidationStatus] = React.useState<ValidateFindingIn["status"]>(
     "confirmed",
   );
@@ -225,6 +234,7 @@ export default function FindingDetailPage() {
 
   const f = data;
   const fpCandidate = falsePositiveCandidate(f.risk_factors);
+  const dupCandidate = duplicateCandidate(f.risk_factors);
   const enr = f.enrichment;
   const hasAnalysis =
     f.ai_analyzed_at != null &&
@@ -609,6 +619,25 @@ export default function FindingDetailPage() {
 
         {/* Sidebar */}
         <div className="space-y-6">
+          {dupCandidate && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Possible duplicate source record</CardTitle>
+                <Badge tone="warn">Correlation suggestion · review required</Badge>
+              </CardHeader>
+              <CardBody className="space-y-2 text-sm text-muted">
+                <p>{dupCandidate.reason}</p>
+                <p>
+                  Compare this source record with{" "}
+                  <Link className="text-primary hover:underline" href={"/findings/" + dupCandidate.representativeFindingId}>
+                    {dupCandidate.representativeTitle}
+                  </Link>{" "}
+                  ({dupCandidate.groupSize} correlated records) before changing any provider status.
+                </p>
+                <p>Canonical findings remain open and unaffected until evidence and analyst review confirm the disposition.</p>
+              </CardBody>
+            </Card>
+          )}
           {fpCandidate && (
             <Card>
               <CardHeader>
@@ -783,7 +812,7 @@ export default function FindingDetailPage() {
                           {t.created_by_agent ? " · created by agent" : ""}
                         </p>
                       </div>
-                      {t.external_status && <Badge tone="neutral">{t.external_status}</Badge>}
+                      <div className="flex shrink-0 items-center gap-2">{t.external_status && <Badge tone="neutral">{t.external_status}</Badge>}<Button size="sm" variant="ghost" loading={refreshTicketMut.loading} onClick={() => void refreshTicketMut.run(t.id)}>Refresh</Button></div>
                     </li>
                   ))}
                 </ul>

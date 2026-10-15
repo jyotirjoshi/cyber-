@@ -59,6 +59,12 @@ class IntegrationOut(BaseModel):
     last_error: str | None = None
     last_error_at: dt.datetime | None = None
     failure_count: int = 0
+    sync_interval_minutes: int | None = None
+    next_sync_at: dt.datetime | None = None
+    last_sync_at: dt.datetime | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+    sync_failure_count: int = 0
     created_at: dt.datetime
 
 
@@ -69,6 +75,9 @@ class IntegrationUpsertIn(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     base_url: str | None = Field(default=None, max_length=1000)
     is_enabled: bool = True
+    #: Null disables continuous ingestion. Five minutes is the minimum safe
+    #: provider cadence and seven days is the maximum useful monitoring gap.
+    sync_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
     config: dict[str, Any] = Field(default_factory=dict)
     #: Write-only. ``{"api_key": "..."} `` -- encrypted on receipt, never returned.
     #: Keys absent here keep their current stored value; see the module docstring.
@@ -96,6 +105,11 @@ class IntegrationSyncOut(BaseModel):
 
     kind: IntegrationKind
     alerts_staged: int = Field(ge=0)
+    #: Source records absent from a complete bounded read. They close only after
+    #: the canonical lifecycle confirms the configured consecutive-miss policy.
+    absence_candidates: int = Field(default=0, ge=0)
+    #: Freshness warnings only: absence is not evidence that a finding was fixed.
+    missing_source_records: int = Field(default=0, ge=0)
 
 
 class TenableScanStatusOut(BaseModel):
@@ -119,6 +133,10 @@ class IntegrationHealthOut(BaseModel):
     is_enabled: bool
     last_verified_at: dt.datetime | None = None
     failure_count: int = 0
+    sync_interval_minutes: int | None = None
+    last_sync_at: dt.datetime | None = None
+    last_sync_status: str | None = None
+    sync_failure_count: int = 0
     #: True while the circuit breaker is open, i.e. calls are being short-circuited
     #: rather than attempted (FR-020).
     circuit_open: bool = False

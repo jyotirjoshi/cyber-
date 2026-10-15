@@ -1,0 +1,38 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:51d31442-12d1-4f5b-b522-18cb6a93f210",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:maven/com.cynux/demo-shop@1.0.0",
+      "name": "demo-shop",
+      "version": "1.0.0",
+      "purl": "pkg:maven/com.cynux/demo-shop@1.0.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "group": "org.apache.logging.log4j",
+      "name": "log4j-core",
+      "version": "2.14.1",
+      "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "id": "CVE-2021-44228",
+      "source": {"name": "NVD", "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228"},
+      "ratings": [
+        {"source": {"name": "NVD"}, "score": 10.0, "severity": "critical", "method": "CVSSv3"}
+      ],
+      "analysis": {"state": "exploitable"},
+      "affects": [
+        {"ref": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"}
+      ]
+    }
+  ]
+}

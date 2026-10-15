@@ -6,11 +6,14 @@ export function PageHeader({
   title,
   description,
   actions,
+  action,
   className,
 }: {
   title: React.ReactNode;
   description?: React.ReactNode;
   actions?: React.ReactNode;
+  /** Compatibility with pages that use a single header action. */
+  action?: React.ReactNode;
   className?: string;
 }) {
   return (
@@ -24,7 +27,7 @@ export function PageHeader({
         <h1 className="truncate text-xl font-semibold text-fg">{title}</h1>
         {description && <p className="mt-1 text-sm text-muted">{description}</p>}
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      {(actions ?? action) && <div className="flex shrink-0 items-center gap-2">{actions ?? action}</div>}
     </div>
   );
 }

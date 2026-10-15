@@ -51,7 +51,7 @@ class AuditFilter(BaseModel):
     actor_id: uuid.UUID | None = None
     #: Includes ``worker``: queued work is executed under a worker principal, so
     #: omitting it would make a whole class of real rows unfilterable.
-    actor_type: Literal["user", "agent", "worker", "system"] | None = None
+    actor_type: Literal["user", "agent", "worker", "system", "api_key"] | None = None
     action: str | None = Field(default=None, max_length=80)
     resource_type: str | None = Field(default=None, max_length=60)
     resource_id: str | None = Field(default=None, max_length=80)

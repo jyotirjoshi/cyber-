@@ -8,6 +8,7 @@ import { AssessmentStatusBadge, Badge, type BadgeTone } from "@/components/ui/Ba
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Input } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { StageChecklist } from "@/components/ui/StageChecklist";
@@ -15,7 +16,7 @@ import { useToast } from "@/components/ui/Toast";
 import { ApprovalCard } from "@/components/approval/ApprovalCard";
 import { AttackPathCard, type AttackPathData } from "@/components/ui/AttackPathCard";
 import { useApiResource, useMutation } from "@/hooks/useApi";
-import { api, saveBlob } from "@/lib/api";
+import { api, reportShareUrl, saveBlob } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
 import {
@@ -65,6 +66,32 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+function ReportShareGovernance({ reportId, canManage, ready }: { reportId: string; canManage: boolean; ready: boolean }) {
+  const { toast } = useToast();
+  const links = useApiResource(() => api.reports.shareLinks(reportId), [reportId]);
+  const [expiryDays, setExpiryDays] = React.useState("7");
+  const [issuedUrl, setIssuedUrl] = React.useState<string | null>(null);
+  const issue = useMutation(
+    () => api.reports.createShareLink(reportId, { expires_at: new Date(Date.now() + Number(expiryDays) * 86_400_000).toISOString() }),
+    { onSuccess: (issued) => { setIssuedUrl(reportShareUrl(issued.token)); void links.refetch(); toast({ title: "External report link issued", tone: "ok" }); } },
+  );
+  const revoke = useMutation(
+    (linkId: string) => api.reports.revokeShareLink(linkId),
+    { onSuccess: () => { void links.refetch(); toast({ title: "Report share link revoked", tone: "ok" }); } },
+  );
+  if (!canManage && !links.data?.length) return null;
+  return <div className="mt-3 space-y-2 border-t border-line pt-3 text-xs">
+    <p className="font-medium text-muted">External share links</p>
+    {canManage && ready && <div className="flex flex-wrap items-center gap-2"><select aria-label="Share link expiry" value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} className="rounded border border-line bg-surface px-2 py-1 text-xs text-fg"><option value="1">Expires in 1 day</option><option value="7">Expires in 7 days</option><option value="30">Expires in 30 days</option></select><Button size="sm" variant="outline" loading={issue.loading} onClick={() => void issue.run()}>Create external link</Button></div>}
+    {issuedUrl && <div className="rounded border border-ok/40 bg-ok/10 p-2"><p className="text-muted">Copy this link now. The secret is displayed only once.</p><div className="mt-1 flex flex-wrap items-center gap-2"><code className="max-w-full break-all text-fg">{issuedUrl}</code><Button size="sm" variant="outline" onClick={() => { void navigator.clipboard?.writeText(issuedUrl); toast({ title: "Share link copied", tone: "ok" }); }}>Copy</Button></div></div>}
+    {links.data?.map((link) => <div key={link.id} className="flex flex-wrap items-center justify-between gap-2">
+      <span className="font-mono text-faint">{link.token_prefix}…</span>
+      <span className="text-muted">{link.revoked_at ? "Revoked" : `Expires ${formatDateTime(link.expires_at)}`}</span>
+      {canManage && !link.revoked_at && <Button size="sm" variant="outline" loading={revoke.loading} onClick={() => void revoke.run(link.id)}>Revoke</Button>}
+    </div>)}
+  </div>;
+}
+
 /** Read a string field off the loosely-typed request_interpretation without an `any` cast. */
 function readString(obj: Record<string, unknown>, key: string): string | null {
   const value = obj[key];
@@ -84,6 +111,7 @@ export default function AssessmentDetailPage() {
   const canCancel = can("assessment:cancel");
   const canGenerateReport = can("report:generate");
   const canReadReports = can("report:read");
+  const canUpdateChecklist = can("assessment:create");
 
   const assessment = useApiResource(() => api.assessments.get(id), [id], {
     enabled: canRead && !!id,
@@ -101,6 +129,19 @@ export default function AssessmentDetailPage() {
     if (activePoll.data) assessment.setData(activePoll.data);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePoll.data]);
+
+  const [checklistDrafts, setChecklistDrafts] = React.useState<Record<string, { completed: boolean; evidence: string }>>({});
+  React.useEffect(() => {
+    const checklist = assessment.data?.engagement_checklist;
+    if (!checklist) return;
+    setChecklistDrafts((current) => {
+      const next = { ...current };
+      for (const item of checklist) {
+        if (!next[item.key]) next[item.key] = { completed: item.completed, evidence: item.evidence_reference ?? "" };
+      }
+      return next;
+    });
+  }, [assessment.data?.engagement_checklist]);
 
   const reports = useApiResource(() => api.assessments.reports(id), [id], {
     enabled: canReadReports && !!id,
@@ -125,6 +166,14 @@ export default function AssessmentDetailPage() {
     onError: (e) =>
       toast({ title: "Couldn't generate report", description: getErrorMessage(e), tone: "danger" }),
   });
+
+  const checklistMutation = useMutation(
+    (key: string, completed: boolean, evidence: string) => api.assessments.updateEngagementChecklist(id, key, {
+      completed,
+      evidence_reference: evidence.trim() || null,
+    }),
+    { onSuccess: (next) => { assessment.setData(next); toast({ title: "Engagement checklist updated", tone: "ok" }); } },
+  );
 
   const resolveApproval = React.useCallback(
     async (body: ApproveIn) => {
@@ -297,6 +346,29 @@ export default function AssessmentDetailPage() {
               )}
             </CardBody>
           </Card>
+
+          {a.engagement_checklist.length > 0 && (
+            <Card>
+              <CardHeader><CardTitle>Engagement checklist</CardTitle><Badge tone="primary">{a.engagement_checklist.filter((item) => item.completed).length}/{a.engagement_checklist.length} complete</Badge></CardHeader>
+              <CardBody className="space-y-3">
+                <p className="text-sm text-muted">Track agreed tester and client activities with a durable evidence reference for each completion.</p>
+                {a.engagement_checklist.map((item) => {
+                  const draft = checklistDrafts[item.key] ?? { completed: item.completed, evidence: item.evidence_reference ?? "" };
+                  return <div key={item.key} className="rounded-lg border border-line p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <label className="flex min-w-0 items-start gap-3 text-sm">
+                        <input type="checkbox" checked={draft.completed} disabled={!canUpdateChecklist} onChange={(event) => setChecklistDrafts((current) => ({ ...current, [item.key]: { ...draft, completed: event.target.checked } }))} />
+                        <span><span className="font-medium text-fg">{item.title}</span>{item.required && <span className="ml-2 text-xs text-warn">Required</span>}<span className="mt-1 block text-xs text-muted">{item.completed_at ? `Last updated ${formatDateTime(item.completed_at)}` : "Not completed"}</span></span>
+                      </label>
+                      {canUpdateChecklist && <Button size="sm" variant="outline" loading={checklistMutation.loading} onClick={() => void checklistMutation.run(item.key, draft.completed, draft.evidence)}>Save</Button>}
+                    </div>
+                    <div className="mt-3"><Input aria-label={`Evidence reference for ${item.title}`} disabled={!canUpdateChecklist} value={draft.evidence} maxLength={1024} onChange={(event) => setChecklistDrafts((current) => ({ ...current, [item.key]: { ...draft, evidence: event.target.value } }))} placeholder="Evidence URL, ticket, or artifact reference" /></div>
+                  </div>;
+                })}
+                {checklistMutation.errorMessage && <InlineError message={checklistMutation.errorMessage} />}
+              </CardBody>
+            </Card>
+          )}
 
           {a.degradations.length > 0 && (
             <Card className="border-warn/30">
@@ -550,28 +622,31 @@ export default function AssessmentDetailPage() {
                     {reports.data.map((r) => (
                       <li
                         key={r.id}
-                        className="flex items-center justify-between gap-3 rounded-lg border border-line px-3 py-2"
+                        className="rounded-lg border border-line px-3 py-2"
                       >
-                        <div className="min-w-0">
-                          <p className="truncate text-sm text-fg">{r.title}</p>
-                          <p className="mt-0.5 text-xs text-muted">
-                            {r.format.toUpperCase()} · {humanize(r.audience)} · {humanize(r.status)}
-                          </p>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm text-fg">{r.title}</p>
+                            <p className="mt-0.5 text-xs text-muted">
+                              {r.format.toUpperCase()} · {humanize(r.audience)} · {humanize(r.status)}
+                            </p>
+                          </div>
+                          {r.status === "ready" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              loading={downloadingId === r.id}
+                              onClick={() => void downloadReport(r)}
+                            >
+                              Download
+                            </Button>
+                          ) : r.status === "failed" ? (
+                            <Badge tone="danger">Failed</Badge>
+                          ) : (
+                            <Badge tone="neutral">{humanize(r.status)}</Badge>
+                          )}
                         </div>
-                        {r.status === "ready" ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            loading={downloadingId === r.id}
-                            onClick={() => void downloadReport(r)}
-                          >
-                            Download
-                          </Button>
-                        ) : r.status === "failed" ? (
-                          <Badge tone="danger">Failed</Badge>
-                        ) : (
-                          <Badge tone="neutral">{humanize(r.status)}</Badge>
-                        )}
+                        <ReportShareGovernance reportId={r.id} canManage={canGenerateReport} ready={r.status === "ready"} />
                       </li>
                     ))}
                   </ul>

@@ -89,7 +89,7 @@ class AuditEvent(Base):
     __table_args__ = (
         CheckConstraint("outcome IN ('success','failure','denied')", name="valid_outcome"),
         CheckConstraint(
-            "actor_type IN ('user','agent','system','worker')", name="valid_actor_type"
+            "actor_type IN ('user','agent','system','worker','api_key')", name="valid_actor_type"
         ),
         Index("ix_audit_events_organization_id_created_at", "organization_id", "created_at"),
         Index("ix_audit_events_organization_id_action", "organization_id", "action"),

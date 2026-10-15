@@ -210,7 +210,7 @@ def upgrade() -> None:
         ["organization_id", "agent_definition_id"],
     )
     op.create_foreign_key(
-        "fk_agent_definitions_active_version_id_agent_definition_versions",
+        "fk_agent_definitions_active_version",
         "agent_definitions",
         "agent_definition_versions",
         ["active_version_id"],
@@ -428,7 +428,7 @@ def upgrade() -> None:
         ["organization_id", "source_id"],
     )
     op.create_foreign_key(
-        "fk_knowledge_sources_current_version_id_knowledge_source_versions",
+        "fk_knowledge_sources_current_version",
         "knowledge_sources",
         "knowledge_source_versions",
         ["current_version_id"],
@@ -653,7 +653,7 @@ def downgrade() -> None:
     op.drop_table("knowledge_chunks")
     op.drop_table("agent_version_collections")
     op.drop_constraint(
-        "fk_knowledge_sources_current_version_id_knowledge_source_versions",
+        "fk_knowledge_sources_current_version",
         "knowledge_sources",
         type_="foreignkey",
     )
@@ -663,7 +663,7 @@ def downgrade() -> None:
     op.drop_table("agent_templates")
     op.drop_table("agent_version_tools")
     op.drop_constraint(
-        "fk_agent_definitions_active_version_id_agent_definition_versions",
+        "fk_agent_definitions_active_version",
         "agent_definitions",
         type_="foreignkey",
     )

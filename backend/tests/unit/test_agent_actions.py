@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -857,6 +858,11 @@ async def test_worker_marks_provider_error_failed_without_repeating_approval(mon
     assert await agent_action.execute_approved_batch(_Session(), settings=object(), redis=None) == 1
     assert row.status == "failed"
     assert "GitHub" in row.result_summary
+    assert row.execution_evidence == {
+        "outcome": "failed",
+        "action": "sync_github_alerts",
+        "reason": row.result_summary,
+    }
     assert audits[0]["action"] == agent_action.audit_service.AuditAction.AGENT_ACTION_FAILED
 
 
@@ -954,6 +960,80 @@ def test_jira_payload_accepts_canonical_target_but_not_both_targets() -> None:
         )
 
 
+def test_retest_payload_requires_a_valid_canonical_finding() -> None:
+    from app.services.agent_action import validate_action_payload
+
+    finding_id = str(uuid.uuid4())
+    assert validate_action_payload(
+        "request_retest", {"finding_id": finding_id, "note": "Fix deployed"}
+    ) == {"finding_id": finding_id, "note": "Fix deployed"}
+    with pytest.raises(ValueError, match="finding_id"):
+        validate_action_payload("request_retest", {"finding_id": "invalid"})
+
+
+def test_agent_action_api_models_expose_governed_worker_actions() -> None:
+    """Actions the worker can execute must also be valid public API actions."""
+    from app.schemas.agent import AgentActionOut, AgentActionProposeIn
+
+    session_id = uuid.uuid4()
+    action_id = uuid.uuid4()
+    finding_id = uuid.uuid4()
+    proposed = AgentActionProposeIn.model_validate(
+        {
+            "session_id": str(session_id),
+            "action": "request_retest",
+            "label": "Retest fixed finding",
+            "payload": {"finding_id": str(finding_id), "note": "Fix deployed"},
+        }
+    )
+    assert proposed.action == "request_retest"
+    from app.services.agent_action import new_agent_action
+
+    pending = new_agent_action(
+        organization_id=uuid.uuid4(),
+        session_id=session_id,
+        requested_by_user_id=uuid.uuid4(),
+        action="request_retest",
+        label="Retest fixed finding",
+        rationale=None,
+        payload={"finding_id": str(finding_id)},
+    )
+    pending.created_at = dt.datetime.now(dt.UTC)
+    assert AgentActionOut.model_validate(pending).execution_evidence == {}
+    returned = AgentActionOut.model_validate(
+        {
+            "id": action_id,
+            "session_id": session_id,
+            "action": "request_risk_acceptance",
+            "label": "Request temporary exception",
+            "payload": {"finding_id": str(finding_id)},
+            "payload_digest": "a" * 64,
+            "status": "executed",
+            "created_at": dt.datetime.now(dt.UTC),
+        }
+    )
+    assert returned.action == "request_risk_acceptance"
+
+
+def test_risk_acceptance_action_requires_bounded_expiry_and_rationale() -> None:
+    from app.services.agent_action import validate_action_payload
+
+    finding_id = str(uuid.uuid4())
+    payload = {
+        "finding_id": finding_id,
+        "rationale": "Compensating controls are in place while the vendor patch is tested.",
+        "expires_at": "2026-11-01T00:00:00+00:00",
+    }
+    normalized = validate_action_payload("request_risk_acceptance", payload)
+    assert normalized["finding_id"] == finding_id
+    assert normalized["rationale"] == payload["rationale"]
+    assert normalized["expires_at"] == "2026-11-01T00:00:00Z"
+    with pytest.raises(ValueError, match="risk acceptance"):
+        validate_action_payload(
+            "request_risk_acceptance", {**payload, "rationale": " "}
+        )
+
+
 def test_jira_payload_rejects_nested_or_oversized_values() -> None:
     from app.services.agent_action import validate_action_payload
 
@@ -1003,6 +1083,57 @@ def test_canonical_work_action_requires_versioned_bounded_change() -> None:
     ):
         with pytest.raises(ValueError):
             validate_action_payload("update_canonical_work", payload)
+
+
+def test_bulk_canonical_work_action_requires_bounded_versioned_items() -> None:
+    from app.services.agent_action import validate_action_payload
+
+    first, second = uuid.uuid4(), uuid.uuid4()
+    payload = {
+        "items": [
+            {
+                "finding_id": str(first),
+                "expected_version": 2,
+                "remediation_plan": "Upgrade and verify the first affected deployment.",
+            },
+            {
+                "finding_id": str(second),
+                "expected_version": 4,
+                "remediation_plan": "Upgrade and verify the second affected deployment.",
+            },
+        ]
+    }
+    assert validate_action_payload("bulk_update_canonical_work", payload) == payload
+    with pytest.raises(ValueError):
+        validate_action_payload("bulk_update_canonical_work", {"items": [payload["items"][0]] * 2})
+
+
+@pytest.mark.asyncio
+async def test_approved_bulk_work_action_records_each_updated_resource(monkeypatch) -> None:
+    from app.db.base import utcnow
+    from app.services import agent_action, canonical_work
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    finding_id = uuid.uuid4()
+    row = agent_action.new_agent_action(
+        organization_id=principal.organization_id, session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id, action="bulk_update_canonical_work",
+        label="Apply approved remediation", rationale=None,
+        payload={"items": [{"finding_id": str(finding_id), "expected_version": 1,
+                            "remediation_plan": "Upgrade and verify the affected deployment."}]},
+    )
+    row.status, row.approved_by_user_id, row.resolved_at = "approved", principal.user_id, utcnow()
+
+    async def update(*_args, **_kwargs):
+        return [SimpleNamespace(id=finding_id, status_version=2)]
+
+    async def audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(canonical_work, "bulk_update_work", update)
+    monkeypatch.setattr(agent_action.audit_service, "record", audit)
+    await agent_action.execute_approved_action(object(), principal, row, settings=object(), redis=None)
+    assert row.execution_evidence["findings"] == [{"id": str(finding_id), "status_version": 2}]
 
 
 def test_canonical_work_action_requires_remediation_permission() -> None:
@@ -1069,6 +1200,100 @@ async def test_approved_canonical_work_executes_versioned_update_once(monkeypatc
             settings=object(),
             redis=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_approved_retest_action_creates_governed_retest_request(monkeypatch) -> None:
+    from app.db.base import utcnow
+    from app.services import agent_action, remediation_governance
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    finding_id = uuid.uuid4()
+    row = agent_action.new_agent_action(
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id,
+        action="request_retest",
+        label="Retest finding",
+        rationale="Fix evidence was supplied",
+        payload={"finding_id": str(finding_id), "note": "Fix deployed"},
+    )
+    row.status = "approved"
+    row.approved_by_user_id = principal.user_id
+    row.resolved_at = utcnow()
+    seen: list[tuple[uuid.UUID, uuid.UUID, str | None]] = []
+
+    async def fake_request(session, actor, actual_id, *, note):
+        seen.append((actor.organization_id, actual_id, note))
+        return SimpleNamespace(id=uuid.UUID("00000000-0000-0000-0000-000000000042"))
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(remediation_governance, "request_retest", fake_request)
+    monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
+    await agent_action.execute_approved_action(
+        object(), principal, row, settings=object(), redis=None
+    )
+    assert seen == [(principal.organization_id, finding_id, "Fix deployed")]
+    assert row.status == "executed"
+    assert row.result_summary == "Retest request 00000000-0000-0000-0000-000000000042 created"
+    assert row.execution_evidence == {
+        "outcome": "created",
+        "resource": {
+            "type": "retest_request",
+            "id": "00000000-0000-0000-0000-000000000042",
+        },
+        "canonical_finding_id": str(finding_id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_approved_risk_acceptance_action_creates_governed_request(monkeypatch) -> None:
+    from app.db.base import utcnow
+    from app.services import agent_action, remediation_governance
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    finding_id = uuid.uuid4()
+    row = agent_action.new_agent_action(
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id,
+        action="request_risk_acceptance",
+        label="Request risk acceptance",
+        rationale="Compensating controls documented",
+        payload={
+            "finding_id": str(finding_id),
+            "rationale": "Compensating controls are in place while the patch is tested.",
+            "expires_at": "2026-11-01T00:00:00Z",
+        },
+    )
+    row.status = "approved"
+    row.approved_by_user_id = principal.user_id
+    row.resolved_at = utcnow()
+    seen: list[tuple[uuid.UUID, uuid.UUID, str]] = []
+
+    async def fake_request(session, actor, actual_id, *, rationale, expires_at):
+        seen.append((actor.organization_id, actual_id, rationale))
+        return SimpleNamespace(id=uuid.UUID("00000000-0000-0000-0000-000000000043"))
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(remediation_governance, "request_risk_acceptance", fake_request)
+    monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
+    await agent_action.execute_approved_action(
+        object(), principal, row, settings=object(), redis=None
+    )
+    assert seen == [
+        (
+            principal.organization_id,
+            finding_id,
+            "Compensating controls are in place while the patch is tested.",
+        )
+    ]
+    assert row.status == "executed"
+    assert row.result_summary == "Risk acceptance request 00000000-0000-0000-0000-000000000043 created"
 
 
 @pytest.mark.asyncio

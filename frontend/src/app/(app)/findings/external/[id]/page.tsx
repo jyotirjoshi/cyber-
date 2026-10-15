@@ -59,6 +59,16 @@ export default function ExternalAlertDetailPage() {
     { enabled: canRead && !!id },
   );
   const {
+    data: canonicalFindings,
+    error: canonicalError,
+    loading: canonicalLoading,
+    refetch: refetchCanonical,
+  } = useApiResource(
+    () => api.externalAlerts.canonicalFindings(id),
+    [id],
+    { enabled: canRead && !!id },
+  );
+  const {
     data: relatedAlerts,
     error: relatedAlertsError,
     loading: relatedAlertsLoading,
@@ -194,6 +204,37 @@ export default function ExternalAlertDetailPage() {
           </CardBody>
         </Card>
       )}
+      <Card>
+        <CardHeader><CardTitle>Canonical remediation records</CardTitle></CardHeader>
+        <CardBody className="space-y-3">
+          <p className="text-sm text-muted">
+            These are the normalized findings directly created from this provider alert. Use them for ownership, SLA, tickets, exceptions, retesting, and cross-tool evidence.
+          </p>
+          {canonicalLoading && !canonicalFindings ? (
+            <LoadingState label="Loading canonical records…" />
+          ) : canonicalError ? (
+            <ErrorState message={canonicalError} onRetry={refetchCanonical} />
+          ) : !canonicalFindings?.length ? (
+            <p className="text-sm text-muted">This alert has not produced a canonical record yet. It may not have a stable asset identity, or the next connector sync has not completed.</p>
+          ) : (
+            <ul className="divide-y divide-line">
+              {canonicalFindings.map((finding) => (
+                <li key={finding.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div className="min-w-0">
+                    <Link href={`/findings/canonical/${finding.id}`} className="font-medium text-primary hover:underline">
+                      {finding.title}
+                    </Link>
+                    <p className="mt-1 text-xs text-muted">
+                      {humanize(finding.status)} · Risk {finding.risk_score.toFixed(0)} · {finding.cve_ids.join(", ") || "No CVE"}
+                    </p>
+                  </div>
+                  <SeverityBadge severity={finding.severity} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardBody>
+      </Card>
       <Card>
         <CardHeader><CardTitle>Cross-tool correlation candidates</CardTitle></CardHeader>
         <CardBody className="space-y-3">

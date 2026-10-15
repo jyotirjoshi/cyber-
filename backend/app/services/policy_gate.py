@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
@@ -14,7 +14,7 @@ from app.db.models.asset import Asset
 from app.db.models.canonical import CanonicalFinding
 from app.db.models.scanner import ScannerJob
 from app.db.repository import TenantRepository
-from app.schemas.policy_gate import PolicyGateOut
+from app.schemas.policy_gate import PolicyGateFindingOut, PolicyGateOut
 from app.services.canonical_identity import asset_storage_name, normalized_asset_identity
 from app.services.context import Principal
 
@@ -28,6 +28,7 @@ _COVERAGE_SCANNERS = {
     "container_image": ("trivy_image",),
     "image": ("trivy_image",),
 }
+_MAX_BLOCKERS = 20
 
 
 async def evaluate_asset_gate(
@@ -117,12 +118,43 @@ async def evaluate_asset_gate(
         decision, reason = "warn", "high_findings"
     else:
         decision, reason = "pass", "no_blocking_findings"
+    blocker_rows = (
+        await session.execute(
+            select(
+                CanonicalFinding.id,
+                CanonicalFinding.title,
+                CanonicalFinding.severity,
+                CanonicalFinding.risk_score,
+            )
+            .where(
+                CanonicalFinding.organization_id == principal.organization_id,
+                CanonicalFinding.asset_id.in_(asset_ids),
+                CanonicalFinding.status.in_(_ACTIVE_STATUSES),
+                CanonicalFinding.severity.in_(("critical", "high")),
+            )
+            .order_by(
+                case((CanonicalFinding.severity == "critical", 0), else_=1),
+                CanonicalFinding.risk_score.desc(),
+                CanonicalFinding.id,
+            )
+            .limit(_MAX_BLOCKERS)
+        )
+    ).all()
     return PolicyGateOut(
         asset_id=asset.id,
         decision=decision,
         allow_deploy=decision in {"pass", "warn"},
         reason_code=reason,
         counts=counts,
+        blockers=[
+            PolicyGateFindingOut(
+                id=finding_id,
+                title=title,
+                severity=severity,
+                risk_score=float(risk_score or 0),
+            )
+            for finding_id, title, severity, risk_score in blocker_rows
+        ],
         scan_imported_at=imported_at,
         evaluated_at=evaluated_at,
     )

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import exists, func, select, tuple_
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,8 @@ from app.db.models.canonical import (
 )
 from app.db.models.finding import Finding
 from app.db.models.identity import Organization
+from app.db.queries import pg_any
+from app.services.automation import queue_finding_event
 from app.services.canonical_identity import (
     asset_storage_name,
     identity_for_observation,
@@ -37,6 +39,7 @@ from app.services.canonical_lifecycle import next_status
 from app.services.canonical_risk import score_canonical
 from app.services.entitlements import assert_asset_capacity, load_entitlements
 from app.services.organization import load_policy
+from app.services.sla import calculate_due_at
 
 _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
@@ -110,31 +113,37 @@ async def link_scan_observations(
         select(FindingObservation.canonical_finding_id).where(
             FindingObservation.organization_id == organization_id,
             FindingObservation.provider == provider,
-            FindingObservation.external_id.in_(set(external_ids)),
+            pg_any(FindingObservation.external_id, set(external_ids)),
         )
     )
     finding_ids = set(result.scalars().all())
     if not finding_ids:
         return 0
-    statement = (
-        pg_insert(AssessmentCanonicalFinding)
-        .values(
-            [
-                {
-                    "id": uuid.uuid4(),
-                    "organization_id": organization_id,
-                    "assessment_id": assessment_id,
-                    "canonical_finding_id": finding_id,
-                    "scanner_job_id": job_id,
-                    "created_at": utcnow(),
-                }
-                for finding_id in sorted(finding_ids)
-            ]
+    ordered_ids = sorted(finding_ids)
+    now = utcnow()
+    count = 0
+    for offset in range(0, len(ordered_ids), 500):
+        statement = (
+            pg_insert(AssessmentCanonicalFinding)
+            .values(
+                [
+                    {
+                        "id": uuid.uuid4(),
+                        "organization_id": organization_id,
+                        "assessment_id": assessment_id,
+                        "canonical_finding_id": finding_id,
+                        "scanner_job_id": job_id,
+                        "created_at": now,
+                    }
+                    for finding_id in ordered_ids[offset : offset + 500]
+                ]
+            )
+            .on_conflict_do_nothing(constraint="unique_assessment_canonical_finding")
+            .returning(AssessmentCanonicalFinding.id)
         )
-        .on_conflict_do_nothing(constraint="unique_assessment_canonical_finding")
-    )
-    inserted = await session.execute(statement)
-    return inserted.rowcount or 0
+        inserted = await session.execute(statement)
+        count += len(inserted.scalars().all())
+    return count
 
 
 def _asset_candidate_names(kind: str, value: str) -> frozenset[str]:
@@ -234,7 +243,7 @@ async def ingest_external_alerts(
             await session.execute(
                 select(Asset).where(
                     Asset.organization_id == organization_id,
-                    Asset.name.in_(names),
+                    pg_any(Asset.name, names),
                     Asset.port.is_(None),
                     Asset.protocol.is_(None),
                 )
@@ -280,6 +289,7 @@ async def ingest_external_alerts(
             entitlements=load_entitlements(organization.entitlements),
         )
     now = utcnow()
+    sla_targets = load_policy(organization).sla_targets_days
     for name in sorted(new_asset_names):
         kind, _, _ = name.partition(":")
         asset = Asset(
@@ -323,7 +333,7 @@ async def ingest_external_alerts(
             await session.execute(
                 select(CanonicalFinding).where(
                     CanonicalFinding.organization_id == organization_id,
-                    CanonicalFinding.fingerprint.in_(fingerprints),
+                    pg_any(CanonicalFinding.fingerprint, fingerprints),
                 )
             )
         )
@@ -337,7 +347,7 @@ async def ingest_external_alerts(
             await session.execute(
                 select(Asset).where(
                     Asset.organization_id == organization_id,
-                    Asset.id.in_(linked_asset_ids),
+                    pg_any(Asset.id, linked_asset_ids),
                 )
             )
         )
@@ -350,13 +360,22 @@ async def ingest_external_alerts(
         row.id: row for row in linked_assets if row.organization_id == organization_id
     }
     source_keys = {(alert.provider, alert.external_id, cve) for alert, _, cve, _ in fingerprinted}
+    ids_by_provider: dict[str, set[str]] = {}
+    for provider, external_id, _ in source_keys:
+        ids_by_provider.setdefault(provider, set()).add(external_id)
     found_observations = (
         (
             await session.execute(
                 select(FindingObservation).where(
                     FindingObservation.organization_id == organization_id,
-                    tuple_(FindingObservation.provider, FindingObservation.external_id).in_(
-                        {(provider, external_id) for provider, external_id, _ in source_keys}
+                    or_(
+                        *(
+                            and_(
+                                FindingObservation.provider == provider,
+                                pg_any(FindingObservation.external_id, external_ids),
+                            )
+                            for provider, external_ids in ids_by_provider.items()
+                        )
                     ),
                 )
             )
@@ -366,11 +385,12 @@ async def ingest_external_alerts(
     )
     observations = {(row.provider, row.external_id, row.cve_id): row for row in found_observations}
     moved_from_ids: set[uuid.UUID] = set()
+    created_finding_ids: set[uuid.UUID] = set()
+    status_changed_finding_ids: set[uuid.UUID] = set()
     current_cves: dict[tuple[str, str], set[str]] = {}
     for alert, _ in prepared:
         cves = valid_cves(alert.cve_ids or [])
-        if cves:
-            current_cves.setdefault((alert.provider, alert.external_id), set()).update(cves)
+        current_cves.setdefault((alert.provider, alert.external_id), set()).update(cves or [""])
     for prior_observation in found_observations:
         current_cve_set = current_cves.get(
             (prior_observation.provider, prior_observation.external_id)
@@ -393,11 +413,15 @@ async def ingest_external_alerts(
                 cve_ids=[cve] if cve else [],
                 first_seen_at=now,
                 last_seen_at=now,
+                due_at=calculate_due_at(
+                    Severity(alert.severity), asset.criticality, opened_at=now, targets=sla_targets
+                ),
                 absence_count=0,
                 status_version=0,
             )
             session.add(finding)
             findings[fingerprint] = finding
+            created_finding_ids.add(finding.id)
             session.add(
                 FindingHistory(
                     id=uuid.uuid4(),
@@ -412,6 +436,9 @@ async def ingest_external_alerts(
         elif _SEVERITY_RANK.get(alert.severity, 0) > _SEVERITY_RANK.get(finding.severity, 0):
             finding.severity = alert.severity
             finding.title = alert.title[:1000]
+            finding.due_at = calculate_due_at(
+                Severity(alert.severity), asset.criticality, opened_at=finding.first_seen_at, targets=sla_targets
+            )
         if finding.asset_id != asset.id:
             old_asset = original_assets_by_id.get(finding.asset_id)
             identity = alert_asset_identity(alert)
@@ -469,7 +496,7 @@ async def ingest_external_alerts(
                 select(CanonicalFinding)
                 .where(
                     CanonicalFinding.organization_id == organization_id,
-                    CanonicalFinding.id.in_(moved_from_ids),
+                    pg_any(CanonicalFinding.id, moved_from_ids),
                 )
                 .with_for_update()
             )
@@ -485,7 +512,7 @@ async def ingest_external_alerts(
             await session.execute(
                 select(FindingObservation).where(
                     FindingObservation.organization_id == organization_id,
-                    FindingObservation.canonical_finding_id.in_(affected_ids),
+                    pg_any(FindingObservation.canonical_finding_id, affected_ids),
                 )
             )
         )
@@ -505,7 +532,7 @@ async def ingest_external_alerts(
         (
             await session.execute(
                 select(Asset).where(
-                    Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                    Asset.organization_id == organization_id, pg_any(Asset.id, asset_ids)
                 )
             )
         )
@@ -534,6 +561,7 @@ async def ingest_external_alerts(
             prior = finding.status
             finding.status = proposed
             finding.status_version += 1
+            status_changed_finding_ids.add(finding.id)
             finding.closed_at = now if proposed == "closed" else None
             session.add(
                 FindingHistory(
@@ -562,7 +590,35 @@ async def ingest_external_alerts(
                 finding.risk_factors, finding.intel_evidence or {}
             )
             finding.risk_policy_version = organization.risk_policy_version or 0
-    return len(fingerprinted)
+    for finding_id in created_finding_ids:
+        finding = affected_findings.get(finding_id)
+        asset = asset_by_id.get(finding.asset_id) if finding is not None else None
+        if finding is not None and asset is not None:
+            await queue_finding_event(
+                session, finding=finding, asset=asset, trigger="finding.created"
+            )
+    for finding_id in status_changed_finding_ids - created_finding_ids:
+        finding = affected_findings.get(finding_id)
+        asset = asset_by_id.get(finding.asset_id) if finding is not None else None
+        if finding is not None and asset is not None:
+            await queue_finding_event(
+                session,
+                finding=finding,
+                asset=asset,
+                trigger="finding.updated",
+                event_key_suffix=f":version:{finding.status_version}",
+            )
+    count = len(fingerprinted)
+    if count > 0:
+        from app.services.usage_metering import MeterEvent, increment
+
+        await increment(
+            session,
+            organization_id=organization_id,
+            event=MeterEvent.FINDING_INGESTED,
+            quantity=count,
+        )
+    return count
 
 
 async def ingest_native_findings(
@@ -574,7 +630,7 @@ async def ingest_native_findings(
         (
             await session.execute(
                 select(Asset).where(
-                    Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                    Asset.organization_id == organization_id, pg_any(Asset.id, asset_ids)
                 )
             )
         )
@@ -670,7 +726,26 @@ async def reconcile_absent_observations(
     result for all ``scope_keys``. GitHub/GitLab do not use this path because
     reduced provider permissions can look like a successful empty result.
     """
-    scope_field = {"sonarqube": "project", "tenable": "scan_id"}.get(provider)
+    # A scope is the proof that a provider returned a complete view of a bounded
+    # source.  Do not make absence global: a credential with reduced visibility
+    # must never close unrelated findings.
+    scope_field = {
+        "sonarqube": "project",
+        "tenable": "scan_id",
+        "qualys": "asset_value",
+        "rapid7": "asset_id",
+        "crowdstrike": "provider",
+        "aws_security_hub": "account_id",
+        "aws_inspector": "aws_account_id",
+        "hackerone": "program_handle",
+        "bugcrowd": "engagement_code",
+        "checkmarx": "project_id",
+        "fortify": "application_version_id",
+        "prisma_cloud": "cloud_account_id",
+        "azure_defender": "subscription_id",
+        "gcp_scc": "project_id",
+        "burp_dast": "site_id",
+    }.get(provider)
     if scope_field is None:
         raise ValueError("provider does not support absence-based closure")
     if not scope_keys:
@@ -678,11 +753,11 @@ async def reconcile_absent_observations(
     statement = select(FindingObservation).where(
         FindingObservation.organization_id == organization_id,
         FindingObservation.provider == provider,
-        FindingObservation.evidence[scope_field].astext.in_(scope_keys),
+        pg_any(FindingObservation.evidence[scope_field].astext, scope_keys),
         FindingObservation.source_status.not_in(("absent", "superseded")),
     )
     if observed_external_ids:
-        statement = statement.where(FindingObservation.external_id.not_in(observed_external_ids))
+        statement = statement.where(~pg_any(FindingObservation.external_id, observed_external_ids))
     missing = (await session.execute(statement.with_for_update())).scalars().all()
     if not missing:
         return 0
@@ -699,7 +774,7 @@ async def reconcile_absent_observations(
             await session.execute(
                 select(FindingObservation).where(
                     FindingObservation.organization_id == organization_id,
-                    FindingObservation.canonical_finding_id.in_(affected),
+                    pg_any(FindingObservation.canonical_finding_id, affected),
                 )
             )
         )
@@ -715,7 +790,7 @@ async def reconcile_absent_observations(
                 select(CanonicalFinding)
                 .where(
                     CanonicalFinding.organization_id == organization_id,
-                    CanonicalFinding.id.in_(affected),
+                    pg_any(CanonicalFinding.id, affected),
                 )
                 .with_for_update()
             )
@@ -724,6 +799,7 @@ async def reconcile_absent_observations(
         .all()
     )
     now = utcnow()
+    status_changed_findings: list[CanonicalFinding] = []
     for finding in findings:
         sources = by_finding.get(finding.id, [])
         absence_count = (
@@ -742,6 +818,7 @@ async def reconcile_absent_observations(
             previous = finding.status
             finding.status = proposed
             finding.status_version += 1
+            status_changed_findings.append(finding)
             finding.closed_at = now if proposed == "closed" else None
             session.add(
                 FindingHistory(
@@ -763,7 +840,7 @@ async def reconcile_absent_observations(
             (
                 await session.execute(
                     select(Asset).where(
-                        Asset.organization_id == organization_id, Asset.id.in_(asset_ids)
+                        Asset.organization_id == organization_id, pg_any(Asset.id, asset_ids)
                     )
                 )
             )
@@ -794,4 +871,28 @@ async def reconcile_absent_observations(
                 finding.risk_factors, finding.intel_evidence or {}
             )
             finding.risk_policy_version = organization.risk_policy_version
+    if status_changed_findings:
+        asset_ids = {finding.asset_id for finding in status_changed_findings}
+        assets = (
+            (
+                await session.execute(
+                    select(Asset).where(
+                        Asset.organization_id == organization_id, pg_any(Asset.id, asset_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assets_by_id = {asset.id: asset for asset in assets}
+        for finding in status_changed_findings:
+            asset = assets_by_id.get(finding.asset_id)
+            if asset is not None:
+                await queue_finding_event(
+                    session,
+                    finding=finding,
+                    asset=asset,
+                    trigger="finding.updated",
+                    event_key_suffix=f":version:{finding.status_version}",
+                )
     return len(missing)

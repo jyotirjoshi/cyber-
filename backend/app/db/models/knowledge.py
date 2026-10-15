@@ -73,7 +73,12 @@ class KnowledgeSource(Base, TenantMixin, TimestampMixin):
     document_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     current_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("knowledge_source_versions.id", ondelete="SET NULL")
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "knowledge_source_versions.id",
+            name="fk_knowledge_sources_current_version",
+            ondelete="SET NULL",
+        ),
     )
     tombstoned_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     lease_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

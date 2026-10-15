@@ -52,12 +52,18 @@ export default function AssetDetailPage() {
     [id],
     { enabled: canRead && !!id },
   );
+  const policyGate = useApiResource(
+    () => api.assets.policyGate(id),
+    [id],
+    { enabled: canRead && !!id },
+  );
 
   const [critValue, setCritValue] = React.useState<Criticality>("normal");
   const [critRationale, setCritRationale] = React.useState("");
   const [tagKey, setTagKey] = React.useState("");
   const [tagValue, setTagValue] = React.useState("");
   const [ownerTeam, setOwnerTeam] = React.useState("");
+  const [ownerUserId, setOwnerUserId] = React.useState("");
   const [environment, setEnvironment] = React.useState<AssetEnvironment>("unknown");
   const [groups, setGroups] = React.useState("");
   const [customFieldsText, setCustomFieldsText] = React.useState("{}");
@@ -67,15 +73,23 @@ export default function AssetDetailPage() {
     if (data) {
       setCritValue(data.criticality);
       setOwnerTeam(data.owner_team ?? "");
+      setOwnerUserId(data.owner_user_id ?? "");
       setEnvironment(data.environment);
       setGroups(data.groups.join(", "));
       setCustomFieldsText(JSON.stringify(data.custom_fields ?? {}, null, 2));
     }
   }, [data]);
 
+  const members = useApiResource(
+    () => api.organization.members({ limit: 100 }),
+    [canTag],
+    { enabled: canTag },
+  );
+
   const contextMut = useMutation(
     () => api.assets.setContext(id, {
       owner_team: ownerTeam.trim() || null,
+      owner_user_id: ownerUserId || null,
       environment,
       groups: groups.split(",").map((value) => value.trim()).filter(Boolean),
       custom_fields: parseCustomFields(customFieldsText),
@@ -138,6 +152,7 @@ export default function AssetDetailPage() {
   }
 
   const asset = data;
+  const activeMembers = (members.data?.items ?? []).filter((member) => member.is_active && member.accepted_at);
   const endpoint = assetEndpoint(asset);
   const critFieldError = fieldError(critMut.error, "criticality") ?? fieldError(critMut.error, "rationale");
   const tagFieldError = fieldError(tagMut.error, "key") ?? fieldError(tagMut.error, "value");
@@ -304,6 +319,13 @@ export default function AssetDetailPage() {
                   <Field label="Owner team" htmlFor="owner-team" error={fieldError(contextMut.error, "owner_team")}>
                     <Input id="owner-team" maxLength={120} value={ownerTeam} onChange={(e) => setOwnerTeam(e.target.value)} />
                   </Field>
+                  <Field label="Accountable owner" htmlFor="asset-owner" error={fieldError(contextMut.error, "owner_user_id")} hint="Only active members of this organization can own an asset.">
+                    <Select id="asset-owner" value={ownerUserId} onChange={(e) => setOwnerUserId(e.target.value)}>
+                      <option value="">No individual owner</option>
+                      {ownerUserId && !activeMembers.some((member) => member.user_id === ownerUserId) && <option value={ownerUserId}>Current owner ({ownerUserId})</option>}
+                      {activeMembers.map((member) => <option key={member.user_id} value={member.user_id}>{member.full_name || member.email}</option>)}
+                    </Select>
+                  </Field>
                   <Field label="Environment" htmlFor="asset-environment" error={fieldError(contextMut.error, "environment")}>
                     <Select id="asset-environment" value={environment} onChange={(e) => setEnvironment(e.target.value as AssetEnvironment)}>
                       {ENVIRONMENTS.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
@@ -316,9 +338,27 @@ export default function AssetDetailPage() {
                     <Textarea id="asset-custom-fields" value={customFieldsText} onChange={(e) => setCustomFieldsText(e.target.value)} rows={4} />
                   </Field>
                   <InlineError message={contextMut.errorMessage} />
+                  {members.error && <p className="text-xs text-muted">Member list unavailable: {members.error}</p>}
                   <Button type="submit" size="sm" loading={contextMut.loading}>Save context</Button>
                 </form>
               )}
+            </CardBody>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle>CI/CD policy gate</CardTitle></CardHeader>
+            <CardBody className="space-y-3 text-sm">
+              <p className="text-muted">Current fail-closed deployment decision from active canonical findings and recent coverage evidence.</p>
+              {policyGate.loading && !policyGate.data ? <LoadingState label="Evaluating deployment gate…" /> : policyGate.error ? (
+                <ErrorState message={policyGate.error} onRetry={policyGate.refetch} />
+              ) : policyGate.data ? <>
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line p-3">
+                  <div><p className="font-medium text-fg">{humanize(policyGate.data.decision)}</p><p className="mt-1 text-xs text-muted">{humanize(policyGate.data.reason_code)}</p></div>
+                  <Badge tone={policyGate.data.decision === "block" ? "danger" : policyGate.data.decision === "warn" || policyGate.data.decision === "unknown" ? "warn" : "ok"}>{policyGate.data.allow_deploy ? "Deploy allowed" : "Deploy blocked"}</Badge>
+                </div>
+                <dl className="grid grid-cols-2 gap-2 text-xs"><div><dt className="text-muted">Critical</dt><dd className="font-medium text-danger">{policyGate.data.counts.critical}</dd></div><div><dt className="text-muted">High</dt><dd className="font-medium text-warn">{policyGate.data.counts.high}</dd></div><div className="col-span-2"><dt className="text-muted">Latest coverage import</dt><dd className="mt-0.5 text-fg">{policyGate.data.scan_imported_at ? formatDateTime(policyGate.data.scan_imported_at) : "No qualifying recent scan"}</dd></div></dl>
+                {policyGate.data.blockers.length > 0 && <div className="rounded-lg border border-line p-3"><p className="text-xs font-medium text-fg">Findings requiring attention</p><ul className="mt-2 space-y-1.5 text-xs">{policyGate.data.blockers.map((finding) => <li key={finding.id} className="flex items-center justify-between gap-3"><span className="min-w-0 truncate text-fg">{finding.title}</span><span className={finding.severity === "critical" ? "shrink-0 text-danger" : "shrink-0 text-warn"}>{humanize(finding.severity)} · {finding.risk_score.toFixed(0)}</span></li>)}</ul></div>}
+                <Button size="sm" variant="outline" onClick={policyGate.refetch}>Refresh decision</Button>
+              </> : null}
             </CardBody>
           </Card>
           <Card>

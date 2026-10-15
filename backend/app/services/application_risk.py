@@ -63,21 +63,38 @@ async def list_application_risks(
         CanonicalFinding.organization_id == principal.organization_id,
         CanonicalFinding.status.in_(_ACTIVE),
     )
+    finding_count = func.count(CanonicalFinding.id)
+    critical_count = func.sum(
+        case((CanonicalFinding.severity == "critical", 1), else_=0)
+    )
+    high_count = func.sum(case((CanonicalFinding.severity == "high", 1), else_=0))
+    max_risk = func.coalesce(func.max(CanonicalFinding.risk_score), 0.0)
+    # Application exposure should not collapse to its single worst finding.  This
+    # bounded rollup keeps one critical issue prominent while surfacing a product that
+    # has a concentrated backlog of critical/high issues across repositories and assets.
+    aggregate_risk = func.least(
+        100.0,
+        max_risk
+        + func.coalesce(critical_count, 0) * 5.0
+        + func.coalesce(high_count, 0) * 2.0
+        + func.least(15.0, finding_count * 0.5),
+    ).label("aggregate_risk")
     rows = (
         await session.execute(
             select(
                 app,
                 func.count(func.distinct(Asset.id)),
-                func.count(CanonicalFinding.id),
-                func.sum(case((CanonicalFinding.severity == "critical", 1), else_=0)),
-                func.sum(case((CanonicalFinding.severity == "high", 1), else_=0)),
-                func.coalesce(func.max(CanonicalFinding.risk_score), 0.0),
+                finding_count,
+                critical_count,
+                high_count,
+                max_risk,
+                aggregate_risk,
             )
             .select_from(Asset)
             .outerjoin(CanonicalFinding, active_join)
             .where(*conditions)
             .group_by(app)
-            .order_by(func.max(CanonicalFinding.risk_score).desc().nullslast(), app)
+            .order_by(aggregate_risk.desc(), max_risk.desc(), app)
             .limit(limit)
             .offset(offset)
         )
@@ -91,8 +108,9 @@ async def list_application_risks(
                 critical=int(critical or 0),
                 high=int(high or 0),
                 max_risk_score=float(max_risk or 0),
+                aggregate_risk_score=float(aggregate_risk or 0),
             )
-            for name, assets, findings, critical, high, max_risk in rows
+            for name, assets, findings, critical, high, max_risk, aggregate_risk in rows
         ],
         total=total,
         limit=limit,

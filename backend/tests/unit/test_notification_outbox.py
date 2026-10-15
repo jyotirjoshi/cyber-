@@ -15,6 +15,31 @@ from app.services.audit import AuditAction
 from app.services.context import ACTOR_WORKER, Principal
 
 
+def test_pagerduty_recipient_uses_the_tenant_routing_key() -> None:
+    """A regression must not attempt to resolve PagerDuty as a user or email recipient."""
+    recipients = notifications._recipients(
+        NotificationChannel.PAGERDUTY,
+        policy=SimpleNamespace(slack_channel=None, email_recipients=[]),
+        slack_default=None,
+        extra_emails=(),
+        user_id=uuid.uuid4(),
+    )
+
+    assert recipients == ["default"]
+
+
+def test_splunk_recipient_is_the_tenant_hec_stream() -> None:
+    recipients = notifications._recipients(
+        NotificationChannel.SPLUNK,
+        policy=SimpleNamespace(slack_channel=None, email_recipients=[]),
+        slack_default=None,
+        extra_emails=(),
+        user_id=uuid.uuid4(),
+    )
+
+    assert recipients == ["hec"]
+
+
 @pytest.mark.asyncio
 async def test_dispatch_queues_email_without_sending_before_transaction_commit(monkeypatch):
     principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
@@ -74,6 +99,60 @@ async def test_dispatch_queues_email_without_sending_before_transaction_commit(m
 
 
 @pytest.mark.asyncio
+async def test_dispatch_queues_each_matching_webhook_as_a_durable_outbox_row(monkeypatch):
+    """The change that would break this is posting inside dispatch instead of queuing."""
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    subscription = SimpleNamespace(id=uuid.uuid4())
+
+    class _Session:
+        def __init__(self):
+            self.rows = []
+
+        def add(self, row):
+            self.rows.append(row)
+
+        @asynccontextmanager
+        async def begin_nested(self):
+            yield
+
+        async def flush(self):
+            pass
+
+    async def fake_policy(*_args):
+        return SimpleNamespace(notify_min_severity=Severity.INFO, email_recipients=[])
+
+    async def matching_subscriptions(*_args):
+        return [subscription]
+
+    async def not_recorded(*_args):
+        return False
+
+    async def fake_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(notifications, "_policy", fake_policy)
+    monkeypatch.setattr(notifications, "_matching_webhook_subscriptions", matching_subscriptions)
+    monkeypatch.setattr(notifications, "_already_recorded", not_recorded)
+    monkeypatch.setattr(notifications.audit_service, "record", fake_audit)
+
+    rows = await notifications.dispatch(
+        _Session(),
+        principal,
+        event=NotificationEvent.ASSESSMENT_COMPLETED,
+        content=notifications.NotificationContent(subject="Complete", body="Finished"),
+        settings=Settings(),
+        channels=(NotificationChannel.WEBHOOK,),
+        resource_id="assessment-1",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].channel == NotificationChannel.WEBHOOK.value
+    assert rows[0].recipient == str(subscription.id)
+    assert rows[0].payload["webhook_subscription_id"] == str(subscription.id)
+    assert rows[0].payload["webhook_event"] == "assessment.completed"
+
+
+@pytest.mark.asyncio
 async def test_outbox_worker_delivers_committed_rows_with_original_content(monkeypatch):
     org_id = uuid.uuid4()
     row = Notification(
@@ -125,6 +204,107 @@ async def test_outbox_worker_delivers_committed_rows_with_original_content(monke
     assert row.status == NotificationStatus.SENT.value
     assert audited[0]["action"] == AuditAction.NOTIFICATION_SEND
     assert audited[0]["resource_id"] == row.id
+
+
+@pytest.mark.asyncio
+async def test_outbox_delivery_delegates_webhook_rows_to_signed_transport(monkeypatch):
+    row = Notification(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        event=NotificationEvent.ASSESSMENT_COMPLETED.value,
+        channel=NotificationChannel.WEBHOOK.value,
+        status=NotificationStatus.PENDING.value,
+        recipient=str(uuid.uuid4()),
+        subject="Assessment complete",
+        body="Finished",
+        payload={"webhook_subscription_id": str(uuid.uuid4()), "webhook_event": "assessment.completed"},
+        dedupe_key="webhook-delivery",
+        attempts=0,
+    )
+    actor = Principal(
+        user_id=None,
+        organization_id=row.organization_id,
+        role=Role.VIEWER,
+        actor_type=ACTOR_WORKER,
+    )
+    calls = []
+
+    async def send(session, actual_row, *, settings):
+        calls.append((session, actual_row, settings))
+
+    monkeypatch.setattr(notifications.webhook_service, "deliver_notification", send)
+    await notifications._deliver(
+        object(),
+        actor,
+        row,
+        notifications.NotificationContent(subject="Assessment complete", body="Finished"),
+        severity=None,
+        settings=Settings(),
+        redis=None,
+    )
+
+    assert calls[0][1] is row
+    assert row.status == NotificationStatus.SENT.value
+
+
+@pytest.mark.asyncio
+async def test_outbox_delivery_exports_structured_events_to_splunk(monkeypatch):
+    row = Notification(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        event=NotificationEvent.CRITICAL_FINDING.value,
+        channel=NotificationChannel.SPLUNK.value,
+        status=NotificationStatus.PENDING.value,
+        recipient="hec",
+        subject="Critical exposure",
+        body="Review this finding.",
+        payload={"severity": "critical", "link": "https://cynux.example/findings/42"},
+        resource_type="canonical_finding",
+        resource_id="42",
+        dedupe_key="critical_finding:42:splunk:hec",
+        attempts=0,
+    )
+    actor = Principal(
+        user_id=None,
+        organization_id=row.organization_id,
+        role=Role.VIEWER,
+        actor_type=ACTOR_WORKER,
+    )
+    calls = []
+
+    class _Splunk:
+        def __init__(self, settings, redis):
+            pass
+
+        async def emit(self, **kwargs):
+            calls.append(kwargs)
+
+        async def aclose(self):
+            pass
+
+    async def scoped(*args, **kwargs):
+        return Settings()
+
+    monkeypatch.setattr(notifications, "SplunkHecClient", _Splunk)
+    monkeypatch.setattr(notifications, "_delivery_settings", scoped)
+    await notifications._deliver(
+        object(),
+        actor,
+        row,
+        notifications.NotificationContent(
+            subject="Critical exposure",
+            body="Review this finding.",
+            link="https://cynux.example/findings/42",
+        ),
+        severity=Severity.CRITICAL,
+        settings=Settings(),
+        redis=None,
+    )
+
+    assert calls[0]["event"] is NotificationEvent.CRITICAL_FINDING
+    assert calls[0]["organization_id"] == str(row.organization_id)
+    assert calls[0]["resource_id"] == "42"
+    assert row.status == NotificationStatus.SENT.value
 
 
 @pytest.mark.asyncio

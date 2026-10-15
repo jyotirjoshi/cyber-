@@ -6,6 +6,15 @@
 
 const EMPTY = "—";
 
+export function formatBytes(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value < 0) return EMPTY;
+  if (value < 1024) return `${Math.round(value)} B`;
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  const unit = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / 1024 ** unit;
+  return `${amount.toLocaleString("en-US", { maximumFractionDigits: 1 })} ${units[unit]}`;
+}
+
 const DATE_TIME = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   month: "short",

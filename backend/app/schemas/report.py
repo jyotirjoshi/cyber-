@@ -17,7 +17,7 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.db.enums import ReportFormat, ReportStatus
 from app.schemas.assessment import DegradationOut
@@ -49,6 +49,9 @@ class ReportDetailOut(ReportOut):
     #: What the report was rendered from. See the module docstring.
     content_digest: dict[str, Any] = Field(default_factory=dict)
     degradations: list[DegradationOut] = Field(default_factory=list)
+    template_id: uuid.UUID | None = None
+    template_version: int | None = None
+    template_snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportGenerateIn(BaseModel):
@@ -61,6 +64,91 @@ class ReportGenerateIn(BaseModel):
     title: str | None = Field(default=None, max_length=300)
     #: Regenerate rather than return the existing ready report.
     force: bool = False
+    template_id: uuid.UUID | None = None
 
 
-__all__ = ["ReportDetailOut", "ReportGenerateIn", "ReportOut"]
+class ReportScheduleCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=160)
+    assessment_id: uuid.UUID
+    title: str | None = Field(default=None, max_length=300)
+    format: ReportFormat = ReportFormat.PDF
+    audience: Literal["executive", "technical"] = "executive"
+    cron_expression: str = Field(min_length=9, max_length=120)
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+    recipients: list[EmailStr] = Field(default_factory=list, max_length=50)
+    template_id: uuid.UUID | None = None
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, value: str) -> str:
+        from app.services.scheduling import next_cron_time
+
+        next_cron_time(value, "UTC", dt.datetime.now(dt.UTC))
+        return value
+
+
+class ReportScheduleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    assessment_id: uuid.UUID
+    name: str
+    title: str | None
+    format: ReportFormat
+    audience: str
+    cron_expression: str
+    timezone: str
+    recipients: list[str]
+    is_enabled: bool
+    next_run_at: dt.datetime
+    last_run_at: dt.datetime | None
+    last_report_id: uuid.UUID | None
+    created_at: dt.datetime
+    template_id: uuid.UUID | None = None
+
+
+class ReportTemplateCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=1000)
+    definition: dict[str, Any]
+
+
+class ReportTemplateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    version: int
+    description: str | None
+    definition: dict[str, Any]
+    is_active: bool
+    created_at: dt.datetime
+
+
+class ReportShareCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expires_at: dt.datetime
+
+
+class ReportShareIssuedOut(BaseModel):
+    id: uuid.UUID
+    token: str
+    expires_at: dt.datetime
+
+
+class ReportShareLinkOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    report_id: uuid.UUID
+    token_prefix: str
+    expires_at: dt.datetime
+    revoked_at: dt.datetime | None = None
+    created_at: dt.datetime
+
+
+__all__ = ["ReportDetailOut", "ReportGenerateIn", "ReportOut", "ReportScheduleCreateIn", "ReportScheduleOut", "ReportShareCreateIn", "ReportShareIssuedOut", "ReportShareLinkOut", "ReportTemplateCreateIn", "ReportTemplateOut"]

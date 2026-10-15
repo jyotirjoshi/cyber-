@@ -30,6 +30,7 @@ class CanonicalFindingOut(BaseModel):
     assignee_user_id: uuid.UUID | None = None
     due_at: dt.datetime | None = None
     remediation_plan: str | None = None
+    remediation_group: str | None = None
     custom_fields: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -39,6 +40,7 @@ class FindingObservationOut(BaseModel):
     id: uuid.UUID
     provider: str
     external_id: str
+    source_record_id: uuid.UUID | None
     cve_id: str
     title: str
     severity: str
@@ -68,9 +70,96 @@ class CanonicalFindingDetailOut(CanonicalFindingOut):
 class CanonicalStatusDecisionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["open", "accepted_risk", "false_positive"]
+    status: Literal["open", "false_positive"]
     reason: str = Field(min_length=1, max_length=2000)
     expected_version: int = Field(ge=0)
+
+
+class RiskAcceptanceIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rationale: str = Field(min_length=3, max_length=2000)
+    expires_at: dt.datetime
+
+    @field_validator("rationale")
+    @classmethod
+    def clean_rationale(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("risk acceptance rationale cannot be blank")
+        return value.strip()
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_expiry(cls, value: dt.datetime) -> dt.datetime:
+        from app.services.risk_acceptance import validate_expiry
+
+        return validate_expiry(value)
+
+
+class RetestRequestIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("note")
+    @classmethod
+    def clean_note(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("retest note cannot be blank")
+        return value.strip() if value is not None else None
+
+
+class RiskAcceptanceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    canonical_finding_id: uuid.UUID
+    requested_by_id: uuid.UUID
+    approved_by_id: uuid.UUID | None = None
+    rationale: str
+    status: str
+    expires_at: dt.datetime
+    approved_at: dt.datetime | None = None
+
+
+class RetestRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    canonical_finding_id: uuid.UUID
+    assessment_id: uuid.UUID | None = None
+    status: str
+    request_note: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    completed_at: dt.datetime | None = None
+
+
+class CanonicalRemediationOperationOut(BaseModel):
+    """The current operational state for one canonical finding.
+
+    This is intentionally a projection rather than a new persistence model.  It lets
+    remediation teams work from one queue while preserving canonical finding detail
+    and the independent ticket, exception, and retest lifecycles.
+    """
+
+    finding: CanonicalFindingOut
+    tickets: list[TicketLinkOut] = Field(default_factory=list)
+    latest_risk_acceptance: RiskAcceptanceOut | None = None
+    latest_retest: RetestRequestOut | None = None
+    next_action: str
+    priority_reasons: list[str] = Field(default_factory=list)
+    source_observations: int = Field(default=0, ge=0)
+    sla_escalation_level: int = Field(default=0, ge=0, le=3)
+
+
+class RemediationGroupOut(BaseModel):
+    """A bounded operational summary for findings resolved by one common change."""
+
+    name: str
+    active_findings: int = Field(ge=0)
+    overdue_findings: int = Field(ge=0)
+    highest_risk_score: float = Field(ge=0, le=100)
+    last_seen_at: dt.datetime
 
 
 class CanonicalWorkIn(BaseModel):
@@ -82,6 +171,7 @@ class CanonicalWorkIn(BaseModel):
     assignee_user_id: uuid.UUID | None = None
     due_at: dt.datetime | None = None
     remediation_plan: str | None = Field(default=None, max_length=4000)
+    remediation_group: str | None = Field(default=None, max_length=160)
     custom_fields: dict[str, Any] | None = None
 
     @field_validator("custom_fields")
@@ -98,6 +188,16 @@ class CanonicalWorkIn(BaseModel):
             raise ValueError("remediation plan cannot be blank; use null to clear it")
         return value.strip() if value is not None else None
 
+    @field_validator("remediation_group")
+    @classmethod
+    def clean_remediation_group(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("remediation group cannot be blank; use null to clear it")
+        cleaned = value.strip() if value is not None else None
+        if cleaned is not None and len(cleaned.lower()) > 160:
+            raise ValueError("remediation group is too long after normalization")
+        return cleaned
+
     @field_validator("due_at")
     @classmethod
     def require_timezone(cls, value: dt.datetime | None) -> dt.datetime | None:
@@ -110,3 +210,26 @@ class CanonicalWorkIn(BaseModel):
         if not (self.model_fields_set - {"expected_version"}):
             raise ValueError("provide at least one remediation work field")
         return self
+
+
+class BulkCanonicalWorkItemIn(CanonicalWorkIn):
+    """One version-checked mutation in an all-or-nothing bulk remediation request."""
+
+    finding_id: uuid.UUID
+
+
+class BulkCanonicalWorkIn(BaseModel):
+    """Bounded batch to avoid unreviewable or accidentally broad remediation changes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[BulkCanonicalWorkItemIn] = Field(min_length=1, max_length=100)
+
+    @field_validator("items")
+    @classmethod
+    def require_unique_finding_ids(
+        cls, value: list[BulkCanonicalWorkItemIn]
+    ) -> list[BulkCanonicalWorkItemIn]:
+        if len({item.finding_id for item in value}) != len(value):
+            raise ValueError("bulk remediation finding IDs must be unique")
+        return value

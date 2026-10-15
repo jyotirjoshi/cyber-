@@ -255,6 +255,18 @@ def _issue_pair(
     )
 
 
+def issue_sso_session(settings: Settings, *, user: User, membership: Membership) -> TokenPairOut:
+    """Issue the normal Cynux session after an already-verified OIDC login."""
+    _assert_active(user)
+    _clear_failed_logins(user, now=utcnow())
+    return _issue_pair(
+        settings,
+        user=user,
+        organization_id=membership.organization_id,
+        role=membership.role_enum,
+    )
+
+
 async def _active_membership(
     session: AsyncSession,
     user_id: uuid.UUID,

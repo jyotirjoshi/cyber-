@@ -82,6 +82,7 @@ class OpRecorder:
     def __init__(self) -> None:
         self.tables: dict[str, list[Any]] = {}
         self.indexes: list[tuple[str, str, tuple[str, ...], bool]] = []
+        self.created_constraints: list[str] = []
         self.dropped_tables: list[str] = []
         self.dropped_indexes: list[tuple[str, str]] = []
         self.other: list[str] = []
@@ -106,11 +107,13 @@ class OpRecorder:
     def create_unique_constraint(
         self, name: str, table_name: str, columns: list[str], **kwargs: Any
     ) -> None:
+        self.created_constraints.append(name)
         self.other.append(f"create_unique:{table_name}:{name}:{columns}")
 
     def create_check_constraint(
         self, name: str, table_name: str, condition: str, **kwargs: Any
     ) -> None:
+        self.created_constraints.append(name)
         self.other.append(f"create_check:{table_name}:{name}:{condition}")
 
     def create_foreign_key(
@@ -122,6 +125,7 @@ class OpRecorder:
         remote_cols: list[str],
         **kwargs: Any,
     ) -> None:
+        self.created_constraints.append(name)
         self.other.append(f"create_fk:{source}:{name}:{referent}:{local_cols}:{remote_cols}")
 
     # -- downgrade ----------------------------------------------------------
@@ -132,6 +136,11 @@ class OpRecorder:
 
     def drop_index(self, name: str, table_name: str = "", **kwargs: Any) -> None:
         self.dropped_indexes.append((name, table_name))
+        self.indexes = [
+            item
+            for item in self.indexes
+            if not (item[0] == name and (not table_name or item[1] == table_name))
+        ]
 
     def drop_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
         self.other.append(f"drop_column:{table_name}:{column_name}")
@@ -223,6 +232,12 @@ class MetadataOp:
         table = self.metadata.tables[table_name]
         sa.Index(name, *(table.c[column] for column in columns), unique=unique)
 
+    def drop_index(self, name: str, table_name: str = "", **kwargs: Any) -> None:
+        table = self.metadata.tables[table_name]
+        index = next((item for item in table.indexes if item.name == name), None)
+        assert index is not None, f"cannot drop missing index {table_name}.{name}"
+        table.indexes.remove(index)
+
     def drop_constraint(self, name: str, table_name: str, **kwargs: Any) -> None:
         table = self.metadata.tables[table_name]
         constraint = next((item for item in table.constraints if item.name == name), None)
@@ -235,7 +250,9 @@ class MetadataOp:
     def execute(self, statement: Any, **kwargs: Any) -> None:
         """Data-only migrations do not change the schema metadata being compared."""
         sql = str(statement).lstrip().upper()
-        assert sql.startswith(("UPDATE ", "CREATE EXTENSION "))
+        assert sql.startswith(("UPDATE ", "DELETE ", "WITH ", "CREATE EXTENSION ")), (
+            "schema-changing SQL must be modeled explicitly by MetadataOp: " + sql[:80]
+        )
 
 
 @pytest.fixture(scope="module")
@@ -416,6 +433,17 @@ def test_index_names_are_unique(recorded: OpRecorder) -> None:
     assert not duplicates, f"duplicate index names: {duplicates}"
 
 
+def test_postgres_schema_identifiers_fit_server_limit(
+    recorded: OpRecorder,
+) -> None:
+    """PostgreSQL rejects explicit ALTER/INDEX identifiers longer than 63 bytes."""
+    names = [name for name, _table, _columns, _unique in recorded.indexes]
+    names.extend(recorded.created_constraints)
+
+    too_long = sorted({name for name in names if len(name.encode("utf-8")) > 63})
+    assert not too_long, f"PostgreSQL identifiers exceed 63 bytes: {too_long}"
+
+
 @pytest.mark.parametrize("table_name", sorted(_model_tables()))
 def test_unique_constraints_match(migrated: sa.MetaData, table_name: str) -> None:
     """Deduplication depends on these. ``assets.unique_asset`` in particular is what
@@ -448,11 +476,19 @@ def test_check_constraints_match(migrated: sa.MetaData, table_name: str) -> None
     """
 
     def checks(table: sa.Table) -> dict[str, str]:
-        return {
-            constraint.name: str(constraint.sqltext)
-            for constraint in table.constraints
-            if isinstance(constraint, sa.CheckConstraint) and constraint.name
-        }
+        found: dict[str, str] = {}
+        for constraint in table.constraints:
+            if not isinstance(constraint, sa.CheckConstraint) or not constraint.name:
+                continue
+            name = str(constraint.name)
+            # Alembic applies Base.metadata's ``ck`` naming convention to the
+            # short semantic names used inside create_table().  The lightweight
+            # metadata replay does not have a MigrationContext, so emulate that
+            # one expansion here while preserving names already finalized by op.f().
+            if not name.startswith(f"ck_{table.name}_"):
+                name = f"ck_{table.name}_{name}"
+            found[name] = str(constraint.sqltext)
+        return found
 
     expected = checks(_model_tables()[table_name])
     found = checks(migrated.tables[table_name])

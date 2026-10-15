@@ -36,12 +36,18 @@ from app.db.models.assessment import Assessment
 from app.db.models.identity import Membership, Organization, User
 from app.db.repository import TenantRepository, tenant_select
 from app.schemas.assessment import AssessmentCreateIn, AuthorizationIn
-from app.schemas.canonical import CanonicalWorkIn
+from app.schemas.canonical import (
+    BulkCanonicalWorkIn,
+    CanonicalWorkIn,
+    RetestRequestIn,
+    RiskAcceptanceIn,
+)
 from app.schemas.external_alert import ExternalAlertSourceActionIn
 from app.services import assessment as assessment_service
 from app.services import audit as audit_service
 from app.services import canonical_work as canonical_work_service
 from app.services import external_alert as external_alert_service
+from app.services import remediation_governance as remediation_governance_service
 from app.services import ticket as ticket_service
 from app.services.context import ACTOR_AGENT, Principal
 from app.worker.dispatch import stage_assessment_run
@@ -193,11 +199,60 @@ _ACTION_PERMISSIONS: dict[str, Permission] = {
     "sync_sonarqube_alerts": Permission.INTEGRATION_MANAGE,
     "sync_snyk_issues": Permission.INTEGRATION_MANAGE,
     "sync_tenable_vulnerabilities": Permission.INTEGRATION_MANAGE,
+    "sync_qualys_host_detections": Permission.INTEGRATION_MANAGE,
+    "sync_rapid7_vulnerabilities": Permission.INTEGRATION_MANAGE,
+    "sync_wiz_issues": Permission.INTEGRATION_MANAGE,
+    "sync_prisma_cloud_alerts": Permission.INTEGRATION_MANAGE,
+    "sync_crowdstrike_vulnerabilities": Permission.INTEGRATION_MANAGE,
+    "sync_aws_security_hub_findings": Permission.INTEGRATION_MANAGE,
+    "sync_aws_inspector_findings": Permission.INTEGRATION_MANAGE,
+    "sync_hackerone_reports": Permission.INTEGRATION_MANAGE,
+    "sync_bugcrowd_submissions": Permission.INTEGRATION_MANAGE,
+    "sync_checkmarx_results": Permission.INTEGRATION_MANAGE,
+    "sync_fortify_issues": Permission.INTEGRATION_MANAGE,
+    "sync_azure_defender_alerts": Permission.INTEGRATION_MANAGE,
+    "sync_gcp_scc_findings": Permission.INTEGRATION_MANAGE,
+    "sync_burp_dast_findings": Permission.INTEGRATION_MANAGE,
     "update_github_alert": Permission.INTEGRATION_MANAGE,
     "create_jira_ticket": Permission.TICKET_CREATE,
+    "create_ticket": Permission.TICKET_CREATE,
+    "refresh_ticket_status": Permission.FINDING_READ,
     "update_canonical_work": Permission.FINDING_REMEDIATE,
+    "bulk_update_canonical_work": Permission.FINDING_REMEDIATE,
+    "request_retest": Permission.FINDING_VALIDATE,
+    "request_remediation_group_retests": Permission.FINDING_VALIDATE,
+    "request_risk_acceptance": Permission.FINDING_REMEDIATE,
     "start_assessment": Permission.ASSESSMENT_CREATE,
 }
+
+# Monitored autonomy is intentionally narrow. These operations synchronize a tenant's
+# existing integrations or refresh an already-linked ticket; they cannot create a scan,
+# alter a finding, open a ticket, or change a provider-side alert state.
+MONITORED_AUTONOMY_ACTIONS: frozenset[str] = frozenset(
+    {
+        "sync_github_alerts",
+        "sync_gitlab_alerts",
+        "sync_wazuh_alerts",
+        "sync_sonarqube_alerts",
+        "sync_snyk_issues",
+        "sync_tenable_vulnerabilities",
+        "sync_qualys_host_detections",
+        "sync_rapid7_vulnerabilities",
+        "sync_wiz_issues",
+        "sync_prisma_cloud_alerts",
+        "sync_crowdstrike_vulnerabilities",
+        "sync_aws_security_hub_findings",
+        "sync_aws_inspector_findings",
+        "sync_hackerone_reports",
+        "sync_bugcrowd_submissions",
+        "sync_checkmarx_results",
+        "sync_fortify_issues",
+        "sync_azure_defender_alerts",
+        "sync_gcp_scc_findings",
+        "sync_burp_dast_findings",
+        "refresh_ticket_status",
+    }
+)
 _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     "sync_github_alerts": frozenset(),
     "sync_gitlab_alerts": frozenset(),
@@ -205,10 +260,28 @@ _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     "sync_sonarqube_alerts": frozenset(),
     "sync_snyk_issues": frozenset(),
     "sync_tenable_vulnerabilities": frozenset(),
+    "sync_qualys_host_detections": frozenset(),
+    "sync_rapid7_vulnerabilities": frozenset(),
+    "sync_wiz_issues": frozenset(),
+    "sync_prisma_cloud_alerts": frozenset(),
+    "sync_crowdstrike_vulnerabilities": frozenset(),
+    "sync_aws_security_hub_findings": frozenset(),
+    "sync_aws_inspector_findings": frozenset(),
+    "sync_hackerone_reports": frozenset(),
+    "sync_bugcrowd_submissions": frozenset(),
+    "sync_checkmarx_results": frozenset(),
+    "sync_fortify_issues": frozenset(),
+    "sync_azure_defender_alerts": frozenset(),
+    "sync_gcp_scc_findings": frozenset(),
+    "sync_burp_dast_findings": frozenset(),
     "update_github_alert": frozenset({"alert_id", "decision", "reason", "comment"}),
     "create_jira_ticket": frozenset(
         {"finding_id", "canonical_finding_id", "project_key", "issue_type", "assignee"}
     ),
+    "create_ticket": frozenset(
+        {"finding_id", "canonical_finding_id", "provider", "project_key", "issue_type", "assignee"}
+    ),
+    "refresh_ticket_status": frozenset({"ticket_id"}),
     "update_canonical_work": frozenset(
         {
             "finding_id",
@@ -216,8 +289,13 @@ _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
             "assignee_user_id",
             "due_at",
             "remediation_plan",
+            "remediation_group",
         }
     ),
+    "bulk_update_canonical_work": frozenset({"items"}),
+    "request_retest": frozenset({"finding_id", "note"}),
+    "request_remediation_group_retests": frozenset({"remediation_group", "note"}),
+    "request_risk_acceptance": frozenset({"finding_id", "rationale", "expires_at"}),
     "start_assessment": frozenset({"target", "authorization_reference"}),
 }
 _SECRET_KEY_PARTS = frozenset({"token", "secret", "password", "credential", "api_key"})
@@ -292,7 +370,7 @@ def validate_action_payload(action: str, payload: Mapping[str, Any]) -> dict[str
             }
         except ValueError as exc:
             raise ValueError("A valid alert_id, decision and rationale are required") from exc
-    if action == "create_jira_ticket":
+    if action in {"create_jira_ticket", "create_ticket"}:
         target_keys = {key for key in ("finding_id", "canonical_finding_id") if key in normalized}
         if len(target_keys) != 1:
             raise ValueError("Exactly one valid finding_id or canonical_finding_id is required")
@@ -320,6 +398,18 @@ def validate_action_payload(action: str, payload: Mapping[str, Any]) -> dict[str
             r"[A-Za-z][A-Za-z0-9_]{0,39}", normalized["project_key"]
         ):
             raise ValueError("Invalid project_key")
+        if action == "create_ticket":
+            provider = normalized.get("provider")
+            if provider not in ticket_service.SUPPORTED_PROVIDERS:
+                raise ValueError("Unsupported ticket provider")
+    if action == "refresh_ticket_status":
+        ticket_id = normalized.get("ticket_id")
+        try:
+            if not isinstance(ticket_id, str):
+                raise ValueError
+            normalized = {"ticket_id": str(uuid.UUID(ticket_id))}
+        except ValueError as exc:
+            raise ValueError("A valid ticket_id is required") from exc
     if action == "update_canonical_work":
         finding_id = normalized.get("finding_id")
         if not isinstance(finding_id, str):
@@ -334,6 +424,62 @@ def validate_action_payload(action: str, payload: Mapping[str, Any]) -> dict[str
         normalized = {
             "finding_id": normalized["finding_id"],
             **work.model_dump(mode="json", exclude_unset=True),
+        }
+    if action == "bulk_update_canonical_work":
+        try:
+            bulk = BulkCanonicalWorkIn.model_validate(normalized)
+        except ValueError as exc:
+            raise ValueError("A valid bounded bulk remediation change is required") from exc
+        normalized = bulk.model_dump(mode="json", exclude_unset=True)
+    if action == "request_retest":
+        finding_id = normalized.get("finding_id")
+        try:
+            if not isinstance(finding_id, str):
+                raise ValueError
+            normalized["finding_id"] = str(uuid.UUID(finding_id))
+            request = RetestRequestIn.model_validate(
+                {key: value for key, value in normalized.items() if key != "finding_id"}
+            )
+        except ValueError as exc:
+            raise ValueError("A valid finding_id and retest note are required") from exc
+        normalized = {
+            "finding_id": normalized["finding_id"],
+            **request.model_dump(exclude_none=True),
+        }
+    if action == "request_remediation_group_retests":
+        group = normalized.get("remediation_group")
+        if (
+            not isinstance(group, str)
+            or not group.strip()
+            or len(group.strip()) > 160
+            or len(group.strip().lower()) > 160
+            or any(ord(ch) < 32 for ch in group)
+        ):
+            raise ValueError("A valid remediation_group is required")
+        try:
+            request = RetestRequestIn.model_validate(
+                {key: value for key, value in normalized.items() if key != "remediation_group"}
+            )
+        except ValueError as exc:
+            raise ValueError("A valid remediation group retest note is required") from exc
+        normalized = {
+            "remediation_group": group.strip(),
+            **request.model_dump(exclude_none=True),
+        }
+    if action == "request_risk_acceptance":
+        finding_id = normalized.get("finding_id")
+        try:
+            if not isinstance(finding_id, str):
+                raise ValueError
+            normalized["finding_id"] = str(uuid.UUID(finding_id))
+            request = RiskAcceptanceIn.model_validate(
+                {key: value for key, value in normalized.items() if key != "finding_id"}
+            )
+        except ValueError as exc:
+            raise ValueError("A valid risk acceptance request is required") from exc
+        normalized = {
+            "finding_id": normalized["finding_id"],
+            **request.model_dump(mode="json"),
         }
     return normalized
 
@@ -386,6 +532,7 @@ def new_agent_action(
             action, validated, depends_on_action_id=depends_on_action_id
         ),
         status="pending",
+        execution_evidence={},
     )
 
 
@@ -403,7 +550,7 @@ async def action_dependency_state(session: AsyncSession, action: AgentAction) ->
         )
     ).scalar_one_or_none()
     if dependency is None or (
-        action.action != "create_jira_ticket"
+        action.action not in {"create_jira_ticket", "create_ticket"}
         or dependency.action != "update_canonical_work"
         or action.payload.get("canonical_finding_id") != dependency.payload.get("finding_id")
     ):
@@ -493,31 +640,172 @@ async def execute_approved_action(
             session, principal, settings=settings, redis=redis
         )
         summary = f"{result.total} alerts synced"
+        evidence = {
+            "outcome": "synced", "source": "github", "record_count": int(result.total),
+            "missing_source_records": int(result.missing_source_records),
+        }
     elif proposed.action == "sync_gitlab_alerts":
         result = await external_alert_service.sync_gitlab_alerts(
             session, principal, settings=settings, redis=redis
         )
         summary = f"{result.total} alerts synced"
+        evidence = {
+            "outcome": "synced", "source": "gitlab", "record_count": int(result.total),
+            "missing_source_records": int(result.missing_source_records),
+        }
     elif proposed.action == "sync_wazuh_alerts":
         result = await external_alert_service.sync_wazuh_alerts(
             session, principal, settings=settings, redis=redis
         )
         summary = f"{result.total} alerts synced"
+        evidence = {"outcome": "synced", "source": "wazuh", "record_count": int(result.total)}
     elif proposed.action == "sync_sonarqube_alerts":
         result = await external_alert_service.sync_sonarqube_alerts(
             session, principal, settings=settings, redis=redis
         )
         summary = f"{result.total} alerts synced"
+        evidence = {"outcome": "synced", "source": "sonarqube", "record_count": int(result.total)}
     elif proposed.action == "sync_snyk_issues":
         result = await external_alert_service.sync_snyk_issues(
             session, principal, settings=settings, redis=redis
         )
         summary = f"{result.total} issues synced"
+        evidence = {"outcome": "synced", "source": "snyk", "record_count": int(result.total)}
     elif proposed.action == "sync_tenable_vulnerabilities":
         result = await external_alert_service.sync_tenable_vulnerabilities(
             session, principal, settings=settings, redis=redis
         )
         summary = f"{result.total} vulnerabilities synced"
+        evidence = {"outcome": "synced", "source": "tenable", "record_count": int(result.total)}
+    elif proposed.action == "sync_qualys_host_detections":
+        result = await external_alert_service.sync_qualys_host_detections(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} host detections synced"
+        evidence = {"outcome": "synced", "source": "qualys", "record_count": int(result.total)}
+    elif proposed.action == "sync_rapid7_vulnerabilities":
+        result = await external_alert_service.sync_rapid7_vulnerabilities(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} vulnerabilities synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "rapid7",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_wiz_issues":
+        result = await external_alert_service.sync_wiz_issues(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} Wiz Issues synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "wiz",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+            "missing_source_records": int(result.missing_source_records),
+        }
+    elif proposed.action == "sync_prisma_cloud_alerts":
+        result = await external_alert_service.sync_prisma_cloud_alerts(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} Prisma Cloud alerts synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "prisma_cloud",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_crowdstrike_vulnerabilities":
+        result = await external_alert_service.sync_crowdstrike_vulnerabilities(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} CrowdStrike vulnerabilities synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "crowdstrike",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_aws_security_hub_findings":
+        result = await external_alert_service.sync_aws_security_hub_findings(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} AWS Security Hub findings synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "aws_security_hub",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_aws_inspector_findings":
+        result = await external_alert_service.sync_aws_inspector_findings(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} Amazon Inspector findings synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "aws_inspector",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_hackerone_reports":
+        result = await external_alert_service.sync_hackerone_reports(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} HackerOne reports synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "hackerone",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_bugcrowd_submissions":
+        result = await external_alert_service.sync_bugcrowd_submissions(session, principal, settings=settings, redis=redis)
+        summary = f"{result.total} Bugcrowd submissions synced"
+        evidence = {"outcome": "synced", "source": "bugcrowd", "record_count": int(result.total), "absence_candidates": int(result.absence_candidates)}
+    elif proposed.action == "sync_checkmarx_results":
+        result = await external_alert_service.sync_checkmarx_results(session, principal, settings=settings, redis=redis)
+        summary = f"{result.total} Checkmarx results synced"
+        evidence = {"outcome": "synced", "source": "checkmarx", "record_count": int(result.total), "absence_candidates": int(result.absence_candidates)}
+    elif proposed.action == "sync_fortify_issues":
+        result = await external_alert_service.sync_fortify_issues(session, principal, settings=settings, redis=redis)
+        summary = f"{result.total} Fortify SSC issues synced"
+        evidence = {"outcome": "synced", "source": "fortify", "record_count": int(result.total), "absence_candidates": int(result.absence_candidates)}
+    elif proposed.action == "sync_azure_defender_alerts":
+        result = await external_alert_service.sync_azure_defender_alerts(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} Microsoft Defender for Cloud alerts synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "azure_defender",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_gcp_scc_findings":
+        result = await external_alert_service.sync_gcp_scc_findings(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} Google Security Command Center findings synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "gcp_scc",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
+    elif proposed.action == "sync_burp_dast_findings":
+        result = await external_alert_service.sync_burp_dast_findings(
+            session, principal, settings=settings, redis=redis
+        )
+        summary = f"{result.total} Burp Suite DAST findings synced"
+        evidence = {
+            "outcome": "synced",
+            "source": "burp_dast",
+            "record_count": int(result.total),
+            "absence_candidates": int(result.absence_candidates),
+        }
     elif proposed.action == "update_github_alert":
         alert = await external_alert_service.set_github_alert_state(
             session,
@@ -530,8 +818,14 @@ async def execute_approved_action(
             redis=redis,
         )
         summary = f"GitHub alert {alert.status}"
-    elif proposed.action == "create_jira_ticket":
+        evidence = {
+            "outcome": "updated",
+            "resource": {"type": "github_alert", "id": payload["alert_id"]},
+            "status": str(alert.status),
+        }
+    elif proposed.action in {"create_jira_ticket", "create_ticket"}:
         ticket_target = payload.get("canonical_finding_id") or payload["finding_id"]
+        provider = payload.get("provider", "jira")
         if "canonical_finding_id" in payload:
             ticket = await ticket_service.create_canonical_ticket(
                 session,
@@ -543,6 +837,7 @@ async def execute_approved_action(
                 issue_type=payload.get("issue_type"),
                 assignee=payload.get("assignee"),
                 by_agent=True,
+                provider=provider,
             )
         else:
             ticket = await ticket_service.create_ticket(
@@ -555,8 +850,38 @@ async def execute_approved_action(
                 issue_type=payload.get("issue_type"),
                 assignee=payload.get("assignee"),
                 by_agent=True,
+                provider=provider,
             )
-        summary = f"Jira ticket {ticket.external_key} linked"
+        summary = f"{provider.replace('_', ' ').title()} ticket {ticket.external_key} linked"
+        evidence = {
+            "outcome": "created",
+            "resource": {"type": f"{provider}_ticket", "id": str(ticket.external_key)},
+            "ticket_link_id": str(ticket.id),
+            "ticket_url": ticket.url,
+        }
+        evidence["canonical_finding_id" if "canonical_finding_id" in payload else "finding_id"] = str(
+            ticket_target
+        )
+    elif proposed.action == "refresh_ticket_status":
+        ticket = await ticket_service.refresh_ticket_status(
+            session,
+            principal,
+            uuid.UUID(payload["ticket_id"]),
+            settings=settings,
+            redis=redis,
+        )
+        summary = (
+            f"{ticket.provider.replace('_', ' ').title()} ticket {ticket.external_key} "
+            f"status refreshed to {ticket.external_status or 'unknown'}"
+        )
+        evidence = {
+            "outcome": "refreshed",
+            "resource": {"type": f"{ticket.provider}_ticket", "id": str(ticket.external_key)},
+            "ticket_link_id": str(ticket.id),
+            "external_key": ticket.external_key,
+            "external_status": ticket.external_status,
+            "ticket_url": ticket.url,
+        }
     elif proposed.action == "update_canonical_work":
         finding = await canonical_work_service.update_work(
             session,
@@ -567,6 +892,76 @@ async def execute_approved_action(
             ),
         )
         summary = f"Remediation work updated to version {finding.status_version}"
+        evidence = {
+            "outcome": "updated",
+            "resource": {"type": "canonical_finding", "id": payload["finding_id"]},
+            "status_version": int(finding.status_version),
+        }
+    elif proposed.action == "bulk_update_canonical_work":
+        findings = await canonical_work_service.bulk_update_work(
+            session,
+            principal,
+            BulkCanonicalWorkIn.model_validate(payload),
+        )
+        summary = f"Remediation work updated for {len(findings)} findings"
+        evidence = {
+            "outcome": "updated",
+            "resource": {"type": "canonical_finding_batch", "count": len(findings)},
+            "findings": [
+                {"id": str(finding.id), "status_version": int(finding.status_version)}
+                for finding in findings
+            ],
+        }
+    elif proposed.action == "request_retest":
+        request = await remediation_governance_service.request_retest(
+            session,
+            principal,
+            uuid.UUID(payload["finding_id"]),
+            note=payload.get("note"),
+        )
+        summary = f"Retest request {request.id} created"
+        evidence = {
+            "outcome": "created",
+            "resource": {"type": "retest_request", "id": str(request.id)},
+            "canonical_finding_id": payload["finding_id"],
+        }
+    elif proposed.action == "request_remediation_group_retests":
+        requests = await remediation_governance_service.request_remediation_group_retests(
+            session,
+            principal,
+            remediation_group=payload["remediation_group"],
+            note=payload.get("note"),
+        )
+        summary = (
+            f"Verification requested for {len(requests)} findings in remediation group "
+            f"{payload['remediation_group']}"
+        )
+        evidence = {
+            "outcome": "created",
+            "resource": {
+                "type": "remediation_group_retest_batch",
+                "id": payload["remediation_group"],
+                "count": len(requests),
+            },
+            "retest_request_ids": [str(request.id) for request in requests],
+        }
+    elif proposed.action == "request_risk_acceptance":
+        request = RiskAcceptanceIn.model_validate(
+            {key: value for key, value in payload.items() if key != "finding_id"}
+        )
+        acceptance = await remediation_governance_service.request_risk_acceptance(
+            session,
+            principal,
+            uuid.UUID(payload["finding_id"]),
+            rationale=request.rationale,
+            expires_at=request.expires_at,
+        )
+        summary = f"Risk acceptance request {acceptance.id} created"
+        evidence = {
+            "outcome": "created",
+            "resource": {"type": "risk_acceptance", "id": str(acceptance.id)},
+            "canonical_finding_id": payload["finding_id"],
+        }
     elif proposed.action == "start_assessment":
         assessment = await assessment_service.create_assessment(
             session,
@@ -587,12 +982,19 @@ async def execute_approved_action(
         run_id, _dispatch_id = stage_assessment_run(session, principal, assessment)
         proposed.run_id = run_id
         summary = f"Assessment {assessment.id} queued; scanning has not completed"
+        evidence = {
+            "outcome": "queued",
+            "resource": {"type": "assessment", "id": str(assessment.id)},
+            "run_id": str(run_id),
+            "target": payload["target"],
+        }
     else:  # pragma: no cover - the allowlist above rejects this first
         raise ConflictError("unsupported agent action")
 
     proposed.status = "executed"
     proposed.executed_at = utcnow()
     proposed.result_summary = summary
+    proposed.execution_evidence = evidence
     await audit_service.record(
         session,
         action=audit_service.AuditAction.AGENT_ACTION_EXECUTED,
@@ -754,6 +1156,11 @@ async def execute_and_settle_action(
 async def _fail_approved_action(session: AsyncSession, action: AgentAction, reason: str) -> None:
     action.status = "failed"
     action.result_summary = reason
+    action.execution_evidence = {
+        "outcome": "failed",
+        "action": action.action,
+        "reason": reason,
+    }
     await audit_service.record(
         session,
         action=audit_service.AuditAction.AGENT_ACTION_FAILED,
@@ -827,6 +1234,7 @@ __all__ = [
     "execute_approved_action",
     "execute_approved_batch",
     "new_agent_action",
+    "MONITORED_AUTONOMY_ACTIONS",
     "propose_action",
     "registered_action_names",
     "require_action_permission",

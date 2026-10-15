@@ -39,8 +39,10 @@ export default function AssetsPage() {
   const canTag = can("asset:tag");
 
   const [q, setQ] = React.useState("");
+  const [advancedQuery, setAdvancedQuery] = React.useState("");
   const [criticality, setCriticality] = React.useState<Criticality | "">("");
   const [environment, setEnvironment] = React.useState<AssetEnvironment | "">("");
+  const [assetGroup, setAssetGroup] = React.useState("");
   const [status, setStatus] = React.useState<AssetStatus | "">("");
   const [exposedOnly, setExposedOnly] = React.useState(false);
   const [selectedOnly, setSelectedOnly] = React.useState(false);
@@ -54,7 +56,23 @@ export default function AssetsPage() {
   const [cmdbError, setCmdbError] = React.useState<string | null>(null);
   const [selectedApplication, setSelectedApplication] = React.useState<string | null>(null);
 
+  React.useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    const value = (key: string) => query.get(key) ?? "";
+    const savedCriticality = value("criticality");
+    const savedEnvironment = value("environment");
+    const savedStatus = value("status");
+    setQ(value("q"));
+    setAdvancedQuery(value("query"));
+    if (CRITICALITIES.includes(savedCriticality as Criticality)) setCriticality(savedCriticality as Criticality);
+    if (ENVIRONMENTS.includes(savedEnvironment as AssetEnvironment)) setEnvironment(savedEnvironment as AssetEnvironment);
+    if (ASSET_STATUSES.includes(savedStatus as AssetStatus)) setStatus(savedStatus as AssetStatus);
+    setExposedOnly(value("internet_exposed") === "true");
+  }, []);
+
   const debouncedQ = useDebouncedValue(q);
+  const debouncedAdvancedQuery = useDebouncedValue(advancedQuery);
+  const debouncedGroup = useDebouncedValue(assetGroup);
 
   const { data, error, loading, refetch } = useApiResource(
     () =>
@@ -62,13 +80,15 @@ export default function AssetsPage() {
         limit: 25,
         offset,
         q: debouncedQ || undefined,
+        query: debouncedAdvancedQuery.trim() || undefined,
         criticality: criticality || undefined,
         environment: environment || undefined,
+        group: debouncedGroup || undefined,
         status: status || undefined,
         internet_exposed: exposedOnly || undefined,
         selected: selectedOnly || undefined,
       }),
-    [debouncedQ, criticality, environment, status, exposedOnly, selectedOnly, offset],
+    [debouncedQ, debouncedAdvancedQuery, debouncedGroup, criticality, environment, status, exposedOnly, selectedOnly, offset],
     { enabled: canRead },
   );
   const applicationRisks = useApiResource(
@@ -153,7 +173,7 @@ export default function AssetsPage() {
                   {assetChanges.data.items.map((change) => (
                     <TR key={change.id} clickable onClick={() => router.push(`/assets/${change.asset_id}`)}>
                       <TD className="font-medium text-fg">{change.asset_name}</TD>
-                      <TD>{change.change_type === "discovered" ? "New asset" : "Changed"}</TD>
+                      <TD>{change.change_type === "discovered" ? "New asset" : change.change_type === "unreachable" ? "No longer reachable" : "Changed"}</TD>
                       <TD className="text-muted">{Object.keys(change.changes).join(", ") || "—"}</TD>
                       <TD className="text-muted">{new Date(change.created_at).toLocaleString()}</TD>
                     </TR>
@@ -188,12 +208,12 @@ export default function AssetsPage() {
             ) : (
               <div className="space-y-3">
                 <Table>
-                  <THead><TR><TH>Application</TH><TH>Assets</TH><TH>Active findings</TH><TH>Critical</TH><TH>High</TH><TH>Top risk</TH></TR></THead>
+                  <THead><TR><TH>Application</TH><TH>Assets</TH><TH>Active findings</TH><TH>Critical</TH><TH>High</TH><TH>Exposure risk</TH><TH>Top risk</TH></TR></THead>
                   <TBody>
                     {applicationRisks.data.items.map((item) => (
                       <TR key={item.application} clickable onClick={() => setSelectedApplication(item.application)}>
                         <TD><button type="button" className="font-medium text-primary hover:underline" onClick={() => setSelectedApplication(item.application)}>{item.application}</button></TD>
-                        <TD>{item.asset_count}</TD><TD>{item.active_findings}</TD><TD>{item.critical}</TD><TD>{item.high}</TD>
+                        <TD>{item.asset_count}</TD><TD>{item.active_findings}</TD><TD>{item.critical}</TD><TD>{item.high}</TD><TD className="font-medium">{item.aggregate_risk_score.toFixed(0)}/100</TD>
                         <TD>{item.max_risk_score.toFixed(0)}/100</TD>
                       </TR>
                     ))}
@@ -240,7 +260,7 @@ export default function AssetsPage() {
           <CardBody className="space-y-3">
             <div>
               <h2 className="text-sm font-semibold text-fg">Import CMDB business context</h2>
-              <p className="text-xs text-muted">Update existing assets by type and identity. CSV columns: asset_type, asset_value, and any of tier, owner_team, environment. Tier accepts tier0–tier3. Unmatched assets are not created.</p>
+              <p className="text-xs text-muted">Update existing assets by type and identity. CSV columns: asset_type, asset_value, and any of tier, owner_team, environment, groups. Use semicolons within groups (for example, payments;customer-data). Tier accepts tier0–tier3. Unmatched assets are not created.</p>
             </div>
             <input
               aria-label="CMDB CSV file"
@@ -275,6 +295,20 @@ export default function AssetsPage() {
 
       <Card>
         <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field
+            label="Advanced query"
+            htmlFor="asset-query"
+            className="sm:col-span-2 lg:col-span-4"
+            hint={'Examples: environment:production AND risk>=0.8 · tag.tier:critical · custom.application:"Payments"'}
+          >
+            <Input
+              id="asset-query"
+              maxLength={1000}
+              value={advancedQuery}
+              placeholder="internet_exposed:true AND (criticality:critical OR criticality:high)"
+              onChange={(event) => { setAdvancedQuery(event.target.value); setOffset(0); }}
+            />
+          </Field>
           <Field label="Search" htmlFor="asset-q">
             <Input
               id="asset-q"
@@ -331,6 +365,13 @@ export default function AssetsPage() {
               <option value="">All environments</option>
               {ENVIRONMENTS.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
             </Select>
+          </Field>
+
+          <Field label="Asset group" htmlFor="asset-group">
+            <Input id="asset-group" value={assetGroup} maxLength={60} placeholder="Payments, production…" onChange={(e) => {
+              setAssetGroup(e.target.value);
+              setOffset(0);
+            }} />
           </Field>
 
           <div className="flex flex-wrap items-end gap-x-5 gap-y-2">

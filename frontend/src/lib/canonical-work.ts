@@ -4,6 +4,7 @@ interface CurrentWork {
   assignee_user_id: string | null;
   due_at: string | null;
   remediation_plan: string | null;
+  remediation_group?: string | null;
   status_version: number;
 }
 
@@ -11,6 +12,7 @@ interface EditedWork {
   assignee: string;
   dueLocal: string;
   plan: string;
+  remediationGroup?: string;
 }
 
 export function toLocalDateTimeInput(value: string | null): string {
@@ -35,6 +37,10 @@ export function buildCanonicalWorkUpdate(
   const plan = edited.plan.trim();
   if (plan !== (current.remediation_plan ?? "")) {
     body.remediation_plan = plan || null;
+  }
+  const remediationGroup = (edited.remediationGroup ?? "").trim();
+  if (remediationGroup !== (current.remediation_group ?? "")) {
+    body.remediation_group = remediationGroup || null;
   }
   return Object.keys(body).length > 1 ? body : null;
 }

@@ -61,6 +61,8 @@ class Notification(Base, TenantMixin, TimestampMixin):
 
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Earliest time a transient external-delivery failure can be retried by the worker.
+    next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     #: User-safe error text; the transport error detail goes to logs, not here.
     last_error: Mapped[str | None] = mapped_column(Text)
     #: Set when the org's notification policy filtered the event out, e.g. a low
@@ -77,16 +79,19 @@ class Notification(Base, TenantMixin, TimestampMixin):
         # delivered nor recorded as suppressed -- it just silently never arrives.
         CheckConstraint(
             "event IN ('assessment_started','approval_required','critical_finding',"
-            "'assessment_completed','assessment_failed','ticket_created','new_asset')",
+            "'assessment_completed','assessment_failed','ticket_created','ticket_closed',"
+            "'new_asset','sla_breach','automation_notification')",
             name="valid_notification_event",
         ),
         CheckConstraint(
             "status IN ('pending','sent','failed','suppressed')", name="valid_notification_status"
         ),
         CheckConstraint(
-            "channel IN ('slack','email','websocket')", name="valid_notification_channel"
+            "channel IN ('slack','email','websocket','pagerduty','webhook','splunk')",
+            name="valid_notification_channel",
         ),
         Index("ix_notifications_organization_id_status", "organization_id", "status"),
+        Index("ix_notifications_delivery_due", "status", "next_retry_at"),
         Index("ix_notifications_resource_type_resource_id", "resource_type", "resource_id"),
     )
 

@@ -55,34 +55,50 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import uuid
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import structlog
 from redis.asyncio.client import Redis
 from redis.exceptions import RedisError, ResponseError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.registry import AgentDeps
 from app.agent.runner import AgentRunner, RunOutcome
 from app.core.config import Settings
 from app.core.errors import ConflictError, CynuxError
-from app.db.enums import AgentRunStatus, AssessmentStatus
+from app.db.enums import AgentRunStatus, AssessmentStatus, ReportFormat, ReportStatus
 from app.db.models.agent import AgentRun
 from app.db.models.assessment import Assessment
+from app.db.models.report import Report
 from app.db.repository import tenant_select
 from app.db.session import session_scope
+from app.integrations.storage import ObjectStorage
+from app.reporting.generate import generate as generate_report
 from app.services.agent_action import execute_approved_batch, settle_assessment_action_receipt
+from app.services.asm_discovery import run_due_surfaces
 from app.services.assessment import transition
+from app.services.attack_simulation import execute_pending_techniques, run_due_campaigns
+from app.services.automation import execute_pending_automations, queue_due_automation_schedules
 from app.services.canonical_intel_refresh import refresh_stale_intel_batch
 from app.services.canonical_risk_refresh import refresh_stale_risk_batch
 from app.services.context import Principal
+from app.services.integration_sync import run_due_integration_syncs
 from app.services.job import cancel_jobs_for_assessment, reclaim_orphans
 from app.services.knowledge_indexer import run_due_knowledge_indexing
 from app.services.notification import deliver_pending
 from app.services.recurring_scan import run_due_scans
+from app.services.remediation_governance import (
+    complete_assessment_retest,
+    complete_retest,
+    expire_risk_acceptances,
+)
+from app.services.report import reconcile_report_distributions, run_due_report_schedules
+from app.services.sla_escalation import emit_overdue_sla_escalations
+from app.services.ticket import refresh_due_ticket_statuses
+from app.services.workflow import execute_due_workflows, queue_due_workflow_schedules
 from app.worker.dispatch import deliver_pending_dispatches
 from app.worker.protocol import (
     WORKER_LIVENESS_MAX_AGE_SECONDS,
@@ -608,9 +624,147 @@ class AgentWorker:
             self._current_advance = None
 
         log.info("worker.run_settled", run_id=str(run_id), status=outcome.status.value)
-        if outcome.status in {AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
+        if outcome.status is AgentRunStatus.COMPLETED:
+            await self._record_completed_retest(ctx, run_id)
+            await self._generate_completion_reports(ctx, run_id)
+        elif outcome.status in {AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
             await self._record_terminal_action_receipt(ctx, run_id, outcome.status.value)
+            await self._record_terminal_retest_outcome(ctx, run_id, outcome.status.value)
         await self._ack(message_id)
+
+    async def _record_completed_retest(self, ctx: _RunContext, run_id: uuid.UUID) -> None:
+        if ctx.assessment_id is None:
+            return
+        try:
+            async with session_scope(self._settings) as session:
+                await complete_assessment_retest(
+                    session,
+                    organization_id=ctx.organization_id,
+                    assessment_id=ctx.assessment_id,
+                    run_id=run_id,
+                )
+        except Exception as exc:
+            log.warning("worker.retest_completion_failed", run_id=str(run_id), error_type=type(exc).__name__)
+
+    async def _generate_completion_reports(
+        self, ctx: _RunContext, run_id: uuid.UUID | None
+    ) -> None:
+        """Generate one executive HTML/PDF pair when an assessment reaches completion.
+
+        This executes outside the graph-settlement transaction.  A storage or BYOK-model
+        outage must leave the assessment completed; the report renderer records its own
+        lifecycle and the next report schedule/manual request can recover independently.
+        """
+        if ctx.assessment_id is None:
+            return
+        try:
+            async with session_scope(self._settings) as session:
+                assessment = (
+                    await session.execute(
+                        tenant_select(Assessment, ctx.organization_id).where(
+                            Assessment.id == ctx.assessment_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if assessment is None or assessment.status_enum is not AssessmentStatus.COMPLETED:
+                    return
+                principal = Principal.for_system(organization_id=ctx.organization_id)
+                storage = ObjectStorage(self._settings)
+                for fmt in (ReportFormat.HTML, ReportFormat.PDF):
+                    title = (
+                        f"Automatic board report · Assessment {assessment.reference} "
+                        f"({fmt.value.upper()})"
+                    )
+                    existing = (
+                        await session.execute(
+                            select(Report)
+                            .where(
+                                Report.organization_id == ctx.organization_id,
+                                Report.assessment_id == assessment.id,
+                                Report.audience == "executive",
+                                Report.title == title,
+                            )
+                            .order_by(Report.created_at.desc(), Report.id.desc())
+                            .limit(1)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if existing is not None and existing.status_enum in {
+                        ReportStatus.READY,
+                        ReportStatus.PENDING,
+                        ReportStatus.GENERATING,
+                    }:
+                        continue
+                    await generate_report(
+                        session,
+                        assessment,
+                        fmt=fmt,
+                        audience="executive",
+                        storage=storage,
+                        settings=self._settings,
+                        principal=principal,
+                        title=title,
+                        report=existing,
+                    )
+                    log.info(
+                        "worker.completion_report_generated",
+                        assessment_id=str(assessment.id),
+                        run_id=str(run_id),
+                        format=fmt.value,
+                    )
+        except Exception as exc:
+            log.warning(
+                "worker.completion_report_failed",
+                assessment_id=str(ctx.assessment_id),
+                run_id=str(run_id),
+                error_type=type(exc).__name__,
+            )
+
+    async def _recover_completion_reports(self, *, limit: int = 10) -> int:
+        """Backfill completion reports missed during a transient renderer/storage outage."""
+        automatic_prefix = "Automatic board report · Assessment "
+        completed_report_count = (
+            select(func.count())
+            .where(
+                Report.organization_id == Assessment.organization_id,
+                Report.assessment_id == Assessment.id,
+                Report.audience == "executive",
+                Report.title.like(f"{automatic_prefix}%"),
+                Report.status.in_(
+                    (
+                        ReportStatus.READY.value,
+                        ReportStatus.PENDING.value,
+                        ReportStatus.GENERATING.value,
+                    )
+                ),
+            )
+            .correlate(Assessment)
+        )
+        async with session_scope(self._settings) as session:
+            candidates = (
+                await session.execute(
+                    select(Assessment.organization_id, Assessment.id)
+                    .where(
+                        Assessment.status == AssessmentStatus.COMPLETED.value,
+                        completed_report_count.scalar_subquery() < 2,
+                    )
+                    .order_by(Assessment.completed_at.desc().nullslast(), Assessment.id.desc())
+                    .limit(max(1, min(limit, 50)))
+                )
+            ).all()
+        for organization_id, assessment_id in candidates:
+            await self._generate_completion_reports(
+                _RunContext(
+                    run_status=AgentRunStatus.COMPLETED,
+                    organization_id=organization_id,
+                    assessment_id=assessment_id,
+                    session_id=None,
+                    heartbeat_at=None,
+                    assessment_status=AssessmentStatus.COMPLETED,
+                ),
+                None,
+            )
+        return len(candidates)
 
     async def _record_terminal_action_receipt(
         self, ctx: _RunContext, run_id: uuid.UUID, outcome: str,
@@ -629,6 +783,23 @@ class AgentWorker:
                 "worker.action_receipt_failed",
                 run_id=str(run_id), error_type=type(exc).__name__,
             )
+
+    async def _record_terminal_retest_outcome(
+        self, ctx: _RunContext, run_id: uuid.UUID, outcome: str,
+    ) -> None:
+        if ctx.assessment_id is None:
+            return
+        try:
+            async with session_scope(self._settings) as session:
+                await complete_retest(
+                    session,
+                    organization_id=ctx.organization_id,
+                    assessment_id=ctx.assessment_id,
+                    outcome=outcome,
+                    evidence={"run_id": str(run_id), "assessment_status": outcome},
+                )
+        except Exception as exc:
+            log.warning("worker.retest_outcome_failed", run_id=str(run_id), error_type=type(exc).__name__)
 
     async def _monitor(
         self,
@@ -860,94 +1031,170 @@ class AgentWorker:
     # -- maintenance ---------------------------------------------------------
 
     async def _maintenance_loop(self) -> None:
-        """Reap scanner jobs and deliver committed notification outbox rows.
+        """Run independent, non-overlapping maintenance lanes with separate sessions.
 
-        A sibling of the consume loop, not part of it, so a worker busy driving one long run
-        still reaps orphaned ``ScannerJob`` rows.  This reclaims *scanner jobs*, which is a
-        different thing from ``XAUTOCLAIM`` reclaiming *run messages* -- the two failure modes
-        (a scanner's executor died; the run's worker died) are independent.
+        Each lane has at most one in-flight cycle per worker. Slow provider calls
+        and report rendering cannot hold up dispatch, approved actions, or the
+        Redis liveness signal. Existing database claims coordinate other workers.
+        Cancelling this supervisor drains every child and rolls back its session.
         """
+        operations: tuple[
+            tuple[str, Callable[[AsyncSession], Awaitable[Any]], str | None, str], ...
+        ] = (
+            ("reaper", reclaim_orphans, None, "worker.maintenance_failed"),
+            (
+                "knowledge-indexing", lambda _session: run_due_knowledge_indexing(self._settings),
+                "worker.knowledge_indexed", "worker.knowledge_index_failed",
+            ),
+            (
+                "scans", lambda session: run_due_scans(session, self._settings),
+                "worker.recurring_scans_started", "worker.recurring_scan_failed",
+            ),
+            (
+                "reports", lambda session: run_due_report_schedules(
+                    session, self._settings, renderer=generate_report
+                ),
+                "worker.report_schedules_completed", "worker.report_schedule_failed",
+            ),
+            (
+                "report-distributions", reconcile_report_distributions,
+                "worker.report_distributions_reconciled", "worker.report_distribution_reconcile_failed",
+            ),
+            (
+                "report-recovery", lambda _session: self._recover_completion_reports(),
+                "worker.completion_reports_recovery_attempted", "worker.completion_report_recovery_failed",
+            ),
+            (
+                "campaigns", lambda session: run_due_campaigns(session, self._settings),
+                "worker.attack_simulation_campaigns_started", "worker.attack_simulation_campaign_failed",
+            ),
+            (
+                "bas-techniques", execute_pending_techniques,
+                "worker.attack_simulation_techniques_settled", "worker.attack_simulation_technique_failed",
+            ),
+            (
+                "dispatch", lambda session: deliver_pending_dispatches(
+                    session, self._redis, self._settings
+                ),
+                "worker.run_dispatches_published", "worker.run_dispatch_failed",
+            ),
+            (
+                "notifications", lambda session: deliver_pending(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                None, "worker.notification_delivery_failed",
+            ),
+            (
+                "integration-syncs", lambda session: run_due_integration_syncs(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.integration_syncs_completed", "worker.integration_sync_failed",
+            ),
+            (
+                "tickets", lambda session: refresh_due_ticket_statuses(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.ticket_statuses_refreshed", "worker.ticket_status_refresh_failed",
+            ),
+            (
+                "agent-actions", lambda session: execute_approved_batch(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.agent_actions_settled", "worker.agent_action_execution_failed",
+            ),
+            (
+                "automations", lambda session: execute_pending_automations(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.automation_executions_settled", "worker.automation_execution_failed",
+            ),
+            (
+                "automation-schedules", queue_due_automation_schedules,
+                "worker.automation_schedules_queued", "worker.automation_schedule_failed",
+            ),
+            (
+                "workflows", lambda session: execute_due_workflows(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.workflow_runs_settled", "worker.workflow_execution_failed",
+            ),
+            (
+                "workflow-schedules", queue_due_workflow_schedules,
+                "worker.workflow_schedules_queued", "worker.workflow_schedule_failed",
+            ),
+            (
+                "sla", lambda session: emit_overdue_sla_escalations(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.sla_escalations_emitted", "worker.sla_escalation_failed",
+            ),
+            (
+                "risk-expiry", expire_risk_acceptances,
+                "worker.risk_acceptances_expired", "worker.risk_acceptance_expiry_failed",
+            ),
+            (
+                "risk-refresh", refresh_stale_risk_batch,
+                "worker.canonical_risk_refreshed", "worker.canonical_risk_refresh_failed",
+            ),
+            (
+                "intel", lambda session: refresh_stale_intel_batch(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.canonical_intel_refreshed", "worker.canonical_intel_refresh_failed",
+            ),
+            (
+                "asm", lambda session: run_due_surfaces(session, self._settings),
+                "worker.asm_surfaces_completed", "worker.asm_surface_failed",
+            ),
+        )
+        tasks = [
+            asyncio.create_task(self._liveness_loop(), name="worker-liveness"),
+            *(
+                asyncio.create_task(
+                    self._maintenance_lane(operation, success_event, error_event),
+                    name=f"worker-maintenance-{name}",
+                )
+                for name, operation, success_event, error_event in operations
+            ),
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _maintenance_lane(
+        self,
+        operation: Callable[[AsyncSession], Awaitable[Any]],
+        success_event: str | None,
+        error_event: str,
+    ) -> None:
         while not self._stopping:
+            await asyncio.sleep(_MAINTENANCE_INTERVAL_SECONDS)
+            if self._stopping:
+                return
             try:
-                await asyncio.sleep(_MAINTENANCE_INTERVAL_SECONDS)
+                async with session_scope(self._settings) as session:
+                    count = await operation(session)
+                if count and success_event:
+                    log.info(success_event, count=count)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning(error_event, error=type(exc).__name__)
+
+    async def _liveness_loop(self) -> None:
+        while not self._stopping:
+            await asyncio.sleep(_MAINTENANCE_INTERVAL_SECONDS)
+            if self._stopping:
+                return
+            try:
                 await self._pulse_liveness()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.warning("worker.liveness_pulse_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    await reclaim_orphans(session)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.maintenance_failed", error=type(exc).__name__)
-            try:
-                indexed = await run_due_knowledge_indexing(self._settings)
-                if indexed:
-                    log.info("worker.knowledge_indexed", count=indexed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.knowledge_index_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    scheduled = await run_due_scans(session, self._settings)
-                if scheduled:
-                    log.info("worker.recurring_scans_started", count=scheduled)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.recurring_scan_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    dispatched = await deliver_pending_dispatches(
-                        session, self._redis, self._settings
-                    )
-                if dispatched:
-                    log.info("worker.run_dispatches_published", count=dispatched)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.run_dispatch_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    await deliver_pending(session, settings=self._settings, redis=self._redis)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.notification_delivery_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    executed = await execute_approved_batch(
-                        session, settings=self._settings, redis=self._redis
-                    )
-                if executed:
-                    log.info("worker.agent_actions_settled", count=executed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.agent_action_execution_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    refreshed = await refresh_stale_risk_batch(session)
-                if refreshed:
-                    log.info("worker.canonical_risk_refreshed", count=refreshed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.canonical_risk_refresh_failed", error=type(exc).__name__)
-            try:
-                async with session_scope(self._settings) as session:
-                    refreshed = await refresh_stale_intel_batch(
-                        session, settings=self._settings, redis=self._redis
-                    )
-                if refreshed:
-                    log.info("worker.canonical_intel_refreshed", count=refreshed)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("worker.canonical_intel_refresh_failed", error=type(exc).__name__)
 
     async def _pulse_liveness(self, *, now: dt.datetime | None = None) -> None:
         score = (now or _now()).timestamp()

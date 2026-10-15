@@ -57,6 +57,8 @@ class AuditAction:
     LOGIN = "auth.login"
     LOGIN_FAILED = "auth.login.failed"
     LOGIN_LOCKED = "auth.login.locked"
+    OIDC_LOGIN = "auth.oidc.login"
+    SAML_LOGIN = "auth.saml.login"
     LOGOUT = "auth.logout"
     # S105 fires on the names below because they contain "token" and "password". They are
     # audit verbs -- the dotted names of events -- and the whole point of this class is
@@ -70,15 +72,44 @@ class AuditAction:
     # -- organizations and membership (FR-002) ------------------------------
     ORG_CREATE = "organization.create"
     ORG_UPDATE = "organization.update"
+    MSSP_CLIENT_CREATE = "organization.client.create"
     MEMBER_INVITE = "membership.invite"
     MEMBER_ROLE_CHANGE = "membership.role.change"
     MEMBER_REMOVE = "membership.remove"
+    SCIM_TOKEN_CREATE = "scim.token.create"  # noqa: S105
+    SCIM_TOKEN_REVOKE = "scim.token.revoke"  # noqa: S105
+    OIDC_CONNECTION_UPSERT = "sso.oidc.configure"
+    SAML_CONNECTION_UPSERT = "sso.saml.configure"
+    COMPLIANCE_CONTROL_CREATE = "compliance_control.create"
+    COMPLIANCE_CONTROL_UPDATE = "compliance_control.update"
+    COMPLIANCE_FRAMEWORK_SEED = "compliance_framework.seed"
+    COMPLIANCE_MAPPING_CREATE = "compliance_mapping.create"
+    COMPLIANCE_MAPPING_DELETE = "compliance_mapping.delete"
 
     # -- assessments (FR-007, FR-011, FR-039) -------------------------------
     ASSESSMENT_CREATE = "assessment.create"
     ASSESSMENT_TRANSITION = "assessment.transition"
     ASSESSMENT_DEGRADED = "assessment.degraded"
     ASSESSMENT_CANCEL = "assessment.cancel"
+    ASSESSMENT_CHECKLIST_UPDATE = "assessment.checklist.update"
+    SCAN_PROFILE_DEACTIVATE = "scan_profile.deactivate"
+    ATTACK_SIMULATION_PAUSE = "attack_simulation.pause"
+    ATTACK_SIMULATION_UPDATE = "attack_simulation.update"
+    ATTACK_SIMULATION_DELETE = "attack_simulation.delete"
+    ATTACK_SIMULATION_RUN = "attack_simulation.run"
+    PLATFORM_API_KEY_CREATE = "platform_api_key.create"
+    PLATFORM_API_KEY_REVOKE = "platform_api_key.revoke"
+    SAVED_VIEW_CREATE = "saved_view.create"
+    SAVED_VIEW_UPDATE = "saved_view.update"
+    SAVED_VIEW_DELETE = "saved_view.delete"
+    DASHBOARD_LAYOUT_CREATE = "dashboard_layout.create"
+    DASHBOARD_LAYOUT_UPDATE = "dashboard_layout.update"
+    DASHBOARD_LAYOUT_DELETE = "dashboard_layout.delete"
+    WEBHOOK_CREATE = "webhook.create"
+    WEBHOOK_DISABLE = "webhook.disable"
+    WEBHOOK_SECRET_ROTATE = "webhook.secret.rotate"
+    WEBHOOK_DELIVERY_RETRY = "webhook.delivery.retry"
+    NOTIFICATION_DELIVERY_RETRY = "notification.delivery.retry"
     APPROVAL_REQUESTED = "approval.requested"
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_CUSTOMIZED = "approval.customized"
@@ -88,6 +119,7 @@ class AuditAction:
     AGENT_ACTION_APPROVED = "agent.action.approved"
     AGENT_ACTION_REJECTED = "agent.action.rejected"
     AGENT_ACTION_EXECUTED = "agent.action.executed"
+    AGENT_AUTONOMY_UPDATE = "agent.autonomy.update"
     AGENT_ACTION_FAILED = "agent.action.failed"
 
     # -- assets (FR-009, FR-010, FR-022) ------------------------------------
@@ -108,6 +140,7 @@ class AuditAction:
     FINDING_IMPORT = "finding.import"
     FINDING_STATUS_CHANGE = "finding.status.change"
     FINDING_WORK_UPDATE = "finding.work.update"
+    FINDING_COLLABORATION_COMMENT = "finding.collaboration.comment"
     FINDING_ANALYZE = "finding.analyze"
     FINDING_VALIDATE = "finding.validate"
     FINDING_PRIORITIZE = "finding.prioritize"
@@ -116,6 +149,15 @@ class AuditAction:
     EXTERNAL_ALERT_SOURCE_UPDATE = "external_alert.source_update"
     REMEDIATION_GENERATE = "remediation.generate"
     REMEDIATION_VALIDATE = "remediation.validate"
+    RISK_ACCEPTANCE_REQUEST = "risk_acceptance.request"
+    RISK_ACCEPTANCE_APPROVE = "risk_acceptance.approve"
+    RETEST_REQUEST = "retest.request"
+    RETEST_SCHEDULE = "retest.schedule"
+    RETEST_COMPLETE = "retest.complete"
+    AUTOMATION_RULE_CREATE = "automation_rule.create"
+    AUTOMATION_RULE_UPDATE = "automation_rule.update"
+    AUTOMATION_RULE_DELETE = "automation_rule.delete"
+    AUTOMATION_EXECUTION = "automation.execution"
 
     # -- external actions (FR-027 .. FR-029) --------------------------------
     TICKET_CREATE = "ticket.create"
@@ -131,12 +173,20 @@ class AuditAction:
     # -- reports (FR-030) ---------------------------------------------------
     REPORT_GENERATE = "report.generate"
     REPORT_DOWNLOAD = "report.download"
+    REPORT_SHARE_CREATE = "report.share.create"
+    REPORT_SHARE_DOWNLOAD = "report.share.download"
+    REPORT_SHARE_REVOKE = "report.share.revoke"
+    REPORT_SCHEDULE_CREATE = "report_schedule.create"
+    REPORT_SCHEDULE_PAUSE = "report_schedule.pause"
+    REPORT_SCHEDULE_RESUME = "report_schedule.resume"
 
     # -- agent (FR-033 .. FR-036) -------------------------------------------
     AGENT_SESSION_CREATE = "agent.session.create"
     AGENT_DEFINITION_CREATE = "agent.definition.create"
     AGENT_DEFINITION_VERSION_CREATE = "agent.definition.version.create"
     AGENT_DEFINITION_DISABLE = "agent.definition.disable"
+    AGENT_MEMORY_UPSERT = "agent.memory.upsert"
+    AGENT_MEMORY_DISABLE = "agent.memory.disable"
     AGENT_MESSAGE = "agent.message"
     AGENT_RUN_START = "agent.run.start"
     AGENT_RUN_COMPLETE = "agent.run.complete"
@@ -366,7 +416,55 @@ async def list_audit_events(
     filters = filters or AuditFilter()
     page = pagination or PaginationParams()
 
-    conditions = [AuditEvent.organization_id == principal.organization_id]
+    conditions = _audit_conditions(principal, filters)
+    total = int(
+        (
+            await session.execute(select(func.count()).select_from(AuditEvent).where(*conditions))
+        ).scalar_one()
+    )
+    stmt = (
+        select(AuditEvent)
+        .where(*conditions)
+        # ``id`` breaks ties: two rows written in the same transaction share
+        # ``created_at`` to the microsecond, and an unstable order makes paging skip and
+        # repeat rows.
+        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        .limit(page.limit)
+        .offset(page.offset)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return rows, total
+
+
+async def export_audit_events(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    filters: AuditFilter | None = None,
+    maximum_rows: int = 10_000,
+) -> Sequence[AuditEvent]:
+    """Return a bounded, consistently ordered export for the caller's organization.
+
+    CSV exports are intended for evidence collection and downstream analysis, not a
+    bulk-exfiltration path.  They use the exact same visibility and filters as the
+    interactive audit view and are capped deliberately so a long-lived tenant cannot
+    monopolize an application worker.
+    """
+    principal.require(Permission.AUDIT_READ)
+    filters = filters or AuditFilter()
+    conditions = _audit_conditions(principal, filters)
+    stmt = (
+        select(AuditEvent)
+        .where(*conditions)
+        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        .limit(maximum_rows)
+    )
+    return (await session.execute(stmt)).scalars().all()
+
+
+def _audit_conditions(principal: Principal, filters: AuditFilter) -> list[Any]:
+    """Build the shared tenant-scoped predicate used by the feed and export."""
+    conditions: list[Any] = [AuditEvent.organization_id == principal.organization_id]
     if filters.actor_id:
         conditions.append(AuditEvent.actor_id == filters.actor_id)
     if filters.actor_type:
@@ -395,24 +493,7 @@ async def list_audit_events(
                 AuditEvent.reason.ilike(term, escape="\\"),
             )
         )
-
-    total = int(
-        (
-            await session.execute(select(func.count()).select_from(AuditEvent).where(*conditions))
-        ).scalar_one()
-    )
-    stmt = (
-        select(AuditEvent)
-        .where(*conditions)
-        # ``id`` breaks ties: two rows written in the same transaction share
-        # ``created_at`` to the microsecond, and an unstable order makes paging skip and
-        # repeat rows.
-        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
-        .limit(page.limit)
-        .offset(page.offset)
-    )
-    rows = (await session.execute(stmt)).scalars().all()
-    return rows, total
+    return conditions
 
 
 async def resource_history(
@@ -503,6 +584,7 @@ def _now() -> dt.datetime:
 __all__ = [
     "AuditAction",
     "list_audit_events",
+    "export_audit_events",
     "record",
     "record_denial",
     "record_error",

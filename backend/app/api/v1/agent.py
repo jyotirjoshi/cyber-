@@ -56,6 +56,7 @@ from app.core.errors import (
     ConflictError,
     CynuxError,
     ModelUnavailableError,
+    PermissionDeniedError,
     ResourceNotFoundError,
 )
 from app.db.enums import MessageRole, Permission
@@ -70,12 +71,15 @@ from app.schemas.agent import (
     AgentMessageIn,
     AgentMessageOut,
     AgentRunOut,
+    AgentSessionAutonomyIn,
     AgentSessionDetailOut,
     AgentSessionOut,
     AssessmentWorkOut,
 )
+from app.schemas.agent_memory import AgentMemoryOut, AgentMemoryUpsertIn
 from app.schemas.common import Page
 from app.services import agent_action as agent_action_service
+from app.services import agent_memory as agent_memory_service
 from app.services import audit as audit_service
 from app.services.agent_chat import create_custom_reply, create_reply, load_assessment_run_details
 from app.services.agent_chat_actions import propose_chat_actions
@@ -88,6 +92,35 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 _TITLE_MAX_CHARS = 80
 _MAX_SEQ_RETRIES = 3
+
+
+@router.get("/memories", response_model=list[AgentMemoryOut])
+async def list_agent_memories(principal: PrincipalDep, session: DbSession) -> list[AgentMemoryOut]:
+    """List curated tenant facts available to future agent conversations."""
+    return [
+        AgentMemoryOut.model_validate(item)
+        for item in await agent_memory_service.list_memories(session, principal)
+    ]
+
+
+@router.put("/memories", response_model=AgentMemoryOut)
+async def upsert_agent_memory(
+    payload: AgentMemoryUpsertIn, principal: PrincipalDep, session: DbSession
+) -> AgentMemoryOut:
+    memory = await agent_memory_service.upsert_memory(session, principal, payload)
+    await session.commit()
+    await session.refresh(memory)
+    return AgentMemoryOut.model_validate(memory)
+
+
+@router.post("/memories/{memory_id}/disable", response_model=AgentMemoryOut)
+async def disable_agent_memory(
+    memory_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> AgentMemoryOut:
+    memory = await agent_memory_service.disable_memory(session, principal, memory_id)
+    await session.commit()
+    await session.refresh(memory)
+    return AgentMemoryOut.model_validate(memory)
 
 
 @router.get("/actions", response_model=list[AgentActionOut])
@@ -139,8 +172,10 @@ async def propose_agent_action(
     payload: AgentActionProposeIn,
     principal: PrincipalDep,
     session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
 ) -> AgentActionOut:
-    """Queue exactly one external operation for a human decision; it does not execute it."""
+    """Propose one action, immediately running only monitored-safe session actions."""
     action = await agent_action_service.propose_action(
         session,
         principal,
@@ -150,8 +185,58 @@ async def propose_agent_action(
         rationale=payload.rationale,
         payload=payload.payload,
     )
+    conversation = await TenantRepository(
+        session, AgentSession, principal.organization_id
+    ).get_or_404(payload.session_id)
+    if (
+        conversation.autonomy_mode == "monitored"
+        and action.action in agent_action_service.MONITORED_AUTONOMY_ACTIONS
+    ):
+        await agent_action_service.resolve_action(
+            session,
+            principal,
+            action.id,
+            approve=True,
+            note="Executed by monitored-autonomy policy.",
+        )
+        action = await agent_action_service.execute_and_settle_action(
+            session, principal, action, settings=settings, redis=redis
+        )
     await session.commit()
     return AgentActionOut.model_validate(action)
+
+
+@router.put("/sessions/{session_id}/autonomy", response_model=AgentSessionOut)
+async def set_session_autonomy(
+    session_id: uuid.UUID,
+    payload: AgentSessionAutonomyIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentSessionOut:
+    """Set a conversation's safe operating mode.
+
+    The session owner may choose the mode; organization managers may manage shared
+    sessions. Monitored mode never permits an assessment, ticket, remediation, or
+    provider-side state mutation without an explicit approval.
+    """
+    principal.require(Permission.AGENT_CHAT)
+    conversation = await TenantRepository(
+        session, AgentSession, principal.organization_id
+    ).get_or_404(session_id)
+    if conversation.user_id not in {None, principal.user_id} and not principal.has(Permission.ORG_MANAGE):
+        raise PermissionDeniedError("Only the session owner or an organization manager can change autonomy.")
+    conversation.autonomy_mode = payload.autonomy_mode
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.AGENT_AUTONOMY_UPDATE,
+        principal=principal,
+        resource_type="agent_session",
+        resource_id=conversation.id,
+        detail={"autonomy_mode": conversation.autonomy_mode},
+    )
+    await session.commit()
+    await session.refresh(conversation)
+    return AgentSessionOut.model_validate(conversation)
 
 
 @router.post("/actions/{action_id}/resolve", response_model=AgentActionOut)
@@ -257,6 +342,7 @@ async def get_session(
         session_id,
         selectinload(AgentSession.messages),
         selectinload(AgentSession.runs).selectinload(AgentRun.steps),
+        selectinload(AgentSession.runs).selectinload(AgentRun.specialist_tasks),
     )
     return AgentSessionDetailOut.model_validate(convo)
 
@@ -294,7 +380,7 @@ async def get_run(
     """
     principal.require(Permission.AGENT_CHAT)
     repo = TenantRepository(session, AgentRun, principal.organization_id)
-    run = await repo.get_or_404(run_id, selectinload(AgentRun.steps))
+    run = await repo.get_or_404(run_id, selectinload(AgentRun.steps), selectinload(AgentRun.specialist_tasks))
     return AgentRunOut.model_validate(run)
 
 

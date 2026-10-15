@@ -66,6 +66,15 @@ class Integration(Base, TenantMixin, TimestampMixin):
     #: durable counter an operator sees on the settings screen.
     failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    #: Optional continuous-ingestion cadence. The worker claims due rows with
+    #: ``FOR UPDATE SKIP LOCKED`` so multiple replicas never pull the same feed.
+    sync_interval_minutes: Mapped[int | None] = mapped_column(Integer)
+    next_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_status: Mapped[str | None] = mapped_column(String(20))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
+    sync_failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -81,12 +90,20 @@ class Integration(Base, TenantMixin, TimestampMixin):
         # An unrecognized kind is a row that can be configured through the API and then
         # never used by anything, which looks to an operator like a working integration.
         CheckConstraint(
-            "kind IN ('llm','defectdojo','jira','slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk','tenable','bitbucket','prowler_aws','prowler_azure','prowler_gcp')",
+            "kind IN ('llm','defectdojo','jira','servicenow','azure_devops','linear','pagerduty','splunk','burp_dast','slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk','tenable','qualys','rapid7','wiz','prisma_cloud','crowdstrike','aws_security_hub','aws_inspector','hackerone','bugcrowd','checkmarx','fortify','azure_defender','gcp_scc','bitbucket','prowler_aws','prowler_azure','prowler_gcp')",
             name="valid_integration_kind",
         ),
         CheckConstraint(
             "status IN ('configured','unverified','error','disabled')",
             name="valid_integration_status",
+        ),
+        CheckConstraint(
+            "sync_interval_minutes IS NULL OR sync_interval_minutes BETWEEN 5 AND 10080",
+            name="valid_integration_sync_interval",
+        ),
+        CheckConstraint(
+            "last_sync_status IS NULL OR last_sync_status IN ('succeeded','failed')",
+            name="valid_integration_sync_status",
         ),
         Index("ix_integrations_organization_id_kind", "organization_id", "kind"),
     )

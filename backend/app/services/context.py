@@ -66,6 +66,9 @@ class Principal:
     user_id: uuid.UUID | None
     organization_id: uuid.UUID
     role: Role
+    #: Machine credentials carry an explicit allow-list that can only narrow authority.
+    #: Human principals leave this unset and continue to resolve permissions from roles.
+    permission_override: frozenset[Permission] | None = None
     email: str | None = None
     actor_type: str = ACTOR_USER
     credential_id: uuid.UUID | None = None
@@ -90,13 +93,13 @@ class Principal:
 
     @property
     def permissions(self) -> frozenset[Permission]:
-        return PERMISSIONS[self.role]
+        return self.permission_override if self.permission_override is not None else PERMISSIONS[self.role]
 
     def has(self, permission: Permission) -> bool:
-        return permission in PERMISSIONS[self.role]
+        return permission in self.permissions
 
     def has_all(self, *permissions: Permission) -> bool:
-        return PERMISSIONS[self.role].issuperset(permissions)
+        return self.permissions.issuperset(permissions)
 
     def require(self, *permissions: Permission) -> None:
         """Raise :class:`PermissionDeniedError` unless every permission is held.
@@ -107,7 +110,7 @@ class Principal:
         the API than to the person who hit a genuine wall.  The detail goes in
         ``context``, which reaches the log and the audit row, not the response.
         """
-        held = PERMISSIONS[self.role]
+        held = self.permissions
         missing = [p for p in permissions if p not in held]
         if missing:
             raise PermissionDeniedError(
@@ -159,6 +162,7 @@ class Principal:
             user_id=on_behalf_of.user_id,
             organization_id=organization_id,
             role=on_behalf_of.role,
+            permission_override=on_behalf_of.permission_override,
             email=on_behalf_of.email,
             actor_type=ACTOR_AGENT,
             credential_id=on_behalf_of.credential_id,
@@ -185,6 +189,32 @@ class Principal:
             role=Role.OWNER,
             actor_type=ACTOR_SYSTEM,
             request_id=request_id,
+        )
+
+    @classmethod
+    def for_api_key(
+        cls,
+        *,
+        organization_id: uuid.UUID,
+        scopes: frozenset[Permission],
+        credential_id: uuid.UUID | None = None,
+        source_ip: str | None = None,
+        user_agent: str | None = None,
+        request_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> Principal:
+        """Construct a machine principal constrained exclusively to its stored scopes."""
+        return cls(
+            user_id=None,
+            organization_id=organization_id,
+            role=Role.OWNER,
+            permission_override=scopes,
+            actor_type=ACTOR_API_KEY,
+            credential_id=credential_id,
+            source_ip=source_ip,
+            user_agent=user_agent,
+            request_id=request_id,
+            trace_id=trace_id,
         )
 
     @classmethod
@@ -257,6 +287,11 @@ class Principal:
             "user_id": str(self.user_id) if self.user_id else None,
             "organization_id": str(self.organization_id),
             "role": self.role.value,
+            "permission_override": (
+                sorted(permission.value for permission in self.permission_override)
+                if self.permission_override is not None
+                else None
+            ),
             "email": self.email,
             "actor_type": self.actor_type,
             "credential_id": str(self.credential_id) if self.credential_id else None,
@@ -280,10 +315,20 @@ class Principal:
         if not org:
             raise ValueError("principal state is missing organization_id")
         user_id = raw.get("user_id")
+        raw_override = raw.get("permission_override")
+        try:
+            permission_override = (
+                frozenset(Permission(value) for value in raw_override)
+                if raw_override is not None
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("principal state has invalid permission override") from exc
         return cls(
             user_id=uuid.UUID(str(user_id)) if user_id else None,
             organization_id=uuid.UUID(str(org)),
             role=Role(raw["role"]),
+            permission_override=permission_override,
             email=raw.get("email"),
             actor_type=str(raw.get("actor_type") or ACTOR_USER),
             credential_id=(

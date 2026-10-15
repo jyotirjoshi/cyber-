@@ -1,0 +1,32 @@
+"""Add the tenant-scoped Wiz direct integration kind.
+
+Revision ID: 0060_wiz_direct_integration
+Revises: 0059_agent_rapid7_sync
+"""
+
+from __future__ import annotations
+
+from alembic import op
+
+
+revision = "0060_wiz_direct_integration"
+down_revision = "0059_agent_rapid7_sync"
+branch_labels = None
+depends_on = None
+
+_NEW_KINDS = (
+    "kind IN ('llm','defectdojo','jira','servicenow','azure_devops','linear','pagerduty',"
+    "'slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk',"
+    "'tenable','qualys','rapid7','wiz','bitbucket','prowler_aws','prowler_azure','prowler_gcp')"
+)
+_OLD_KINDS = _NEW_KINDS.replace(",'wiz'", "")
+
+
+def upgrade() -> None:
+    op.drop_constraint(op.f("ck_integrations_valid_integration_kind"), "integrations", type_="check")
+    op.create_check_constraint(op.f("ck_integrations_valid_integration_kind"), "integrations", _NEW_KINDS)
+
+
+def downgrade() -> None:
+    op.drop_constraint(op.f("ck_integrations_valid_integration_kind"), "integrations", type_="check")
+    op.create_check_constraint(op.f("ck_integrations_valid_integration_kind"), "integrations", _OLD_KINDS)

@@ -5,8 +5,9 @@ export function canCreateCanonicalTicket(
   status: CanonicalFindingStatus,
   tickets: ReadonlyArray<{ provider: string }>,
   permitted: boolean,
+  provider = "jira",
 ): boolean {
   return permitted
     && !["closed", "false_positive", "accepted_risk"].includes(status)
-    && !tickets.some((ticket) => ticket.provider === "jira");
+    && !tickets.some((ticket) => ticket.provider === provider);
 }

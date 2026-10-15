@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -48,10 +48,12 @@ from app.db.enums import (
     AssessmentStatus,
     AuditOutcome,
     EngagementType,
+    JobStatus,
     Permission,
 )
 from app.db.models.assessment import Assessment, AssessmentTarget, AuthorizationRecord
 from app.db.models.identity import Organization
+from app.db.models.scanner import ScannerJob
 from app.db.repository import TenantRepository, tenant_select
 from app.scanners.openapi_scope import OpenAPIScopeError, normalize_openapi_spec
 from app.schemas.assessment import AssessmentCreateIn, AssessmentFilter, CancelIn
@@ -128,7 +130,11 @@ async def create_assessment(
     policy = await _policy_for(session, principal, settings)
     validated = _validate_targets(payload.targets, policy)
     api_scan: dict[str, Any] | None = None
-    if payload.api_spec is not None or payload.api_target is not None or payload.api_auth_token is not None:
+    if (
+        payload.api_spec is not None
+        or payload.api_target is not None
+        or payload.api_auth_token is not None
+    ):
         if (
             payload.engagement_type is not EngagementType.API_SECURITY
             or payload.api_spec is None
@@ -194,10 +200,29 @@ async def create_assessment(
         current_stage=AssessmentStage.QUEUED.value,
         progress_percent=0,
         request_interpretation={"objective": payload.objective} if payload.objective else {},
-        extra_data={"api_scan": api_scan} if api_scan is not None else {},
+        extra_data={
+            **({"api_scan": api_scan} if api_scan is not None else {}),
+            **(
+                {"scan_auth_profile_id": str(payload.scan_auth_profile_id)}
+                if payload.scan_auth_profile_id is not None
+                else {}
+            ),
+            **(
+                {
+                    "engagement": {
+                        "checklist": [
+                            item.model_dump(mode="json") for item in payload.engagement_checklist
+                        ]
+                    }
+                }
+                if payload.engagement_checklist
+                else {}
+            ),
+        },
         api_auth_ciphertext=(
             get_cipher(settings).encrypt(payload.api_auth_token.get_secret_value())
-            if payload.api_auth_token is not None else None
+            if payload.api_auth_token is not None
+            else None
         ),
     )
     session.add(assessment)
@@ -257,6 +282,14 @@ async def create_assessment(
         target_count=len(validated),
         **principal.to_log_fields(),
     )
+    # The metering service isolates its optional write in a savepoint.
+    from app.services.usage_metering import MeterEvent, increment
+
+    await increment(
+        session,
+        organization_id=principal.organization_id,
+        event=MeterEvent.ASSESSMENT_STARTED,
+    )
     return assessment
 
 
@@ -278,6 +311,42 @@ async def get_assessment(
         session, Assessment, principal.organization_id
     )
     return await repo.get_or_404(assessment_id, *options)
+
+
+async def update_engagement_checklist(
+    session: AsyncSession,
+    principal: Principal,
+    assessment_id: uuid.UUID,
+    key: str,
+    *,
+    completed: bool,
+    evidence_reference: str | None,
+) -> Assessment:
+    """Record a tester's checklist result on the already-authorized tenant assessment."""
+    principal.require(Permission.ASSESSMENT_CREATE)
+    assessment = await get_assessment(session, principal, assessment_id)
+    engagement = dict((assessment.extra_data or {}).get("engagement") or {})
+    checklist = [dict(item) for item in engagement.get("checklist", []) if isinstance(item, dict)]
+    for item in checklist:
+        if item.get("key") == key:
+            item["completed"] = completed
+            item["evidence_reference"] = evidence_reference
+            item["completed_by_id"] = str(principal.user_id)
+            item["completed_at"] = _now().isoformat()
+            engagement["checklist"] = checklist
+            assessment.extra_data = {**(assessment.extra_data or {}), "engagement": engagement}
+            await audit_service.record(
+                session,
+                action=audit_service.AuditAction.ASSESSMENT_CHECKLIST_UPDATE,
+                principal=principal,
+                resource_type="assessment",
+                resource_id=assessment.id,
+                detail={"key": key, "completed": completed},
+            )
+            return assessment
+    from app.core.errors import ResourceNotFoundError
+
+    raise ResourceNotFoundError("engagement checklist item not found")
 
 
 async def list_assessments(
@@ -471,6 +540,25 @@ async def cancel_assessment(
         AssessmentStatus.CANCELLING,
         reason=payload.reason or "Cancelled by operator.",
     )
+    # Flag active work in the same transaction as the lifecycle transition.  Waiting for the
+    # worker's next monitor tick leaves a real container running for up to one interval and
+    # makes an interrupted executor unable to distinguish an operator stop from shutdown.
+    # The runner polls this durable flag and stops cooperatively, retaining partial evidence.
+    now = dt.datetime.now(dt.UTC)
+    cancellation = await session.execute(
+        update(ScannerJob)
+        .where(
+            ScannerJob.assessment_id == assessment.id,
+            ScannerJob.organization_id == principal.organization_id,
+            ScannerJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+        )
+        .values(
+            cancel_requested=True,
+            cancel_requested_at=now,
+            cancel_requested_by_id=principal.user_id,
+        )
+    )
+    jobs_flagged = int(cancellation.rowcount or 0)
     await audit_service.record(
         session,
         action=audit_service.AuditAction.ASSESSMENT_CANCEL,
@@ -478,7 +566,7 @@ async def cancel_assessment(
         resource_type="assessment",
         resource_id=assessment.id,
         reason=payload.reason,
-        detail={"from_status": from_status},
+        detail={"from_status": from_status, "scanner_jobs_flagged": jobs_flagged},
     )
     return assessment
 

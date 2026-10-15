@@ -32,17 +32,36 @@ import uuid
 from fastapi import APIRouter, status
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep, SettingsDep
-from app.db.models.identity import Membership, User
+from app.db.enums import Permission
+from app.db.models.identity import Membership, OidcConnection, SamlConnection, ScimProvisioningToken, User
+from app.db.repository import tenant_select
 from app.schemas.common import OkOut, Page
 from app.schemas.organization import (
+    ClientOrganizationCreateIn,
+    ClientOrganizationDelegateIn,
+    ClientOrganizationPortfolioOut,
     MemberInviteIn,
     MemberOut,
     MemberRoleIn,
     OrganizationOut,
     OrganizationUpdateIn,
 )
+from app.schemas.scim import (
+    ScimProvisioningTokenCreateIn,
+    ScimProvisioningTokenIssuedOut,
+    ScimProvisioningTokenOut,
+)
+from app.schemas.sso import (
+    OidcConnectionOut,
+    OidcConnectionUpsertIn,
+    SamlConnectionOut,
+    SamlConnectionUpsertIn,
+)
 from app.services import auth as auth_service
 from app.services import organization as organization_service
+from app.services import scim as scim_service
+from app.services import sso as sso_service
+from app.services.audit import AuditAction, record
 
 router = APIRouter(prefix="/organization", tags=["organization"])
 
@@ -92,6 +111,45 @@ async def update_organization(
     organization = await organization_service.update_organization(session, principal, payload)
     await session.commit()
     return OrganizationOut.model_validate(organization)
+
+
+@router.get("/clients", response_model=list[ClientOrganizationPortfolioOut])
+async def list_client_organizations(
+    principal: PrincipalDep, session: DbSession
+) -> list[ClientOrganizationPortfolioOut]:
+    """List direct MSSP customer tenants with portfolio-only risk counters."""
+    return await organization_service.list_client_portfolio(session, principal)
+
+
+@router.post(
+    "/clients",
+    response_model=OrganizationOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_client_organization(
+    payload: ClientOrganizationCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> OrganizationOut:
+    """Create an isolated client tenant and grant the creator owner access to it."""
+    organization = await organization_service.create_client_organization(session, principal, payload)
+    await session.commit()
+    return OrganizationOut.model_validate(organization)
+
+
+@router.post("/clients/{client_organization_id}/delegates", response_model=MemberOut)
+async def delegate_client_organization_access(
+    client_organization_id: uuid.UUID,
+    payload: ClientOrganizationDelegateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> MemberOut:
+    """Delegate one parent-team member into a direct customer tenant."""
+    membership, user = await organization_service.delegate_client_access(
+        session, principal, client_organization_id, payload
+    )
+    await session.commit()
+    return _member_out(membership, user)
 
 
 @router.get("/members", response_model=Page[MemberOut])
@@ -180,6 +238,128 @@ async def remove_member(
     await organization_service.remove_member(session, principal, membership_id)
     await session.commit()
     return OkOut()
+
+
+@router.get("/scim/tokens", response_model=list[ScimProvisioningTokenOut])
+async def list_scim_provisioning_tokens(
+    principal: PrincipalDep, session: DbSession
+) -> list[ScimProvisioningToken]:
+    """List non-secret provisioning credential metadata for the active tenant."""
+    principal.require(Permission.ORG_MANAGE)
+    return list(
+        (
+            await session.scalars(
+                tenant_select(ScimProvisioningToken, principal.organization_id)
+                .order_by(ScimProvisioningToken.created_at.desc())
+                .limit(200)
+            )
+        ).all()
+    )
+
+
+@router.post(
+    "/scim/tokens",
+    response_model=ScimProvisioningTokenIssuedOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def issue_scim_provisioning_token(
+    payload: ScimProvisioningTokenCreateIn, principal: PrincipalDep, session: DbSession
+) -> ScimProvisioningTokenIssuedOut:
+    """Issue a SCIM bearer secret once; only its verifier remains in storage."""
+    issued = await scim_service.issue_provisioning_token(session, principal, payload)
+    await record(
+        session,
+        action=AuditAction.SCIM_TOKEN_CREATE,
+        principal=principal,
+        resource_type="scim_provisioning_token",
+        resource_id=issued.token.id,
+        detail={"key_prefix": issued.token.key_prefix},
+    )
+    await session.commit()
+    return ScimProvisioningTokenIssuedOut(
+        **ScimProvisioningTokenOut.model_validate(issued.token).model_dump(), secret=issued.secret
+    )
+
+
+@router.post("/scim/tokens/{token_id}/revoke", response_model=ScimProvisioningTokenOut)
+async def revoke_scim_provisioning_token(
+    token_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> ScimProvisioningTokenOut:
+    """Revoke a provisioner without deleting forensic metadata."""
+    token = await scim_service.revoke_provisioning_token(session, principal, token_id)
+    await record(
+        session,
+        action=AuditAction.SCIM_TOKEN_REVOKE,
+        principal=principal,
+        resource_type="scim_provisioning_token",
+        resource_id=token.id,
+        detail={"key_prefix": token.key_prefix},
+    )
+    await session.commit()
+    return ScimProvisioningTokenOut.model_validate(token)
+
+
+@router.put("/sso/oidc", response_model=OidcConnectionOut)
+async def configure_oidc_sso(
+    payload: OidcConnectionUpsertIn,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+) -> OidcConnectionOut:
+    """Configure the active organization's encrypted OIDC client connection."""
+    connection = await sso_service.configure_oidc_connection(
+        session, principal, payload, settings=settings
+    )
+    await record(
+        session,
+        action=AuditAction.OIDC_CONNECTION_UPSERT,
+        principal=principal,
+        resource_type="oidc_connection",
+        resource_id=connection.id,
+        detail={"issuer_url": connection.issuer_url, "client_id": connection.client_id},
+    )
+    await session.commit()
+    return OidcConnectionOut.model_validate(connection)
+
+
+@router.get("/sso/oidc", response_model=OidcConnectionOut | None)
+async def get_oidc_sso(principal: PrincipalDep, session: DbSession) -> OidcConnection | None:
+    """Return non-secret OIDC metadata for the active tenant's administrator."""
+    principal.require(Permission.ORG_MANAGE)
+    return (
+        await session.execute(
+            tenant_select(OidcConnection, principal.organization_id).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+@router.put("/sso/saml", response_model=SamlConnectionOut)
+async def configure_saml_sso(
+    payload: SamlConnectionUpsertIn, principal: PrincipalDep, session: DbSession
+) -> SamlConnectionOut:
+    """Configure the active organization's SAML identity-provider trust material."""
+    connection = await sso_service.configure_saml_connection(session, principal, payload)
+    await record(
+        session,
+        action=AuditAction.SAML_CONNECTION_UPSERT,
+        principal=principal,
+        resource_type="saml_connection",
+        resource_id=connection.id,
+        detail={"idp_entity_id": connection.idp_entity_id, "idp_sso_url": connection.idp_sso_url},
+    )
+    await session.commit()
+    return SamlConnectionOut.model_validate(connection)
+
+
+@router.get("/sso/saml", response_model=SamlConnectionOut | None)
+async def get_saml_sso(principal: PrincipalDep, session: DbSession) -> SamlConnection | None:
+    """Return non-secret SAML trust metadata for the active tenant's administrator."""
+    principal.require(Permission.ORG_MANAGE)
+    return (
+        await session.execute(
+            tenant_select(SamlConnection, principal.organization_id).limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 __all__ = ["router"]

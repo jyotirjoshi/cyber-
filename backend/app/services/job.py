@@ -62,12 +62,13 @@ from app.db.models.identity import Organization
 from app.db.models.integration import Integration
 from app.db.models.scanner import ScannerArtifact, ScannerJob
 from app.db.repository import TenantRepository, tenant_select
+from app.db.session import session_scope
 from app.integrations.storage import ObjectStorage
 from app.scanners.artifacts import StoredArtifact, upload_artifacts, write_stream_artifacts
 from app.scanners.base import ScannerRequest, ScannerResult
 from app.scanners.registry import get_adapter
 from app.scanners.repo_snapshot import repository_coordinates
-from app.scanners.runner import DockerRunner
+from app.scanners.runner import DockerRunner, ScannerExecutionCancelled
 from app.schemas.common import PaginationParams
 from app.schemas.job import JobFilter
 from app.services import audit as audit_service
@@ -502,10 +503,26 @@ async def execute_job(
     Returns the same job instance, refreshed.  Raises only for the "should not have run"
     conditions listed in the module docstring; every scanner-level failure is on the row.
     """
-    if job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+    # Reload under a lock: callers may have read QUEUED before another worker
+    # committed its claim. Identity-map state alone is not an execution lease.
+    claimed_job = await session.scalar(
+        select(ScannerJob)
+        .where(
+            ScannerJob.id == job.id,
+            ScannerJob.organization_id == job.organization_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if claimed_job is None:
+        raise ConflictError("scanner job no longer exists")
+    job = claimed_job
+    if job.status != JobStatus.QUEUED.value:
+        return job
+    if job.cancel_requested:
         raise ConflictError(
-            "job is already terminal",
-            user_message="That scan has already finished.",
+            "job cancellation has been requested",
+            user_message="That scan has been cancelled.",
             context={"job_id": str(job.id), "status": job.status},
         )
 
@@ -521,6 +538,29 @@ async def execute_job(
     if assessment is None:
         raise UnsafeScannerInvocationError("Scanner job has no tenant-owned assessment")
     options = _options_for(job, settings, assessment)
+    explicit_auth = None
+    raw_auth_profile_id = (assessment.extra_data or {}).get("scan_auth_profile_id")
+    if raw_auth_profile_id is not None:
+        from app.services.context import Principal
+        from app.services.scan_auth import resolve_scanner_credentials
+
+        system = Principal.for_system(organization_id=job.organization_id)
+        for target in job.targets:
+            resolved = await resolve_scanner_credentials(
+                session,
+                system,
+                uuid.UUID(str(raw_auth_profile_id)),
+                adapter.name,
+                target,
+                settings=settings,
+            )
+            if explicit_auth is not None and resolved != explicit_auth:
+                raise UnsafeScannerInvocationError(
+                    "scan authentication profile resolved inconsistently across targets"
+                )
+            explicit_auth = resolved
+        if explicit_auth is not None:
+            options.update(explicit_auth.options)
     repo_token = await repository_token_for_job(session, job, settings)
     if repo_token is not None:
         options["repo_token"] = repo_token
@@ -553,12 +593,18 @@ async def execute_job(
         timeout_seconds=job.timeout_seconds,
         options=options,
     )
-    heartbeat = asyncio.create_task(_heartbeat(session, job.id))
+    heartbeat = asyncio.create_task(
+        _heartbeat(settings, job.id, organization_id=job.organization_id, started_at=now)
+    )
     result: ScannerResult | None = None
     fatal: CynuxError | None = None
 
     try:
-        credential_environment = await cloud_credentials_for_job(session, job, settings)
+        credential_environment = (
+            dict(explicit_auth.environment)
+            if explicit_auth is not None
+            else await cloud_credentials_for_job(session, job, settings)
+        )
         if adapter.name is ScannerName.ZAP:
             api_token = request.option("api_auth_token")
             if isinstance(api_token, Secret):
@@ -567,7 +613,7 @@ async def execute_job(
             adapter,
             request,
             on_log=on_log,
-            cancel=lambda: _cancel_requested(session, job.id),
+            cancel=lambda: _cancel_requested(settings, job.id),
             credential_environment=credential_environment,
         )
     except (UnsafeScannerInvocationError, DockerUnavailableError) as exc:
@@ -577,6 +623,37 @@ async def execute_job(
         fatal = exc
     except ScannerError as exc:
         fatal = exc
+    except asyncio.CancelledError as exc:
+        # The assessment worker uses task cancellation for an operator-initiated stop *and*
+        # for process shutdown.  Only the former has a durable cancel flag.  Persist that
+        # outcome in a separate transaction before propagating so a user does not have to
+        # wait for the orphan reaper to see a scan that was already stopped.
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+        if await _cancel_requested(settings, job.id):
+            await asyncio.shield(
+                finalize_cancelled_job(
+                    settings,
+                    job_id=job.id,
+                    organization_id=job.organization_id,
+                )
+            )
+            # Never delete a bind-mounted directory while Docker startup/removal
+            # or a staging thread may still be using it.
+            if isinstance(exc, ScannerExecutionCancelled) and exc.cleanup_confirmed:
+                await asyncio.shield(_purge(workdir))
+        elif isinstance(exc, ScannerExecutionCancelled) and exc.cleanup_confirmed:
+            await asyncio.shield(
+                _requeue_interrupted_job(
+                    settings,
+                    job_id=job.id,
+                    organization_id=job.organization_id,
+                    started_at=now,
+                    workdir=workdir,
+                )
+            )
+        raise
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -606,6 +683,14 @@ async def execute_job(
         adapter_success_codes=adapter.success_exit_codes,
         requires_output=adapter.requires_output,
     )
+    if job.status == JobStatus.COMPLETED.value:
+        from app.services.usage_metering import MeterEvent, increment
+
+        await increment(
+            session,
+            organization_id=job.organization_id,
+            event=MeterEvent.SCANNER_JOB_COMPLETED,
+        )
     for row in stored:
         session.add(
             ScannerArtifact(
@@ -741,6 +826,119 @@ async def cancel_jobs_for_assessment(
             detail={"jobs_flagged": count},
         )
     return count
+
+
+async def _requeue_interrupted_job(
+    settings: Settings,
+    *,
+    job_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    started_at: dt.datetime,
+    workdir: Path,
+) -> bool:
+    """Resume a stopped attempt without reusing partial output or a newer claim.
+
+    Call only with a confirmed runner cleanup receipt. Uncertain Docker creation,
+    removal failures, and hard crashes remain subject to orphan handling.
+    """
+    async with session_scope(settings) as session:
+        job = await session.scalar(
+            select(ScannerJob)
+            .where(
+                ScannerJob.id == job_id,
+                ScannerJob.organization_id == organization_id,
+                ScannerJob.status == JobStatus.RUNNING.value,
+                ScannerJob.started_at == started_at,
+                ScannerJob.cancel_requested.is_(False),
+            )
+            .with_for_update()
+        )
+        if job is None:
+            return False
+        try:
+            await asyncio.to_thread(shutil.rmtree, workdir)
+        except FileNotFoundError:
+            # A missing child is not proof that the whole scratch directory is gone.
+            if workdir.exists():
+                log.warning("job.resume_cleanup_incomplete", job_id=str(job_id))
+                return False
+        except OSError as exc:
+            log.warning("job.resume_cleanup_failed", job_id=str(job_id), error=type(exc).__name__)
+            return False
+        job.status = JobStatus.QUEUED.value
+        job.retry_count += 1
+        job.worker_id = None
+        job.claimed_at = None
+        job.heartbeat_at = None
+        job.started_at = None
+        job.completed_at = None
+        job.duration_seconds = None
+        job.container_id = None
+        job.exit_code = None
+        job.failure_code = None
+        job.failure_detail = None
+        await audit_service.record(
+            session,
+            action=audit_service.AuditAction.SCANNER_ENQUEUE,
+            principal=None,
+            organization_id=organization_id,
+            resource_type="scanner_job",
+            resource_id=job.id,
+            detail={
+                "scanner": job.scanner,
+                "reason": "worker_interrupted",
+                "retry_count": job.retry_count,
+            },
+        )
+    return True
+
+
+async def finalize_cancelled_job(
+    settings: Settings,
+    *,
+    job_id: uuid.UUID,
+    organization_id: uuid.UUID,
+) -> bool:
+    """Persist an operator-cancelled active job from an interrupted task.
+
+    This deliberately owns a fresh transaction: the caller's session may be unwinding because
+    its graph task was cancelled.  The conditional checks make it safe if a cooperative runner
+    concurrently observed the same flag and already settled the row.
+    """
+    async with session_scope(settings) as session:
+        job = await session.scalar(
+            select(ScannerJob)
+            .where(
+                ScannerJob.id == job_id,
+                ScannerJob.organization_id == organization_id,
+                ScannerJob.status.in_([JobStatus.QUEUED.value, JobStatus.RUNNING.value]),
+                ScannerJob.cancel_requested.is_(True),
+            )
+            .with_for_update()
+        )
+        if job is None:
+            return False
+
+        now = _now()
+        job.status = JobStatus.CANCELLED.value
+        job.completed_at = now
+        job.heartbeat_at = now
+        job.failure_code = "scanner_cancelled"
+        job.failure_detail = "The scan was cancelled by an operator."
+        if job.started_at is not None:
+            job.duration_seconds = max(0, int((now - job.started_at).total_seconds()))
+        await audit_service.record(
+            session,
+            action=audit_service.AuditAction.SCANNER_CANCEL,
+            principal=None,
+            organization_id=organization_id,
+            resource_type="scanner_job",
+            resource_id=job.id,
+            outcome=AuditOutcome.DENIED,
+            detail={"scanner": job.scanner, "interrupted": True},
+        )
+    log.info("job.cancelled_while_interrupted", job_id=str(job_id))
+    return True
 
 
 async def get_job(
@@ -930,28 +1128,44 @@ def _options_for(job: ScannerJob, settings: Settings, assessment: Assessment) ->
     return options
 
 
-async def _heartbeat(session: AsyncSession, job_id: uuid.UUID) -> None:
+async def _heartbeat(
+    settings: Settings,
+    job_id: uuid.UUID,
+    *,
+    organization_id: uuid.UUID,
+    started_at: dt.datetime,
+) -> None:
     """Stamp ``heartbeat_at`` while the container runs.
 
     Uses its own short transaction per beat and swallows failures: a heartbeat that raised
     would cancel the surrounding task group and kill a healthy scan over a transient DB blip.
     """
-    while True:
-        await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
-        try:
-            await session.execute(
-                update(ScannerJob).where(ScannerJob.id == job_id).values(heartbeat_at=_now())
-            )
-            await session.commit()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.warning("job.heartbeat_failed", job_id=str(job_id), error=type(exc).__name__)
-            with contextlib.suppress(Exception):
-                await session.rollback()
+    async with session_scope(settings) as session:
+        while True:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+            try:
+                result = await session.execute(
+                    update(ScannerJob)
+                    .where(
+                        ScannerJob.id == job_id,
+                        ScannerJob.organization_id == organization_id,
+                        ScannerJob.status == JobStatus.RUNNING.value,
+                        ScannerJob.started_at == started_at,
+                    )
+                    .values(heartbeat_at=_now())
+                )
+                await session.commit()
+                if not result.rowcount:
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("job.heartbeat_failed", job_id=str(job_id), error=type(exc).__name__)
+                with contextlib.suppress(Exception):
+                    await session.rollback()
 
 
-async def _cancel_requested(session: AsyncSession, job_id: uuid.UUID) -> bool:
+async def _cancel_requested(settings: Settings, job_id: uuid.UUID) -> bool:
     """Read the cancel flag straight from the database.
 
     Deliberately not from the in-memory row: the flag is set by the API process, so the
@@ -959,11 +1173,12 @@ async def _cancel_requested(session: AsyncSession, job_id: uuid.UUID) -> bool:
     error must not be interpreted as a cancel and kill a running scan.
     """
     try:
-        value = (
-            await session.execute(
-                select(ScannerJob.cancel_requested).where(ScannerJob.id == job_id)
-            )
-        ).scalar_one_or_none()
+        async with session_scope(settings) as session:
+            value = (
+                await session.execute(
+                    select(ScannerJob.cancel_requested).where(ScannerJob.id == job_id)
+                )
+            ).scalar_one_or_none()
     except Exception as exc:
         log.warning("job.cancel_check_failed", job_id=str(job_id), error=type(exc).__name__)
         return False
@@ -1112,6 +1327,7 @@ __all__ = [
     "claim_slot",
     "enqueue_job",
     "execute_job",
+    "finalize_cancelled_job",
     "get_job",
     "jobs_for_assessment",
     "list_jobs",

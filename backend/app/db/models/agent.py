@@ -33,7 +33,13 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import LAZY, Base, TenantMixin, TimestampMixin, uuid_pk
-from app.db.enums import AgentActionStatus, AgentRunStatus, MessageRole, StepStatus
+from app.db.enums import (
+    AgentActionStatus,
+    AgentRunStatus,
+    AgentSpecialistStatus,
+    MessageRole,
+    StepStatus,
+)
 
 if TYPE_CHECKING:
     from app.db.models.assessment import Assessment
@@ -67,6 +73,12 @@ class AgentSession(Base, TenantMixin, TimestampMixin):
     #: long conversation without the prompt growing without bound (SEC-006).
     context_summary: Mapped[str | None] = mapped_column(Text)
     summarized_through_seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: ``supervised`` requires an explicit approval for every external operation.
+    #: ``monitored`` may execute only the small read/synchronization allow-list in
+    #: ``agent_action``; state-changing remediation and assessment work stay supervised.
+    autonomy_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="supervised", server_default="supervised"
+    )
 
     user: Mapped[User | None] = relationship(lazy=LAZY)
     messages: Mapped[list[AgentMessage]] = relationship(
@@ -85,6 +97,10 @@ class AgentSession(Base, TenantMixin, TimestampMixin):
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "autonomy_mode IN ('supervised','monitored')",
+            name="valid_agent_session_autonomy_mode",
+        ),
         Index("ix_agent_sessions_organization_id_user_id", "organization_id", "user_id"),
         Index(
             "ix_agent_sessions_organization_id_last_activity_at",
@@ -191,10 +207,12 @@ class AgentAction(Base, TenantMixin, TimestampMixin):
     resolution_note: Mapped[str | None] = mapped_column(Text)
     executed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     result_summary: Mapped[str | None] = mapped_column(Text)
+    #: Sanitized, machine-readable proof of the resource changed by a completed action.
+    execution_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','update_github_alert','create_jira_ticket','update_canonical_work','start_assessment')",
+            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','sync_qualys_host_detections','sync_rapid7_vulnerabilities','sync_wiz_issues','sync_prisma_cloud_alerts','sync_crowdstrike_vulnerabilities','sync_aws_security_hub_findings','sync_aws_inspector_findings','sync_hackerone_reports','sync_bugcrowd_submissions','sync_checkmarx_results','sync_fortify_issues','sync_azure_defender_alerts','sync_gcp_scc_findings','sync_burp_dast_findings','update_github_alert','create_jira_ticket','create_ticket','refresh_ticket_status','update_canonical_work','bulk_update_canonical_work','request_retest','request_remediation_group_retests','request_risk_acceptance','start_assessment')",
             name="valid_agent_action",
         ),
         CheckConstraint(
@@ -206,6 +224,38 @@ class AgentAction(Base, TenantMixin, TimestampMixin):
             name="agent_action_resolution_requires_actor",
         ),
         Index("ix_agent_actions_org_session_status", "organization_id", "session_id", "status"),
+    )
+
+
+class AgentMemory(Base, TenantMixin, TimestampMixin):
+    """A curated, organization-scoped fact available to future agent conversations.
+
+    This is intentionally not a transcript dump or autonomous learning store. Entries
+    are explicitly curated by an organization manager, bounded, revocable, and always
+    injected as untrusted reference data rather than instructions.
+    """
+
+    __tablename__ = "agent_memories"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False, default="operational")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="manual")
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "key", name="unique_agent_memory_key"),
+        CheckConstraint(
+            "category IN ('operational','architecture','remediation','scope','preference')",
+            name="valid_agent_memory_category",
+        ),
+        CheckConstraint("source IN ('manual','approved_agent')", name="valid_agent_memory_source"),
+        Index("ix_agent_memories_org_active_expiry", "organization_id", "is_active", "expires_at"),
     )
 
 
@@ -228,11 +278,104 @@ class RunDispatch(Base, TenantMixin, TimestampMixin):
     stream_message_id: Mapped[str | None] = mapped_column(String(64))
     last_error_code: Mapped[str | None] = mapped_column(String(80))
 
+    run: Mapped[AgentRun] = relationship(back_populates="dispatches", lazy=LAZY)
+
     __table_args__ = (
         UniqueConstraint("organization_id", "dispatch_key", name="unique_run_dispatch_key"),
         CheckConstraint("action IN ('start','resume')", name="valid_run_dispatch_action"),
         CheckConstraint("status IN ('pending','sent')", name="valid_run_dispatch_status"),
         Index("ix_run_dispatches_status_available_at", "status", "available_at"),
+    )
+
+
+class AgentSpecialistTask(Base, TenantMixin, TimestampMixin):
+    """One durable, bounded specialist assignment inside an assessment run."""
+
+    __tablename__ = "agent_specialist_tasks"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False
+    )
+    scanner_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("scanner_jobs.id", ondelete="SET NULL")
+    )
+    plan_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    specialist: Mapped[str] = mapped_column(String(40), nullable=False)
+    scanner: Mapped[str] = mapped_column(String(40), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=AgentSpecialistStatus.PENDING.value, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    worker_id: Mapped[str | None] = mapped_column(String(64))
+    heartbeat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    run: Mapped[AgentRun] = relationship(back_populates="specialist_tasks", lazy=LAZY)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "fingerprint", name="unique_agent_specialist_task"),
+        CheckConstraint(
+            "specialist IN ('network','web','code','secrets','supply_chain','container','cloud')",
+            name="valid_agent_specialist_role",
+        ),
+        CheckConstraint(
+            "status IN ('pending','running','completed','degraded','failed')",
+            name="valid_agent_specialist_status",
+        ),
+        CheckConstraint("target_count > 0", name="valid_agent_specialist_target_count"),
+        CheckConstraint("attempts >= 0 AND max_attempts BETWEEN 1 AND 10", name="valid_agent_specialist_attempts"),
+        Index("ix_agent_specialist_tasks_run_plan", "run_id", "plan_index"),
+        Index("ix_agent_specialist_tasks_org_status", "organization_id", "status"),
+    )
+
+
+class AgentDecision(Base, TenantMixin, TimestampMixin):
+    """One immutable supervisor decision between evidence collection rounds.
+
+    Candidate and rejection payloads are bounded summaries produced by the policy
+    boundary, not raw model responses or scanner artifacts.  The ordered records let a
+    recovered worker prove what it already considered and avoid dispatching it twice.
+    """
+
+    __tablename__ = "agent_decisions"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    hypothesis: Mapped[str | None] = mapped_column(Text)
+    candidate_actions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    accepted_actions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    rejections: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    input_evidence_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed", index=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(80))
+
+    run: Mapped[AgentRun] = relationship(back_populates="decisions", lazy=LAZY)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="unique_agent_decision_sequence"),
+        CheckConstraint("sequence > 0", name="valid_agent_decision_sequence"),
+        CheckConstraint(
+            "status IN ('proposed','dispatched','stopped','degraded')",
+            name="valid_agent_decision_status",
+        ),
+        Index("ix_agent_decisions_run_sequence", "run_id", "sequence"),
+        Index("ix_agent_decisions_org_status", "organization_id", "status"),
     )
 
 
@@ -303,6 +446,24 @@ class AgentRun(Base, TenantMixin, TimestampMixin):
         cascade="all, delete-orphan",
         lazy=LAZY,
         order_by="AgentStep.seq",
+    )
+    specialist_tasks: Mapped[list[AgentSpecialistTask]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        lazy=LAZY,
+        order_by="AgentSpecialistTask.plan_index",
+    )
+    decisions: Mapped[list[AgentDecision]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        lazy=LAZY,
+        order_by="AgentDecision.sequence",
+    )
+    dispatches: Mapped[list[RunDispatch]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        lazy=LAZY,
+        order_by="RunDispatch.created_at",
     )
 
     __table_args__ = (
@@ -386,4 +547,4 @@ class AgentStep(Base, TenantMixin, TimestampMixin):
         return StepStatus(self.status)
 
 
-__all__ = ["AgentAction", "AgentMessage", "AgentRun", "AgentSession", "AgentStep", "RunDispatch"]
+__all__ = ["AgentAction", "AgentDecision", "AgentMemory", "AgentMessage", "AgentRun", "AgentSession", "AgentSpecialistTask", "AgentStep", "RunDispatch"]

@@ -30,7 +30,7 @@ from __future__ import annotations
 import uuid
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -42,7 +42,7 @@ from app.db.enums import AssessmentStage
 from app.db.models.finding import Finding
 from app.db.session import session_scope
 from app.services.attack_path import generate_attack_paths
-from app.services.correlation import FalsePositiveCandidate, correlate_findings
+from app.services.correlation import DuplicateGroup, FalsePositiveCandidate, correlate_findings
 from app.services.ssvc import evaluate_ssvc
 
 log = structlog.get_logger(__name__)
@@ -93,6 +93,84 @@ async def record_false_positive_candidates(
         finding.risk_factors = factors
         if finding.ai_skipped_reason == _LEGACY_CORRELATION_SKIP:
             finding.ai_skipped_reason = None
+        count += 1
+    return count
+
+
+async def record_duplicate_candidates(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    assessment_id: uuid.UUID,
+    candidates: list[DuplicateGroup],
+) -> int:
+    """Persist correlation advice without changing source or canonical finding state.
+
+    Canonical intake remains the authoritative cross-tool de-duplication layer. This
+    projection helps an analyst reconcile duplicate source findings within a completed
+    assessment. Every run first removes only its own prior advice, making the
+    recommendation disappear when a later correlation pass no longer supports it.
+    """
+    candidate_by_id: dict[uuid.UUID, dict[str, object]] = {}
+    for group in candidates:
+        # A language-model correlation can be useful to an analyst but never gains
+        # duplicate workflow weight without deterministic matching coordinates.
+        if group.source != "deterministic" or group.confidence != "high":
+            continue
+        member_ids = list(dict.fromkeys(group.finding_ids))
+        if len(member_ids) < 2 or group.representative_id not in member_ids:
+            continue
+        representative_title = redact_text(group.canonical_title.strip()[:500])
+        for finding_id in member_ids:
+            if finding_id == group.representative_id:
+                continue
+            candidate_by_id[finding_id] = {
+                "confidence": "high",
+                "source": "correlation",
+                "representative_finding_id": str(group.representative_id),
+                "representative_title": representative_title,
+                "group_size": len(member_ids),
+                "reason": (
+                    "Correlation found matching asset, weakness, endpoint, and vulnerability "
+                    "coordinates. Review both source records before marking either as a duplicate."
+                ),
+            }
+
+    rows = (
+        (
+            await session.execute(
+                select(Finding)
+                .where(
+                    Finding.organization_id == organization_id,
+                    Finding.assessment_id == assessment_id,
+                    or_(
+                        Finding.id.in_(candidate_by_id),
+                        Finding.risk_factors["duplicate_candidate"]["source"].astext
+                        == "correlation",
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    count = 0
+    for finding in rows:
+        factors = dict(finding.risk_factors or {})
+        previous = factors.get("duplicate_candidate")
+        if (
+            isinstance(previous, dict)
+            and previous.get("source") == "correlation"
+            and finding.id not in candidate_by_id
+        ):
+            factors.pop("duplicate_candidate", None)
+            finding.risk_factors = factors
+            continue
+        candidate = candidate_by_id.get(finding.id)
+        if candidate is None:
+            continue
+        factors["duplicate_candidate"] = candidate
+        finding.risk_factors = factors
         count += 1
     return count
 
@@ -158,6 +236,7 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
         # ── 3. Compound-risk correlation ────────────────────────────────────
         compound_count = 0
         fp_flagged = 0
+        duplicate_flagged = 0
         try:
             async with session_scope(deps.settings) as session:
                 assessment = await load_assessment(session, state)
@@ -193,6 +272,13 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
                         candidates=correlation_result.false_positives,
                     )
 
+                duplicate_flagged = await record_duplicate_candidates(
+                    session,
+                    organization_id=org_id,
+                    assessment_id=assessment_id,
+                    candidates=correlation_result.duplicate_groups,
+                )
+
                 if correlation_result.coverage_gaps:
                     meta = dict(assessment.extra_data or {}) if assessment.extra_data else {}
                     meta["coverage_gaps"] = correlation_result.coverage_gaps
@@ -207,13 +293,15 @@ async def attack_path(state: AssessmentState, *, deps: AgentDeps) -> dict[str, o
                 "attack_paths": paths_stored,
                 "compound_risks": compound_count,
                 "false_positives_flagged": fp_flagged,
+                "duplicates_flagged": duplicate_flagged,
             }
         )
         if paths_stored:
             await step.thinking(
                 f"Attack surface analysis complete: {paths_stored} kill chain(s), "
                 f"{compound_count} compound risk(s), {fp_flagged} possible false-positive "
-                "candidate(s) retained for analyst review."
+                f"candidate(s), and {duplicate_flagged} duplicate candidate(s) retained for "
+                "analyst review."
             )
 
     return {"stage": AssessmentStage.AI_ANALYSIS.value}

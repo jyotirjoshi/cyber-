@@ -9,15 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ConflictError, InvalidConfigurationError, TenantIsolationError
 from app.db.base import utcnow
 from app.db.enums import Permission
+from app.db.models.asset import Asset
 from app.db.models.canonical import CanonicalFinding, FindingHistory
 from app.db.repository import tenant_select
 from app.services import audit as audit_service
+from app.services.automation import queue_finding_event
 from app.services.context import Principal
 
 _ALLOWED: dict[str, frozenset[str]] = {
-    "new": frozenset({"open", "accepted_risk", "false_positive"}),
-    "open": frozenset({"accepted_risk", "false_positive"}),
-    "reopened": frozenset({"open", "accepted_risk", "false_positive"}),
+    "new": frozenset({"open", "false_positive"}),
+    "open": frozenset({"false_positive"}),
+    "reopened": frozenset({"open", "false_positive"}),
     "accepted_risk": frozenset({"open"}),
     "false_positive": frozenset({"open"}),
 }
@@ -91,4 +93,17 @@ async def decide_status(
         detail={"from": previous, "to": status, "version": finding.status_version},
         reason=clean_reason,
     )
+    asset = (
+        await session.execute(
+            tenant_select(Asset, principal.organization_id).where(Asset.id == finding.asset_id)
+        )
+    ).scalar_one_or_none()
+    if asset is not None:
+        await queue_finding_event(
+            session,
+            finding=finding,
+            asset=asset,
+            trigger="finding.updated",
+            event_key_suffix=f":version:{finding.status_version}",
+        )
     return finding

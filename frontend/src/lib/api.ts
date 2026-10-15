@@ -21,18 +21,25 @@ import type {
   AgentEvent,
   AgentMessageIn,
   AgentMessageOut,
+  AgentMemoryOut,
+  AgentMemoryUpsertIn,
   AgentRunOut,
   AgentSessionDetailOut,
+  AgentSessionAutonomyIn,
   AgentSessionOut,
   AnalyzeIn,
   ApplicationPatternsOut,
   ApplicationRiskPageOut,
   ApprovalOut,
   ApproveIn,
+  AsmSurfaceCreateIn,
+  AsmSurfaceOut,
+  AsmSurfaceUpdateIn,
   AssessmentCreateIn,
   AssessmentDetailOut,
   AssessmentFilter,
   AssessmentOut,
+  EngagementChecklistUpdateIn,
   AssetCriticalityIn,
   AssetChangePageOut,
   AssetContextIn,
@@ -40,21 +47,44 @@ import type {
   AssetFilter,
   AssetOut,
   AssetTagIn,
+  BulkCanonicalWorkIn,
+  AttackSimulationCampaignCreateIn,
+  AttackSimulationCampaignOut,
+  AttackSimulationRunDetailOut,
+  AttackSimulationRunOut,
+  AttackSimulationTechniqueCatalogOut,
   AuditEventOut,
   AuditFilter,
+  AutomationExecutionOut,
+  AutomationRuleCreateIn,
+  AutomationRuleOut,
   CancelIn,
+  ClientOrganizationCreateIn,
+  ClientOrganizationDelegateIn,
+  ClientOrganizationPortfolioOut,
   CanonicalFindingDetailOut,
   CanonicalFindingOut,
+  CanonicalRemediationOperationOut,
+  FindingCollaborationCommentCreateIn,
+  FindingCollaborationCommentOut,
   CanonicalStatusDecisionIn,
   CanonicalWorkIn,
+  ComplianceControlOut,
+  ComplianceFramework,
+  ComplianceOverviewOut,
   ChangePasswordIn,
   DashboardOut,
+  DashboardLayoutIn,
+  DashboardLayoutOut,
+  AssetGroupRiskOut,
+  TeamDashboardOut,
   ExternalAlertFilter,
   ExternalAlertDetailOut,
   ExternalAlertTriageIn,
   ExternalAlertSourceActionIn,
   RelatedFindingOut,
   ExternalAlertOut,
+  ExternalDeliveryOut,
   ExposureFilter,
   ExposureOut,
   FindingDetailOut,
@@ -80,21 +110,66 @@ import type {
   OkOut,
   OrganizationOut,
   OrganizationUpdateIn,
+  OidcConnectionOut,
+  OidcConnectionUpsertIn,
   Page,
   PasswordResetConfirmIn,
   PasswordResetRequestIn,
+  PlatformApiKeyCreateIn,
+  PlatformApiKeyCreatedOut,
+  PlatformApiKeyOut,
+  PolicyGateOut,
   Problem,
   RegisterIn,
   RemediateIn,
+  RemediationGroupOut,
   RemediationOut,
   ReportDetailOut,
   ReportGenerateIn,
   ReportOut,
+  ReportScheduleCreateIn,
+  ReportScheduleOut,
+  RecurringScanOut,
+  RecurringScanCreateIn,
+  RetestRequestIn,
+  RetestRequestOut,
+  RiskAcceptanceIn,
+  RiskAcceptanceOut,
+  ScanProfileOut,
+  ScanProfileCreateIn,
+  SamlConnectionOut,
+  SamlConnectionUpsertIn,
+  ScimProvisioningTokenCreateIn,
+  ScimProvisioningTokenIssuedOut,
+  ScimProvisioningTokenOut,
+  ReportShareCreateIn,
+  ReportShareIssuedOut,
+  ReportShareLinkOut,
+  ReportTemplateCreateIn,
+  ReportTemplateOut,
+  RiskTrendOut,
+  SavedViewCreateIn,
+  SavedViewOut,
+  SavedViewUpdateIn,
   ScannerJobOut,
   SwitchOrganizationIn,
   TicketLinkOut,
+  ThreatWatchlistCreateIn,
+  ThreatWatchlistMatchOut,
+  ThreatWatchlistOut,
   TokenPairOut,
   ValidateFindingIn,
+  VulnerabilityIntelligenceOut,
+  WebhookSubscriptionCreateIn,
+  WebhookDeliveryOut,
+  WebhookSubscriptionIssuedOut,
+  WebhookSubscriptionOut,
+  WorkerMetricsOut,
+  WorkflowDefinitionIn,
+  WorkflowDefinitionOut,
+  WorkflowRunOut,
+  ScanAuthProfileIn,
+  ScanAuthProfileOut,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -127,6 +202,11 @@ export function websocketOrigin(
 const API_BASE = apiOrigin();
 
 const API_PREFIX = "/api/v1";
+
+/** Public, unauthenticated download URL for a one-time-issued opaque report grant. */
+export function reportShareUrl(token: string): string {
+  return `${API_BASE}${API_PREFIX}/shared/reports/${encodeURIComponent(token)}`;
+}
 
 // ---------------------------------------------------------------------------
 // Typed error.
@@ -365,12 +445,16 @@ function filenameFromDisposition(header: string | null, fallback: string): strin
 }
 
 /** GET a binary endpoint with auth (following any 307 to presigned storage) → blob + filename. */
-async function download(path: string, fallbackName: string): Promise<DownloadedFile> {
+async function download(
+  path: string,
+  fallbackName: string,
+  query?: unknown,
+): Promise<DownloadedFile> {
   const doFetch = () => {
     const headers: Record<string, string> = {};
     const token = getAccessToken();
     if (token) headers.authorization = `Bearer ${token}`;
-    return fetch(`${API_BASE}${API_PREFIX}${path}`, { headers });
+    return fetch(`${API_BASE}${API_PREFIX}${path}${buildQuery(query)}`, { headers });
   };
 
   let res: Response;
@@ -444,6 +528,14 @@ export const api = {
       request<TokenPairOut>("POST", "/auth/register", { body, auth: false }),
     login: (body: LoginIn) =>
       request<TokenPairOut>("POST", "/auth/login", { body, auth: false }),
+    ssoStartUrl: (organizationSlug: string) =>
+      `${API_BASE}${API_PREFIX}/auth/sso/${encodeURIComponent(organizationSlug)}/start`,
+    samlSsoStartUrl: (organizationSlug: string) =>
+      `${API_BASE}${API_PREFIX}/auth/sso/saml/${encodeURIComponent(organizationSlug)}/start`,
+    samlMetadataUrl: (organizationSlug: string) =>
+      `${API_BASE}${API_PREFIX}/auth/sso/saml/${encodeURIComponent(organizationSlug)}/metadata`,
+    exchangeSso: (handoffToken: string) =>
+      request<TokenPairOut>("POST", "/auth/sso/exchange", { body: { handoff_token: handoffToken }, auth: false }),
     me: () => request<MeOut>("GET", "/auth/me"),
     switchOrganization: (body: SwitchOrganizationIn) =>
       request<TokenPairOut>("POST", "/auth/switch-organization", { body }),
@@ -459,6 +551,13 @@ export const api = {
 
   dashboard: {
     get: () => request<DashboardOut>("GET", "/dashboard"),
+    teams: () => request<TeamDashboardOut[]>("GET", "/dashboard/teams"),
+    assetGroups: (limit = 100) => request<AssetGroupRiskOut[]>("GET", "/dashboard/asset-groups", { query: { limit } }),
+    riskTrend: (limit = 24) => request<RiskTrendOut>("GET", "/dashboard/risk-trend", { query: { limit } }),
+    layouts: () => request<DashboardLayoutOut[]>("GET", "/dashboard/layouts"),
+    createLayout: (body: DashboardLayoutIn) => request<DashboardLayoutOut>("POST", "/dashboard/layouts", { body }),
+    updateLayout: (id: string, body: DashboardLayoutIn) => request<DashboardLayoutOut>("PUT", `/dashboard/layouts/${id}`, { body }),
+    deleteLayout: (id: string) => request<void>("DELETE", `/dashboard/layouts/${id}`),
   },
 
   assessments: {
@@ -466,6 +565,17 @@ export const api = {
       request<Page<AssessmentOut>>("GET", "/assessments", { query: params }),
     create: (body: AssessmentCreateIn) =>
       request<AssessmentDetailOut>("POST", "/assessments", { body }),
+    updateEngagementChecklist: (assessmentId: string, key: string, body: EngagementChecklistUpdateIn) =>
+      request<AssessmentDetailOut>("PATCH", `/assessments/${assessmentId}/engagement-checklist/${encodeURIComponent(key)}`, { body }),
+    workerMetrics: () => request<WorkerMetricsOut>("GET", "/assessments/worker/metrics"),
+    profiles: () => request<ScanProfileOut[]>("GET", "/assessments/profiles"),
+    createProfile: (body: ScanProfileCreateIn) => request<ScanProfileOut>("POST", "/assessments/profiles", { body }),
+    deactivateProfile: (id: string) =>
+      request<ScanProfileOut>("POST", `/assessments/profiles/${id}/deactivate`),
+    schedules: () => request<RecurringScanOut[]>("GET", "/assessments/schedules"),
+    createSchedule: (body: RecurringScanCreateIn) => request<RecurringScanOut>("POST", "/assessments/schedules", { body }),
+    pauseSchedule: (id: string) => request<RecurringScanOut>("POST", `/assessments/schedules/${id}/pause`),
+    resumeSchedule: (id: string) => request<RecurringScanOut>("POST", `/assessments/schedules/${id}/resume`),
     get: (id: string) => request<AssessmentDetailOut>("GET", `/assessments/${id}`),
     cancel: (id: string, body: CancelIn = {}) =>
       request<AssessmentDetailOut>("POST", `/assessments/${id}/cancel`, { body }),
@@ -495,6 +605,8 @@ export const api = {
       request<FindingDetailOut>("POST", `/findings/${id}/validate`, { body }),
     createTicket: (id: string, body: JiraTicketIn = {}) =>
       request<TicketLinkOut>("POST", `/findings/${id}/tickets`, { body }),
+    refreshTicket: (ticketId: string) =>
+      request<TicketLinkOut>("POST", `/findings/tickets/${ticketId}/refresh`),
   },
 
   externalAlerts: {
@@ -507,6 +619,8 @@ export const api = {
       request<ExternalAlertDetailOut>("PATCH", `/external-alerts/${id}/github`, { body }),
     relatedFindings: (id: string) =>
       request<RelatedFindingOut[]>("GET", `/external-alerts/${id}/related-findings`),
+    canonicalFindings: (id: string) =>
+      request<CanonicalFindingOut[]>("GET", `/external-alerts/${id}/canonical-findings`),
     relatedAlerts: (id: string) =>
       request<ExternalAlertOut[]>("GET", `/external-alerts/${id}/related-alerts`),
   },
@@ -517,16 +631,44 @@ export const api = {
   },
 
   canonicalFindings: {
-    list: (params?: { limit?: number; offset?: number; mine?: boolean; overdue?: boolean }) =>
+    list: (params?: { limit?: number; offset?: number; mine?: boolean; overdue?: boolean; severity?: string; status?: string; q?: string; query?: string }) =>
       request<Page<CanonicalFindingOut>>("GET", "/canonical-findings", { query: params }),
+    operations: (params?: { limit?: number; offset?: number; mine?: boolean; overdue?: boolean; attention_only?: boolean; asset_group?: string; remediation_group?: string }) =>
+      request<Page<CanonicalRemediationOperationOut>>("GET", "/canonical-findings/operations", { query: params }),
+    remediationGroups: () =>
+      request<RemediationGroupOut[]>("GET", "/canonical-findings/remediation-groups"),
+    bulkUpdateWork: (body: BulkCanonicalWorkIn) =>
+      request<CanonicalFindingOut[]>("PATCH", "/canonical-findings/work/bulk", { body }),
+    requestRiskAcceptance: (id: string, body: RiskAcceptanceIn) =>
+      request<RiskAcceptanceOut>("POST", `/canonical-findings/${id}/risk-acceptances`, { body }),
+    approveRiskAcceptance: (acceptanceId: string) =>
+      request<RiskAcceptanceOut>("POST", `/canonical-findings/risk-acceptances/${acceptanceId}/approve`),
+    requestRetest: (id: string, body: RetestRequestIn) =>
+      request<RetestRequestOut>("POST", `/canonical-findings/${id}/retests`, { body }),
+    requestRemediationGroupRetests: (remediationGroup: string, body: RetestRequestIn) =>
+      request<RetestRequestOut[]>("POST", `/canonical-findings/remediation-groups/${encodeURIComponent(remediationGroup)}/retests`, { body }),
     get: (id: string) =>
       request<CanonicalFindingDetailOut>("GET", `/canonical-findings/${id}`),
     decide: (id: string, body: CanonicalStatusDecisionIn) =>
       request<CanonicalFindingOut>("PATCH", `/canonical-findings/${id}/status`, { body }),
     updateWork: (id: string, body: CanonicalWorkIn) =>
       request<CanonicalFindingOut>("PATCH", `/canonical-findings/${id}/work`, { body }),
+    comments: (id: string) =>
+      request<FindingCollaborationCommentOut[]>("GET", `/canonical-findings/${id}/comments`),
+    addComment: (id: string, body: FindingCollaborationCommentCreateIn) =>
+      request<FindingCollaborationCommentOut>("POST", `/canonical-findings/${id}/comments`, { body }),
     createTicket: (id: string, body: JiraTicketIn = {}) =>
       request<TicketLinkOut>("POST", `/canonical-findings/${id}/tickets`, { body }),
+  },
+
+  compliance: {
+    overview: () => request<ComplianceOverviewOut>("GET", "/compliance/overview"),
+    controls: (framework?: ComplianceFramework) =>
+      request<ComplianceControlOut[]>("GET", "/compliance/controls", {
+        query: framework ? { framework } : undefined,
+      }),
+    seed: (framework: ComplianceFramework) =>
+      request<ComplianceControlOut[]>("POST", `/compliance/frameworks/${framework}/seed`),
   },
 
   assets: {
@@ -547,6 +689,8 @@ export const api = {
       request<AssetOut>("POST", `/assets/${id}/criticality`, { body }),
     setContext: (id: string, body: AssetContextIn) =>
       request<AssetOut>("PATCH", `/assets/${id}/context`, { body }),
+    policyGate: (id: string) =>
+      request<PolicyGateOut>("GET", `/assets/${id}/policy-gate`),
     markOutOfScope: (id: string) =>
       request<AssetOut>("POST", `/assets/${id}/out-of-scope`),
   },
@@ -570,14 +714,32 @@ export const api = {
   },
 
   reports: {
+    list: (params?: ListParams) => request<Page<ReportOut>>("GET", "/reports", { query: params }),
     get: (id: string) => request<ReportDetailOut>("GET", `/reports/${id}`),
     download: (id: string) => download(`/reports/${id}/download`, `report-${id}`),
+    schedules: () => request<ReportScheduleOut[]>("GET", "/report-schedules"),
+    createSchedule: (body: ReportScheduleCreateIn) => request<ReportScheduleOut>("POST", "/report-schedules", { body }),
+    pauseSchedule: (id: string) => request<ReportScheduleOut>("POST", `/report-schedules/${id}/pause`),
+    resumeSchedule: (id: string) => request<ReportScheduleOut>("POST", `/report-schedules/${id}/resume`),
+    createShareLink: (id: string, body: ReportShareCreateIn) => request<ReportShareIssuedOut>("POST", `/reports/${id}/share-links`, { body }),
+    shareLinks: (id: string) => request<ReportShareLinkOut[]>("GET", `/reports/${id}/share-links`),
+    revokeShareLink: (id: string) => request<void>("POST", `/reports/share-links/${id}/revoke`),
+    templates: () => request<ReportTemplateOut[]>("GET", "/report-templates"),
+    createTemplate: (body: ReportTemplateCreateIn) =>
+      request<ReportTemplateOut>("POST", "/report-templates", { body }),
+    portfolio: () => request<ClientOrganizationPortfolioOut[]>("GET", "/reports/portfolio"),
   },
 
   organization: {
     get: () => request<OrganizationOut>("GET", "/organization"),
     update: (body: OrganizationUpdateIn) =>
       request<OrganizationOut>("PATCH", "/organization", { body }),
+    clients: () =>
+      request<ClientOrganizationPortfolioOut[]>("GET", "/organization/clients"),
+    createClient: (body: ClientOrganizationCreateIn) =>
+      request<OrganizationOut>("POST", "/organization/clients", { body }),
+    delegateClient: (clientOrganizationId: string, body: ClientOrganizationDelegateIn) =>
+      request<MemberOut>("POST", `/organization/clients/${clientOrganizationId}/delegates`, { body }),
     members: (params?: ListParams) =>
       request<Page<MemberOut>>("GET", "/organization/members", { query: params }),
     inviteMember: (body: MemberInviteIn) =>
@@ -586,6 +748,17 @@ export const api = {
       request<MemberOut>("PATCH", `/organization/members/${membershipId}`, { body }),
     removeMember: (membershipId: string) =>
       request<OkOut>("DELETE", `/organization/members/${membershipId}`),
+    configureOidc: (body: OidcConnectionUpsertIn) =>
+      request<OidcConnectionOut>("PUT", "/organization/sso/oidc", { body }),
+    oidcConnection: () => request<OidcConnectionOut | null>("GET", "/organization/sso/oidc"),
+    configureSaml: (body: SamlConnectionUpsertIn) =>
+      request<SamlConnectionOut>("PUT", "/organization/sso/saml", { body }),
+    samlConnection: () => request<SamlConnectionOut | null>("GET", "/organization/sso/saml"),
+    scimTokens: () => request<ScimProvisioningTokenOut[]>("GET", "/organization/scim/tokens"),
+    createScimToken: (body: ScimProvisioningTokenCreateIn) =>
+      request<ScimProvisioningTokenIssuedOut>("POST", "/organization/scim/tokens", { body }),
+    revokeScimToken: (id: string) =>
+      request<ScimProvisioningTokenOut>("POST", `/organization/scim/tokens/${id}/revoke`),
   },
 
   integrations: {
@@ -598,11 +771,11 @@ export const api = {
       request<IntegrationOut>("DELETE", `/integrations/${kind}`),
     test: (kind: IntegrationKind) =>
       request<IntegrationTestOut>("POST", `/integrations/${kind}/test`),
-    sync: (kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable") =>
+    sync: (kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable" | "qualys" | "rapid7" | "wiz" | "prisma_cloud" | "crowdstrike" | "aws_security_hub" | "aws_inspector" | "hackerone" | "bugcrowd" | "checkmarx" | "fortify" | "azure_defender" | "gcp_scc" | "burp_dast") =>
       request<IntegrationSyncOut>("POST", `/integrations/${kind}/sync`),
     importScanExport: (input: {
       file: File;
-      formatName: "sarif" | "nuclei_jsonl" | "nessus_xml" | "burp_xml" | "qualys_host_detection_xml" | "rapid7_csv" | "aws_inspector_csv" | "azure_defender_json" | "gcp_scc_json" | "prowler_ocsf" | "hackerone_json" | "bugcrowd_json" | "trivy" | "gitleaks" | "cyclonedx" | "spdx" | "generic_csv" | "generic_json";
+      formatName: "sarif" | "nuclei_jsonl" | "nessus_xml" | "burp_xml" | "qualys_host_detection_xml" | "rapid7_csv" | "aws_inspector_csv" | "azure_defender_json" | "gcp_scc_json" | "prowler_ocsf" | "hackerone_json" | "bugcrowd_json" | "trivy" | "gitleaks" | "cyclonedx" | "spdx" | "generic_csv" | "generic_json" | "wiz_json" | "prisma_cloud_json" | "sonarqube_json" | "defectdojo_json" | "checkmarx_xml" | "fortify_fvdl" | "fortify_fpr";
       provider: string;
       assetType: string;
       assetValue: string;
@@ -628,9 +801,14 @@ export const api = {
       request<Page<AuditEventOut>>("GET", "/audit", { query: params }),
     forResource: (resourceType: string, resourceId: string) =>
       request<AuditEventOut[]>("GET", `/audit/resource/${resourceType}/${resourceId}`),
+    exportCsv: (params?: AuditFilter) =>
+      download("/audit/export", "cynux-audit-events.csv", params),
   },
 
   agent: {
+    memories: () => request<AgentMemoryOut[]>("GET", "/agent/memories"),
+    upsertMemory: (body: AgentMemoryUpsertIn) => request<AgentMemoryOut>("PUT", "/agent/memories", { body }),
+    disableMemory: (id: string) => request<AgentMemoryOut>("POST", `/agent/memories/${id}/disable`),
     actions: (sessionId: string) =>
       request<AgentActionOut[]>("GET", "/agent/actions", { query: { session_id: sessionId } }),
     proposeAction: (body: AgentActionProposeIn) =>
@@ -643,6 +821,8 @@ export const api = {
       request<Page<AgentSessionOut>>("GET", "/agent/sessions", { query: params }),
     session: (id: string) =>
       request<AgentSessionDetailOut>("GET", `/agent/sessions/${id}`),
+    setAutonomy: (id: string, body: AgentSessionAutonomyIn) =>
+      request<AgentSessionOut>("PUT", `/agent/sessions/${id}/autonomy`, { body }),
     events: (id: string, afterSeq = 0) =>
       request<AgentEvent[]>("GET", `/agent/sessions/${id}/events`, {
         query: { after_seq: afterSeq },
@@ -656,6 +836,135 @@ export const api = {
     healthz: () => request<OkOut>("GET", "/healthz", { root: true, auth: false }),
     health: () => request<HealthOut>("GET", "/health", { root: true, auth: false }),
     readyz: () => request<HealthOut>("GET", "/readyz", { root: true, auth: false }),
+  },
+
+  asm: {
+    list: () => request<AsmSurfaceOut[]>("GET", "/asm/surfaces"),
+    create: (body: AsmSurfaceCreateIn) =>
+      request<AsmSurfaceOut>("POST", "/asm/surfaces", { body }),
+    get: (id: string) => request<AsmSurfaceOut>("GET", `/asm/surfaces/${id}`),
+    update: (id: string, body: AsmSurfaceUpdateIn) =>
+      request<AsmSurfaceOut>("PATCH", `/asm/surfaces/${id}`, { body }),
+    delete: (id: string) => request<void>("DELETE", `/asm/surfaces/${id}`),
+  },
+
+  automation: {
+    listRules: (params?: { limit?: number; offset?: number }) =>
+      request<Page<AutomationRuleOut>>("GET", "/automation/rules", { query: params }),
+    createRule: (body: AutomationRuleCreateIn) =>
+      request<AutomationRuleOut>("POST", "/automation/rules", { body }),
+    getRule: (id: string) => request<AutomationRuleOut>("GET", `/automation/rules/${id}`),
+    updateRule: (id: string, body: Partial<AutomationRuleCreateIn>) =>
+      request<AutomationRuleOut>("PATCH", `/automation/rules/${id}`, { body }),
+    deleteRule: (id: string) => request<void>("DELETE", `/automation/rules/${id}`),
+    executions: (ruleId: string, params?: { limit?: number; offset?: number }) =>
+      request<Page<AutomationExecutionOut>>("GET", `/automation/rules/${ruleId}/executions`, { query: params }),
+  },
+
+  workflows: {
+    list: (params?: { limit?: number; offset?: number }) =>
+      request<Page<WorkflowDefinitionOut>>("GET", "/workflows", { query: params }),
+    create: (body: WorkflowDefinitionIn) =>
+      request<WorkflowDefinitionOut>("POST", "/workflows", { body }),
+    update: (id: string, body: WorkflowDefinitionIn) =>
+      request<WorkflowDefinitionOut>("PUT", `/workflows/${id}`, { body }),
+    delete: (id: string) => request<void>("DELETE", `/workflows/${id}`),
+    runs: (id: string, params?: { limit?: number; offset?: number }) =>
+      request<Page<WorkflowRunOut>>("GET", `/workflows/${id}/runs`, { query: params }),
+    start: (id: string, body: { event_key: string; context: Record<string, unknown>; dry_run?: boolean }) =>
+      request<WorkflowRunOut>("POST", `/workflows/${id}/runs`, { body }),
+    resume: (runId: string) => request<WorkflowRunOut>("POST", `/workflows/runs/${runId}/resume`),
+  },
+
+  scanAuth: {
+    list: () => request<ScanAuthProfileOut[]>("GET", "/scan-auth"),
+    create: (body: ScanAuthProfileIn) => request<ScanAuthProfileOut>("POST", "/scan-auth", { body }),
+    delete: (id: string) => request<void>("DELETE", `/scan-auth/${id}`),
+  },
+
+  attackSimulations: {
+    list: (params?: { limit?: number; offset?: number }) =>
+      request<Page<AttackSimulationCampaignOut>>("GET", "/attack-simulations", { query: params }),
+    create: (body: AttackSimulationCampaignCreateIn) =>
+      request<AttackSimulationCampaignOut>("POST", "/attack-simulations", {
+        body: {
+          name: body.name,
+          scenarios: body.scenarios,
+          targets: body.targets,
+          cron_expression: body.cron_expression || null,
+          timezone: body.timezone || "UTC",
+          authorization_expires_at: body.authorization_expires_at,
+          authorization: {
+            confirmed: true,
+            attestation_text: body.authorization_text,
+            evidence_reference: body.authorization_reference,
+          },
+        },
+      }),
+    get: (id: string) =>
+      request<AttackSimulationCampaignOut>("GET", `/attack-simulations/${id}`),
+    update: (id: string, body: Partial<AttackSimulationCampaignCreateIn>) =>
+      request<AttackSimulationCampaignOut>("PATCH", `/attack-simulations/${id}`, { body }),
+    delete: (id: string) => request<void>("DELETE", `/attack-simulations/${id}`),
+    run: (id: string) =>
+      request<AttackSimulationCampaignOut>("POST", `/attack-simulations/${id}/run`),
+    catalog: () =>
+      request<AttackSimulationTechniqueCatalogOut[]>("GET", "/attack-simulations/catalog"),
+    runs: (id: string) =>
+      request<AttackSimulationRunOut[]>("GET", `/attack-simulations/${id}/runs`),
+    runDetail: (id: string) =>
+      request<AttackSimulationRunDetailOut>("GET", `/attack-simulations/runs/${id}`),
+  },
+
+  platform: {
+    listApiKeys: () => request<PlatformApiKeyOut[]>("GET", "/platform/api-keys"),
+    createApiKey: (body: PlatformApiKeyCreateIn) =>
+      request<PlatformApiKeyCreatedOut>("POST", "/platform/api-keys", { body }),
+    revokeApiKey: (id: string) =>
+      request<PlatformApiKeyOut>("POST", `/platform/api-keys/${id}/revoke`),
+    listSavedViews: (resource?: string) =>
+      request<SavedViewOut[]>("GET", "/saved-views", { query: resource ? { resource } : undefined }),
+    createSavedView: (body: SavedViewCreateIn) =>
+      request<SavedViewOut>("POST", "/saved-views", { body }),
+    updateSavedView: (id: string, body: SavedViewUpdateIn) =>
+      request<SavedViewOut>("PUT", `/saved-views/${id}`, { body }),
+    deleteSavedView: (id: string) => request<void>("DELETE", `/saved-views/${id}`),
+    listWebhooks: () => request<WebhookSubscriptionOut[]>("GET", "/webhooks"),
+    listWebhookDeliveries: (id: string) =>
+      request<WebhookDeliveryOut[]>("GET", `/webhooks/${id}/deliveries`),
+    retryWebhookDelivery: (subscriptionId: string, deliveryId: string) =>
+      request<WebhookDeliveryOut>(
+        "POST",
+        `/webhooks/${subscriptionId}/deliveries/${deliveryId}/retry`,
+      ),
+    createWebhook: (body: WebhookSubscriptionCreateIn) =>
+      request<WebhookSubscriptionIssuedOut>("POST", "/webhooks", { body }),
+    disableWebhook: (id: string) => request<WebhookSubscriptionOut>("POST", `/webhooks/${id}/disable`),
+    rotateWebhookSecret: (id: string) =>
+      request<WebhookSubscriptionIssuedOut>("POST", `/webhooks/${id}/rotate-secret`),
+  },
+
+  threatIntelligence: {
+    list: (params?: { q?: string; limit?: number; offset?: number }) =>
+      request<Page<VulnerabilityIntelligenceOut>>("GET", "/threat-intelligence", { query: params }),
+    get: (cveId: string) =>
+      request<VulnerabilityIntelligenceOut>("GET", `/threat-intelligence/${encodeURIComponent(cveId)}`),
+    watchlists: () => request<ThreatWatchlistOut[]>("GET", "/threat-intelligence/watchlists"),
+    createWatchlist: (body: ThreatWatchlistCreateIn) =>
+      request<ThreatWatchlistOut>("POST", "/threat-intelligence/watchlists", { body }),
+    deleteWatchlist: (id: string) =>
+      request<void>("DELETE", `/threat-intelligence/watchlists/${id}`),
+    watchlistMatches: (id: string) =>
+      request<ThreatWatchlistMatchOut[]>("GET", `/threat-intelligence/watchlists/${id}/matches`),
+  },
+
+  notifications: {
+    listDeliveries: (status?: "pending" | "sent" | "failed") =>
+      request<ExternalDeliveryOut[]>("GET", "/notifications/deliveries", {
+        query: status ? { status } : undefined,
+      }),
+    retryDelivery: (id: string) =>
+      request<ExternalDeliveryOut>("POST", `/notifications/deliveries/${id}/retry`),
   },
 };
 

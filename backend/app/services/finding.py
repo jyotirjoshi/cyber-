@@ -214,7 +214,7 @@ async def import_from_defectdojo(
     total = 0
     created = 0
     status_change_count = 0
-    from app.services.canonical_ingest import ingest_native_findings
+    from app.services.canonical_ingest import ingest_native_findings, link_scan_observations
 
     async for records in client.iter_finding_pages(test_id=test_id):
         existing = await _existing_by_dd_id(
@@ -268,6 +268,15 @@ async def import_from_defectdojo(
 
         await session.flush()
         await ingest_native_findings(session, assessment.organization_id, findings)
+        if job is not None:
+            await link_scan_observations(
+                session,
+                organization_id=assessment.organization_id,
+                assessment_id=assessment.id,
+                job_id=job.id,
+                provider="defectdojo",
+                external_ids=[str(record.id) for record in records],
+            )
         total += len(findings)
         status_change_count += len(status_changes)
         for change in status_changes:

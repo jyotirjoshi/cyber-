@@ -43,6 +43,8 @@ from app.db.enums import (
     AssessmentStage,
     AssessmentStatus,
     Criticality,
+    EngagementType,
+    ExecutionMode,
     FindingStatus,
     JobStatus,
     Priority,
@@ -65,6 +67,7 @@ from app.schemas.assessment import (
     AssessmentDetailOut,
     AssessmentOut,
     DegradationOut,
+    EngagementChecklistItemOut,
     PlanStepOut,
     ProposedAssetOut,
     TargetOut,
@@ -214,6 +217,8 @@ def _base_fields(assessment: Assessment) -> dict[str, Any]:
         "progress_percent": assessment.progress_percent,
         "scope": Scope(assessment.scope),
         "depth": AssessmentDepth(assessment.depth),
+        "engagement_type": EngagementType(assessment.engagement_type),
+        "execution_mode": ExecutionMode(assessment.execution_mode),
         "findings_total": assessment.findings_total,
         "findings_critical": assessment.findings_critical,
         "findings_high": assessment.findings_high,
@@ -254,6 +259,11 @@ async def assessment_detail_out(
     return AssessmentDetailOut(
         **_base_fields(assessment),
         plan=[PlanStepOut.model_validate(step) for step in (assessment.plan or [])],
+        engagement_checklist=[
+            EngagementChecklistItemOut.model_validate(item)
+            for item in ((assessment.extra_data or {}).get("engagement", {}).get("checklist", []))
+            if isinstance(item, dict)
+        ],
         request_interpretation=assessment.request_interpretation or {},
         stages=stage_checklist(assessment, steps),  # type: ignore[arg-type]
         degradations=[

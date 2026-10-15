@@ -62,8 +62,51 @@ _SOURCES = (
     ("sonarqube", "SonarQube", "sync_sonarqube_alerts"),
     ("snyk", "Snyk", "sync_snyk_issues"),
     ("tenable", "Tenable", "sync_tenable_vulnerabilities"),
+    ("qualys", "Qualys", "sync_qualys_host_detections"),
+    ("rapid7", "Rapid7", "sync_rapid7_vulnerabilities"),
+    ("wiz", "Wiz", "sync_wiz_issues"),
+    ("prisma cloud", "Prisma Cloud", "sync_prisma_cloud_alerts"),
+    ("crowdstrike", "CrowdStrike", "sync_crowdstrike_vulnerabilities"),
+    ("aws_security_hub", "AWS Security Hub", "sync_aws_security_hub_findings"),
+    ("aws inspector", "Amazon Inspector", "sync_aws_inspector_findings"),
+    ("hackerone", "HackerOne", "sync_hackerone_reports"),
+    ("bugcrowd", "Bugcrowd", "sync_bugcrowd_submissions"),
+    ("checkmarx", "Checkmarx One", "sync_checkmarx_results"),
+    ("fortify", "Fortify SSC", "sync_fortify_issues"),
+    ("azure_defender", "Microsoft Defender for Cloud", "sync_azure_defender_alerts"),
+    ("gcp_scc", "Google Security Command Center", "sync_gcp_scc_findings"),
+    ("burp_dast", "Burp Suite DAST", "sync_burp_dast_findings"),
 )
-_JIRA_TICKET = re.compile(r"\b(?:jira\s+tickets?|tickets?\s+(?:in|on)\s+jira)\b", re.I)
+_TICKET_PROVIDER_KINDS = {
+    "jira": IntegrationKind.JIRA,
+    "github": IntegrationKind.GITHUB,
+    "gitlab": IntegrationKind.GITLAB,
+    "servicenow": IntegrationKind.SERVICENOW,
+    "azure_devops": IntegrationKind.AZURE_DEVOPS,
+    "linear": IntegrationKind.LINEAR,
+}
+_TICKET_PROVIDER_LABELS = {
+    "jira": "Jira",
+    "github": "GitHub",
+    "gitlab": "GitLab",
+    "servicenow": "ServiceNow",
+    "azure_devops": "Azure DevOps",
+    "linear": "Linear",
+}
+_TICKET_ACTIONS = frozenset({"create_jira_ticket", "create_ticket"})
+_TICKET_STATUS_REFRESH = re.compile(
+    r"\b(?:refresh|sync|check)\s+(?:the\s+)?(?:status\s+(?:of\s+)?(?:the\s+)?)?"
+    r"(?:ticket|issue|work[ -]?item|incident)\b",
+    re.I,
+)
+_TICKET_REQUESTS = {
+    provider: re.compile(
+        rf"\b(?:{re.escape(label)}\s+(?:tickets?|issues?|work[ -]?items?|incidents?)|"
+        rf"(?:tickets?|issues?|work[ -]?items?|incidents?)\s+(?:in|on)\s+{re.escape(label)})\b",
+        re.I,
+    )
+    for provider, label in _TICKET_PROVIDER_LABELS.items()
+}
 _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
 _PROJECT = re.compile(r"\b(?:in\s+)?project\s+([A-Za-z][A-Za-z0-9_]{0,39})\b", re.I)
 _CVE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.I)
@@ -73,6 +116,18 @@ _DUE_AT = re.compile(
     r"\bdue\s+(?:by\s+|on\s+)?"
     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))"
     r"(?=$|[\s,;.!?])",
+    re.I,
+)
+_RISK_ACCEPTANCE_EXPIRY = re.compile(
+    r"\b(?:until|expires?\s+(?:at|on)?)\s+"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))\b",
+    re.I,
+)
+_RISK_ACCEPTANCE_REASON = re.compile(r"\bbecause\s+(.+?)(?:[.!?]|$)", re.I)
+_REMEDIATION_GROUP_RETEST = re.compile(
+    r"\b(?:request|queue)\s+(?:a\s+)?(?:retest|verification)\s+"
+    r"(?:for\s+)?(?:the\s+)?remediation\s+group\s+"
+    r"(?:\"([^\"\x00-\x1f]{1,160})\"|'([^'\x00-\x1f]{1,160})')",
     re.I,
 )
 _APPLICATION_SCOPE_HINT = re.compile(r"\b(?:for|in)\s+application\b", re.I)
@@ -105,6 +160,17 @@ _SCAN_REFERENCE = re.compile(
     r"([A-Za-z0-9][A-Za-z0-9._-]{1,100})\b",
     re.I,
 )
+
+
+def _source_pattern(source: str) -> str:
+    """Match canonical provider slugs as normal human words in chat."""
+    aliases = {
+        "aws_security_hub": r"(?:aws[ _-]+security[ _-]+hub|security[ _-]+hub)",
+        "azure_defender": r"(?:azure[ _-]+defender|defender[ _-]+for[ _-]+cloud)",
+        "gcp_scc": r"(?:gcp[ _-]+scc|google[ _-]+security[ _-]+command[ _-]+center)",
+        "burp_dast": r"(?:burp(?:[ _-]+suite)?[ _-]+(?:dast|enterprise))",
+    }
+    return aliases.get(source, re.escape(source).replace(r"\_", r"[ _-]+"))
 _ACTION_INTEGRATIONS = {
     "sync_github_alerts": IntegrationKind.GITHUB,
     "sync_gitlab_alerts": IntegrationKind.GITLAB,
@@ -112,6 +178,20 @@ _ACTION_INTEGRATIONS = {
     "sync_sonarqube_alerts": IntegrationKind.SONARQUBE,
     "sync_snyk_issues": IntegrationKind.SNYK,
     "sync_tenable_vulnerabilities": IntegrationKind.TENABLE,
+    "sync_qualys_host_detections": IntegrationKind.QUALYS,
+    "sync_rapid7_vulnerabilities": IntegrationKind.RAPID7,
+    "sync_wiz_issues": IntegrationKind.WIZ,
+    "sync_prisma_cloud_alerts": IntegrationKind.PRISMA_CLOUD,
+    "sync_crowdstrike_vulnerabilities": IntegrationKind.CROWDSTRIKE,
+    "sync_aws_security_hub_findings": IntegrationKind.AWS_SECURITY_HUB,
+    "sync_aws_inspector_findings": IntegrationKind.AWS_INSPECTOR,
+    "sync_hackerone_reports": IntegrationKind.HACKERONE,
+    "sync_bugcrowd_submissions": IntegrationKind.BUGCROWD,
+    "sync_checkmarx_results": IntegrationKind.CHECKMARX,
+    "sync_fortify_issues": IntegrationKind.FORTIFY,
+    "sync_azure_defender_alerts": IntegrationKind.AZURE_DEFENDER,
+    "sync_gcp_scc_findings": IntegrationKind.GCP_SCC,
+    "sync_burp_dast_findings": IntegrationKind.BURP_DAST,
     "update_github_alert": IntegrationKind.GITHUB,
     "create_jira_ticket": IntegrationKind.JIRA,
 }
@@ -167,6 +247,14 @@ def _scannable_asset_target(name: str, kind: str) -> str:
     return target
 
 
+def _requested_ticket_provider(question: str) -> str | None:
+    """Return a tracker only when the user explicitly names it in a ticket request."""
+    for provider, pattern in _TICKET_REQUESTS.items():
+        if pattern.search(question):
+            return provider
+    return None
+
+
 async def _configuration_ready(
     session: AsyncSession,
     principal: Principal,
@@ -177,10 +265,32 @@ async def _configuration_ready(
 ) -> bool:
     """Check local configuration only; never contact a provider or mark a key used."""
     kind = _ACTION_INTEGRATIONS.get(action)
+    if action == "create_ticket":
+        provider = payload.get("provider")
+        kind = _TICKET_PROVIDER_KINDS.get(provider) if isinstance(provider, str) else None
+        if kind is None:
+            return False
     if kind is None:
         return True
     try:
-        if action in {"sync_tenable_vulnerabilities", "update_github_alert"}:
+        if action in {
+            "sync_tenable_vulnerabilities",
+            "sync_qualys_host_detections",
+            "sync_rapid7_vulnerabilities",
+            "sync_wiz_issues",
+            "sync_prisma_cloud_alerts",
+            "sync_crowdstrike_vulnerabilities",
+            "sync_aws_security_hub_findings",
+            "sync_aws_inspector_findings",
+            "sync_hackerone_reports",
+            "sync_bugcrowd_submissions",
+            "sync_checkmarx_results",
+            "sync_fortify_issues",
+            "sync_azure_defender_alerts",
+            "sync_gcp_scc_findings",
+            "sync_burp_dast_findings",
+            "update_github_alert",
+        }:
             integration = await integration_service.find_integration(session, principal, kind)
             if integration is None or not integration.is_usable:
                 return False
@@ -208,6 +318,34 @@ async def _configuration_ready(
         return scoped.snyk.configured
     if kind is IntegrationKind.TENABLE:
         return scoped.tenable.configured
+    if kind is IntegrationKind.QUALYS:
+        return scoped.qualys.configured
+    if kind is IntegrationKind.RAPID7:
+        return scoped.rapid7.configured
+    if kind is IntegrationKind.WIZ:
+        return scoped.wiz.configured
+    if kind is IntegrationKind.PRISMA_CLOUD:
+        return scoped.prisma_cloud.configured
+    if kind is IntegrationKind.CROWDSTRIKE:
+        return scoped.crowdstrike.configured
+    if kind is IntegrationKind.AWS_SECURITY_HUB:
+        return scoped.aws_security_hub.configured
+    if kind is IntegrationKind.AWS_INSPECTOR:
+        return scoped.aws_inspector.configured
+    if kind is IntegrationKind.HACKERONE:
+        return scoped.hackerone.configured
+    if kind is IntegrationKind.BUGCROWD:
+        return scoped.bugcrowd.configured
+    if kind is IntegrationKind.CHECKMARX:
+        return scoped.checkmarx.configured
+    if kind is IntegrationKind.FORTIFY:
+        return scoped.fortify.configured
+    if kind is IntegrationKind.AZURE_DEFENDER:
+        return scoped.azure_defender.configured
+    if kind is IntegrationKind.GCP_SCC:
+        return scoped.gcp_scc.configured
+    if kind is IntegrationKind.BURP_DAST:
+        return scoped.burp_dast.configured
     if kind is IntegrationKind.JIRA:
         jira = scoped.jira
         return bool(
@@ -216,6 +354,12 @@ async def _configuration_ready(
             and jira.api_token
             and (jira.project_key or payload.get("project_key"))
         )
+    if kind is IntegrationKind.SERVICENOW:
+        return scoped.servicenow.configured
+    if kind is IntegrationKind.AZURE_DEVOPS:
+        return scoped.azure_devops.configured
+    if kind is IntegrationKind.LINEAR:
+        return scoped.linear.configured
     return False
 
 
@@ -264,15 +408,15 @@ def _actionable_clauses(question: str) -> tuple[str, set[str], bool]:
         named_sources = [
             action
             for source, _label, action in _SOURCES
-            if re.search(rf"\b{source}\b", clause, re.I)
+            if re.search(rf"\b{_source_pattern(source)}\b", clause, re.I)
         ]
         if named_sources:
             blocked.update(named_sources)
         elif re.search(r"\b(?:sync|refresh|import|pull|fetch)\b", clause, re.I):
             blocked.update(action for _source, _label, action in _SOURCES)
             blocked.add("sync_connected_sources")
-        if _JIRA_TICKET.search(clause):
-            blocked.add("create_jira_ticket")
+        if _requested_ticket_provider(clause) is not None:
+            blocked.update(_TICKET_ACTIONS)
         if re.search(r"\b(?:triage|investigate|prepare|assign)\b", clause, re.I):
             blocked.add("update_canonical_work")
         if re.search(r"\bgithub\s+alert\b", clause, re.I):
@@ -295,6 +439,48 @@ def plan_chat_actions(question: str) -> list[ChatActionPlan]:
         if not application_scope.strip():
             return []
     plans: list[ChatActionPlan] = []
+    group_retest = _REMEDIATION_GROUP_RETEST.search(question)
+    if group_retest:
+        remediation_group = next(value for value in group_retest.groups() if value).strip()
+        plans.append(
+            ChatActionPlan(
+                "request_remediation_group_retests",
+                f"Request retest for remediation group {remediation_group}",
+                {"remediation_group": remediation_group},
+            )
+        )
+    if re.search(r"\brequest\s+risk\s+acceptance\b", question, re.I):
+        ids = list(dict.fromkeys(_UUID.findall(question)))
+        expiry = _RISK_ACCEPTANCE_EXPIRY.search(question)
+        reason = _RISK_ACCEPTANCE_REASON.search(question)
+        if len(ids) == 1 and expiry and reason and re.search(r"\bfinding\b", question, re.I):
+            rationale = reason.group(1).strip()
+            try:
+                expires_at = dt.datetime.fromisoformat(expiry.group(1).replace("Z", "+00:00"))
+            except ValueError:
+                expires_at = None
+            if expires_at is not None and expires_at.tzinfo is not None and expires_at > dt.datetime.now(dt.UTC):
+                plans.append(
+                    ChatActionPlan(
+                        "request_risk_acceptance",
+                        f"Request risk acceptance for finding {ids[0]}",
+                        {
+                            "finding_id": str(uuid.UUID(ids[0])),
+                            "rationale": rationale,
+                            "expires_at": expiry.group(1),
+                        },
+                    )
+                )
+    if re.search(r"\brequest\s+(?:a\s+)?retest\b", question, re.I):
+        ids = list(dict.fromkeys(_UUID.findall(question)))
+        if len(ids) == 1 and re.search(r"\bfinding\b", question, re.I):
+            plans.append(
+                ChatActionPlan(
+                    "request_retest",
+                    f"Request retest for finding {ids[0]}",
+                    {"finding_id": str(uuid.UUID(ids[0]))},
+                )
+            )
     if (
         not scan_negated
         and _explicit_request(question, "retest")
@@ -356,10 +542,12 @@ def plan_chat_actions(question: str) -> list[ChatActionPlan]:
                 return []
             return [ChatActionPlan("sync_connected_sources", "Sync connected security sources", {})]
         for source, label, action in _SOURCES:
-            if re.search(rf"\b{source}\b", question, re.I):
+            if re.search(rf"\b{_source_pattern(source)}\b", question, re.I):
                 plans.append(ChatActionPlan(action, f"Sync {label} alerts", {}))
 
-    if _explicit_request(question, "create|open|file") and _JIRA_TICKET.search(question):
+    ticket_provider = _requested_ticket_provider(question)
+    if _explicit_request(question, "create|open|file") and ticket_provider is not None:
+        ticket_label = _TICKET_PROVIDER_LABELS[ticket_provider]
         ids = list(dict.fromkeys(_UUID.findall(question)))
         top_count = _TOP_RISK_COUNT.search(question)
         payload: dict[str, Any] | None = None
@@ -368,22 +556,24 @@ def plan_chat_actions(question: str) -> list[ChatActionPlan]:
         elif not ids and top_count:
             project = _PROJECT.search(question)
             for rank in range(int(top_count.group(1))):
-                ranked_payload: dict[str, Any] = {"selector": "highest_risk", "rank": rank}
+                ranked_payload: dict[str, Any] = {
+                    "selector": "highest_risk", "rank": rank, "provider": ticket_provider
+                }
                 if re.search(r"\bmy\s+top\b", question, re.I):
                     ranked_payload["mine"] = True
                 if project:
                     ranked_payload["project_key"] = project.group(1).upper()
                 plans.append(
                     ChatActionPlan(
-                        "create_jira_ticket",
-                        f"Create Jira ticket for risk finding #{rank + 1}",
+                        "create_ticket",
+                        f"Create {ticket_label} ticket for risk finding #{rank + 1}",
                         ranked_payload,
                     )
                 )
         elif (
             not ids and _HIGHEST_RISK.search(question) and re.search(r"\bfinding\b", question, re.I)
         ):
-            payload = {"selector": "highest_risk"}
+            payload = {"selector": "highest_risk", "provider": ticket_provider}
             if re.search(r"\bmy\s+highest[-\s]+risk\b", question, re.I):
                 payload["mine"] = True
         if payload is not None:
@@ -391,11 +581,22 @@ def plan_chat_actions(question: str) -> list[ChatActionPlan]:
             if project:
                 payload["project_key"] = project.group(1).upper()
             label = (
-                "Create Jira ticket for highest-risk finding"
+                f"Create {ticket_label} ticket for highest-risk finding"
                 if payload.get("selector") == "highest_risk"
-                else "Create Jira ticket"
+                else f"Create {ticket_label} ticket"
             )
-            plans.append(ChatActionPlan("create_jira_ticket", label, payload))
+            payload.setdefault("provider", ticket_provider)
+            plans.append(ChatActionPlan("create_ticket", label, payload))
+    if _TICKET_STATUS_REFRESH.search(question):
+        ticket_ids = list(dict.fromkeys(_UUID.findall(question)))
+        if len(ticket_ids) == 1:
+            plans.append(
+                ChatActionPlan(
+                    "refresh_ticket_status",
+                    "Refresh linked ticket status",
+                    {"ticket_id": str(uuid.UUID(ticket_ids[0]))},
+                )
+            )
     if _explicit_request(question, "reopen") and re.search(r"\bgithub\s+alert\b", question, re.I):
         ids = list(dict.fromkeys(_UUID.findall(question)))
         if len(ids) == 1:
@@ -513,7 +714,7 @@ def plan_chat_actions(question: str) -> list[ChatActionPlan]:
             for plan in plans
             if plan.action not in blocked
         ),
-        key=lambda item: item.action == "create_jira_ticket",
+        key=lambda item: item.action in _TICKET_ACTIONS,
     )
 
 
@@ -1067,7 +1268,7 @@ async def propose_chat_actions(
                     else "AI-drafted advisory plan from cached tenant evidence; review before applying."
                 )
 
-        if plan.action == "create_jira_ticket":
+        if plan.action in _TICKET_ACTIONS:
             if payload.pop("selector", None) == "highest_risk":
                 rank = payload.pop("rank", 0)
                 mine = payload.pop("mine", False)
@@ -1128,8 +1329,41 @@ async def propose_chat_actions(
                 }
             else:
                 dependency_id = None
-        if plan.action == "create_jira_ticket" and dependency_id is None:
+        if plan.action in _TICKET_ACTIONS and dependency_id is None:
             finding_id = uuid.UUID(payload["finding_id"])
+            provider = payload.get("provider", "jira")
+            if provider != "jira":
+                canonical_id = (
+                    await session.execute(
+                        select(CanonicalFinding.id).where(
+                            CanonicalFinding.organization_id == principal.organization_id,
+                            CanonicalFinding.id == finding_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if canonical_id is None:
+                    canonical_id = (
+                        await session.execute(
+                            select(FindingObservation.canonical_finding_id)
+                            .where(
+                                FindingObservation.organization_id == principal.organization_id,
+                                FindingObservation.source_record_id == finding_id,
+                            )
+                            .order_by(FindingObservation.last_seen_at.desc(), FindingObservation.id)
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                if canonical_id is None:
+                    outcomes.append({"action": plan.action, "status": "finding_not_found"})
+                    continue
+                payload = {
+                    "canonical_finding_id": str(canonical_id),
+                    **{key: value for key, value in payload.items() if key != "finding_id"},
+                }
+                rationale = (
+                    f"Canonical finding {canonical_id} will be filed in "
+                    f"{_TICKET_PROVIDER_LABELS.get(provider, 'the selected tracker')}."
+                )
             native_finding_id = (
                 await session.execute(
                     select(Finding.id).where(
@@ -1138,7 +1372,7 @@ async def propose_chat_actions(
                     )
                 )
             ).scalar_one_or_none()
-            if native_finding_id is None:
+            if provider == "jira" and native_finding_id is None:
                 native_finding_id = (
                     await session.execute(
                         select(Finding.id)
@@ -1196,7 +1430,7 @@ async def propose_chat_actions(
 
         digest = agent_action_service.action_payload_digest(
             plan.action, payload,
-            depends_on_action_id=dependency_id if plan.action == "create_jira_ticket" else None,
+            depends_on_action_id=dependency_id if plan.action in _TICKET_ACTIONS else None,
         )
         existing = (
             await session.execute(
@@ -1215,7 +1449,7 @@ async def propose_chat_actions(
         if existing is not None:
             if plan.action == "update_canonical_work":
                 triage_by_finding[payload["finding_id"]] = existing.id
-            if plan.action == "create_jira_ticket" and triage_requested and (
+            if plan.action in _TICKET_ACTIONS and triage_requested and (
                 existing.depends_on_action_id != dependency_id
             ):
                 existing = None
@@ -1233,7 +1467,7 @@ async def propose_chat_actions(
             label=plan.label,
             rationale=rationale,
             payload=payload,
-            depends_on_action_id=dependency_id if plan.action == "create_jira_ticket" else None,
+            depends_on_action_id=dependency_id if plan.action in _TICKET_ACTIONS else None,
         )
         session.add(action)
         await session.flush()

@@ -19,6 +19,25 @@ export function agentActionSuccessTitle(
 ): string {
   if (decision === "reject") return "Action rejected";
   if (action === "start_assessment") return "Assessment queued — track worker progress below";
+  if (action === "create_jira_ticket" || action === "create_ticket") return "Ticket linked";
+  if (action === "refresh_ticket_status") return "Ticket status refreshed";
+  if (action === "sync_qualys_host_detections") return "Qualys detections synchronized";
+  if (action === "sync_rapid7_vulnerabilities") return "Rapid7 vulnerabilities synchronized";
+  if (action === "sync_wiz_issues") return "Wiz Issues synchronized";
+  if (action === "sync_prisma_cloud_alerts") return "Prisma Cloud alerts synchronized";
+  if (action === "sync_crowdstrike_vulnerabilities") return "CrowdStrike vulnerabilities synchronized";
+  if (action === "sync_aws_security_hub_findings") return "AWS Security Hub findings synchronized";
+  if (action === "sync_aws_inspector_findings") return "Amazon Inspector findings synchronized";
+  if (action === "sync_hackerone_reports") return "HackerOne reports synchronized";
+  if (action === "sync_bugcrowd_submissions") return "Bugcrowd submissions synchronized";
+  if (action === "sync_checkmarx_results") return "Checkmarx results synchronized";
+  if (action === "sync_fortify_issues") return "Fortify SSC issues synchronized";
+  if (action === "sync_azure_defender_alerts") return "Microsoft Defender for Cloud alerts synchronized";
+  if (action === "sync_gcp_scc_findings") return "Google Security Command Center findings synchronized";
+  if (action === "sync_burp_dast_findings") return "Burp Suite DAST findings synchronized";
+  if (action === "request_retest") return "Retest requested";
+  if (action === "request_remediation_group_retests") return "Group retest requested";
+  if (action === "request_risk_acceptance") return "Risk acceptance requested";
   return "Action completed";
 }
 
@@ -53,8 +72,14 @@ export function canApproveAgentAction(
   action: AgentActionName,
   can: (permission: Permission) => boolean,
 ): boolean {
-  if (action === "create_jira_ticket") return can("ticket:create");
-  if (action === "update_canonical_work") return can("finding:remediate");
+  if (action === "create_jira_ticket" || action === "create_ticket") {
+    return can("ticket:create");
+  }
+  if (action === "refresh_ticket_status") return can("finding:read");
+  if (action === "update_canonical_work" || action === "bulk_update_canonical_work" || action === "request_risk_acceptance") {
+    return can("finding:remediate");
+  }
+  if (action === "request_retest" || action === "request_remediation_group_retests") return can("finding:validate");
   if (action === "start_assessment") return can("assessment:create");
   if (action === "update_github_alert") return can("integration:manage") && can("finding:validate");
   return can("integration:manage");

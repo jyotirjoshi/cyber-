@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "id": "wazuh-demo-1001",
+      "timestamp": "2026-10-14T10:00:00Z",
+      "agent": {"id": "001", "name": "demo-shop-web-01"},
+      "rule": {
+        "id": "5710",
+        "description": "Repeated SSH authentication failures detected",
+        "cve": []
+      },
+      "risk": "high",
+      "status": "open",
+      "location": "demo-shop-web-01:/var/log/auth.log"
+    },
+    {
+      "id": "wazuh-demo-1002",
+      "timestamp": "2026-10-14T10:05:00Z",
+      "agent": {"id": "001", "name": "demo-shop-web-01"},
+      "rule": {
+        "id": "100210",
+        "description": "Known vulnerable Log4j package detected",
+        "cve": ["CVE-2021-44228"]
+      },
+      "risk": "critical",
+      "status": "resolved",
+      "location": "demo-shop-web-01:/opt/demo-shop/lib/log4j-core-2.14.1.jar"
+    }
+  ]
+}

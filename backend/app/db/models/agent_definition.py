@@ -34,7 +34,12 @@ class AgentDefinition(Base, TenantMixin, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
     avatar_reference: Mapped[str | None] = mapped_column(String(1000))
     active_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("agent_definition_versions.id", ondelete="SET NULL")
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "agent_definition_versions.id",
+            name="fk_agent_definitions_active_version",
+            ondelete="SET NULL",
+        ),
     )
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     version_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

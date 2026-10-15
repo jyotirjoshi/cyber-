@@ -18,7 +18,6 @@ import { formatRelative, humanize } from "@/lib/format";
 import type { ExternalAlertOut, Severity, TriageStatus } from "@/lib/types";
 
 const PAGE_SIZE = 25;
-const PROVIDERS: readonly ExternalAlertOut["provider"][] = ["github", "gitlab", "wazuh", "sonarqube", "snyk", "tenable"];
 const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "low", "info"];
 const STATUSES: readonly ExternalAlertOut["status"][] = ["open", "resolved", "dismissed", "fixed"];
 const TRIAGE_STATUSES: readonly TriageStatus[] = ["new", "investigating", "risk_accepted", "false_positive", "closed"];
@@ -57,12 +56,10 @@ export function ExternalAlertsPanel() {
             <Input id="ea-q" type="search" placeholder="Title or resource…" value={q}
               onChange={(e) => { setQ(e.target.value); setOffset(0); }} />
           </Field>
-          <Field label="Provider" htmlFor="ea-provider">
-            <Select id="ea-provider" value={provider}
-              onChange={(e) => { setProvider(e.target.value as typeof provider); setOffset(0); }}>
-              <option value="">All providers</option>
-              {PROVIDERS.map((value) => <option key={value} value={value}>{humanize(value)}</option>)}
-            </Select>
+          <Field label="Provider" htmlFor="ea-provider" hint="Any normalized intake provider">
+            <Input id="ea-provider" value={provider}
+              placeholder="e.g. qualys, wiz, burp"
+              onChange={(e) => { setProvider(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "")); setOffset(0); }} />
           </Field>
           <Field label="Severity" htmlFor="ea-severity">
             <Select id="ea-severity" value={severity}

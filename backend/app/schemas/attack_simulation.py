@@ -1,0 +1,134 @@
+"""Typed contracts for authorization-bound attack simulation campaigns."""
+
+from __future__ import annotations
+
+import datetime as dt
+import uuid
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.schemas.assessment import MAX_TARGETS, AuthorizationIn
+
+
+class AttackSimulationCampaignCreateIn(BaseModel):
+    """A declarative validation campaign; it never accepts executable commands."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=160)
+    scenarios: list[str] = Field(min_length=1, max_length=20)
+    targets: list[str] = Field(min_length=1, max_length=MAX_TARGETS)
+    cron_expression: str | None = Field(default=None, min_length=9, max_length=120)
+    timezone: str = Field(default="UTC", min_length=1, max_length=100)
+    authorization: AuthorizationIn
+    authorization_expires_at: dt.datetime
+
+    @model_validator(mode="after")
+    def confirmed_authorization_is_required(self) -> AttackSimulationCampaignCreateIn:
+        if not self.authorization.confirmed:
+            raise ValueError("campaign authorization must be confirmed")
+        return self
+
+
+class AttackSimulationCampaignOut(BaseModel):
+    """Safe campaign projection; attestation wording is deliberately not returned."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    authorization_reference: str
+    authorization_expires_at: dt.datetime
+    scenarios: list[str]
+    targets: list[str]
+    cron_expression: str | None
+    timezone: str
+    next_run_at: dt.datetime | None
+    last_run_at: dt.datetime | None
+    last_assessment_id: uuid.UUID | None
+    status: str
+    last_error_code: str | None
+    created_at: dt.datetime
+
+
+class AttackSimulationCampaignUpdateIn(BaseModel):
+    """Partial update — all fields optional."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    scenarios: list[str] | None = Field(default=None, max_length=20)
+    targets: list[str] | None = Field(default=None, max_length=MAX_TARGETS)
+    cron_expression: str | None = Field(default=None, max_length=120)
+    status: str | None = None
+
+
+class AttackSimulationTechniqueCatalogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    scenario: str
+    title: str
+    mitre_technique: str
+    target_types: list[str]
+    adapter: str
+    risk_class: str
+    approval_required: bool
+    timeout_seconds: int
+    expected_evidence: list[str]
+    cleanup: str
+    catalog_version: str
+
+
+class AttackSimulationTechniqueRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    technique_key: str
+    scenario: str
+    mitre_technique: str
+    adapter: str
+    target: str
+    risk_class: str
+    status: str
+    control_result: str | None
+    approval_id: uuid.UUID | None
+    scanner_job_id: uuid.UUID | None
+    expected_evidence: list[str]
+    evidence_artifact_ids: list[str]
+    evidence_summary: dict[str, object]
+    error_code: str | None
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+
+
+class AttackSimulationRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    assessment_id: uuid.UUID
+    baseline_run_id: uuid.UUID | None
+    status: str
+    catalog_version: str
+    scenarios_snapshot: list[str]
+    targets_snapshot: list[str]
+    summary: dict[str, object]
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class AttackSimulationRunDetailOut(AttackSimulationRunOut):
+    techniques: list[AttackSimulationTechniqueRunOut]
+
+
+__all__ = [
+    "AttackSimulationCampaignCreateIn",
+    "AttackSimulationCampaignOut",
+    "AttackSimulationCampaignUpdateIn",
+    "AttackSimulationRunDetailOut",
+    "AttackSimulationRunOut",
+    "AttackSimulationTechniqueCatalogOut",
+    "AttackSimulationTechniqueRunOut",
+]

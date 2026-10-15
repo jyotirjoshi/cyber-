@@ -5,6 +5,8 @@ export type IntegrationTestResult = {
 
 export type IntegrationSyncResult = {
   alerts_staged: number;
+  absence_candidates?: number;
+  missing_source_records?: number;
 };
 
 type Toast = (options: {
@@ -36,9 +38,22 @@ export function handleIntegrationSyncSuccess(
   result: IntegrationSyncResult,
   { toast }: { toast: Toast },
 ) {
+  const messages = [
+    `${result.alerts_staged} alerts are available in Findings → External alerts.`,
+  ];
+  if (result.absence_candidates) {
+    messages.push(
+      `${result.absence_candidates} missing source records evaluated against the closure policy.`,
+    );
+  }
+  if (result.missing_source_records) {
+    messages.push(
+      `${result.missing_source_records} source records were not returned and are marked stale; their findings remain open.`,
+    );
+  }
   toast({
     title: "Security alerts synchronized",
-    description: `${result.alerts_staged} alerts are available in Findings → External alerts.`,
+    description: messages.join(" "),
     tone: "ok",
   });
 }

@@ -31,7 +31,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError, ResourceNotFoundError
 from app.core.redis_client import TokenDenyList, get_redis
 from app.core.security import TokenClaims
-from app.db.enums import IntegrationKind
+from app.db.enums import IntegrationKind, Permission
 from app.db.models.identity import User
 from app.db.session import get_db
 from app.integrations.dify import DifyClient
@@ -43,6 +43,7 @@ from app.services.auth import authenticate_token, resolve_principal
 from app.services.context import Principal
 from app.services.events import EventBus
 from app.services.integration import resolve_settings
+from app.services.platform_api_key import authenticate_platform_api_key
 
 _bearer = HTTPBearer(auto_error=False, description="Bearer access token")
 
@@ -184,7 +185,11 @@ CurrentClaims = Annotated[TokenClaims, Depends(current_claims)]
 
 
 async def current_principal(
-    request: Request, session: DbSession, identity: IdentityDep
+    request: Request,
+    session: DbSession,
+    deny_list: DenyListDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> Principal:
     """Resolve the tenant-scoped authority for the request and bind it to the log context.
 
@@ -192,16 +197,31 @@ async def current_principal(
     :class:`~app.core.errors.PermissionDeniedError` (403) inside ``resolve_principal`` --
     the credential is fine, the authorization is missing.
     """
-    user, claims = identity
-    principal = await resolve_principal(
-        session,
-        user,
-        claims,
-        source_ip=_client_ip(request),
-        user_agent=request.headers.get("user-agent"),
-        request_id=getattr(request.state, "request_id", None),
-        trace_id=getattr(request.state, "trace_id", None),
-    )
+    if credentials is None or not credentials.credentials:
+        raise AuthenticationError("missing bearer token", user_message="Sign in to continue.")
+    secret = credentials.credentials
+    if secret.startswith("cynux_"):
+        key = await authenticate_platform_api_key(session, secret)
+        principal = Principal.for_api_key(
+            organization_id=key.organization_id,
+            scopes=frozenset(Permission(scope) for scope in key.scopes),
+            credential_id=key.id,
+            source_ip=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=getattr(request.state, "request_id", None),
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+    else:
+        user, claims = await authenticate_token(session, deny_list, secret, settings=settings)
+        principal = await resolve_principal(
+            session,
+            user,
+            claims,
+            source_ip=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=getattr(request.state, "request_id", None),
+            trace_id=getattr(request.state, "trace_id", None),
+        )
     request.state.principal = principal
     bind_contextvars(
         organization_id=str(principal.organization_id),

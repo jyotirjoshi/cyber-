@@ -252,10 +252,23 @@ async def test_refresh_batch_recomputes_two_tenants_without_cross_tenant_evidenc
         resolved.append(principal.organization_id)
         return SimpleNamespace(tenant_id=principal.organization_id)
 
+    async def cached(session, cve_id, *, nvd, kev, epss, now, max_age_seconds):
+        result = await nvd.get_cve(cve_id)
+        return {
+            "cve_id": cve_id,
+            "nvd_status": "complete",
+            "cvss_score": result.base_score,
+            "kev_status": "complete",
+            "in_kev": False,
+            "epss_status": "complete",
+            "epss_score": 0.1,
+        }
+
     monkeypatch.setattr(service, "NVDClient", NVD)
     monkeypatch.setattr(service, "KEVClient", KEV)
     monkeypatch.setattr(service, "EPSSClient", EPSS)
     monkeypatch.setattr(service, "resolve_settings", resolve)
+    monkeypatch.setattr(service, "cached_cve_intelligence", cached)
     monkeypatch.setattr(service, "load_policy", lambda organization: SimpleNamespace(risk_weights=RiskWeights()))
     session = Session()
     count = await service.refresh_stale_intel_batch(
@@ -363,5 +376,44 @@ async def test_worker_maintenance_runs_intelligence_refresh(monkeypatch) -> None
     ):
         monkeypatch.setattr(worker_module, name, no_op)
     monkeypatch.setattr(worker_module, "refresh_stale_intel_batch", refresh, raising=False)
+    await worker._maintenance_loop()
+    assert calls == [(session, worker._settings, worker._redis)]
+
+
+@pytest.mark.asyncio
+async def test_worker_maintenance_executes_pending_automation(monkeypatch) -> None:
+    pytest.importorskip("croniter")
+    from app.worker import worker as worker_module
+
+    worker = object.__new__(worker_module.AgentWorker)
+    worker._stopping = False
+    worker._settings = object()
+    worker._redis = object()
+    session = object()
+    calls = []
+
+    async def one_tick(seconds):
+        worker._stopping = True
+
+    @asynccontextmanager
+    async def scoped(settings):
+        yield session
+
+    async def no_op(*args, **kwargs):
+        return 0
+
+    async def execute(actual_session, *, settings, redis):
+        calls.append((actual_session, settings, redis))
+        return 1
+
+    monkeypatch.setattr(worker_module.asyncio, "sleep", one_tick)
+    monkeypatch.setattr(worker_module, "session_scope", scoped)
+    for name in (
+        "reclaim_orphans", "run_due_scans", "deliver_pending_dispatches",
+        "deliver_pending", "execute_approved_batch", "refresh_stale_risk_batch",
+        "refresh_stale_intel_batch",
+    ):
+        monkeypatch.setattr(worker_module, name, no_op)
+    monkeypatch.setattr(worker_module, "execute_pending_automations", execute, raising=False)
     await worker._maintenance_loop()
     assert calls == [(session, worker._settings, worker._redis)]

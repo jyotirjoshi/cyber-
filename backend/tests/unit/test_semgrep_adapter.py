@@ -52,7 +52,7 @@ def test_semgrep_stages_bounded_github_snapshot_and_imports_sarif(tmp_path, monk
 @pytest.mark.parametrize(
     "target",
     [
-        "https://bitbucket.org/acme/api",
+        "https://evil.example/acme/api",
         "https://github.com/acme/api?token=x",
         "https://github.com/acme/api/extra",
         "https://example.com/app",
@@ -101,11 +101,12 @@ def test_semgrep_jobs_only_for_supported_approved_repositories():
     gitlab = "https://gitlab.com/acme/api"
     chosen = [ScannerName.TRIVY_REPO, ScannerName.SEMGREP_REPO]
     assert _compatible_scanners_for_target(github, chosen) == chosen
-    assert _compatible_scanners_for_target(gitlab, chosen) == [ScannerName.TRIVY_REPO]
+    assert _compatible_scanners_for_target(gitlab, chosen) == chosen
     assert _jobs_for_scope([github, gitlab], chosen) == [
         (ScannerName.TRIVY_REPO, [github]),
         (ScannerName.TRIVY_REPO, [gitlab]),
         (ScannerName.SEMGREP_REPO, [github]),
+        (ScannerName.SEMGREP_REPO, [gitlab]),
     ]
 
 

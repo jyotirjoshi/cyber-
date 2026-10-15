@@ -19,16 +19,222 @@ import uuid
 
 from fastapi import APIRouter, Response, status
 
-from app.api.deps import DbSession, GatewayDep, PrincipalDep, SettingsDep, StorageDep
+from app.api.deps import DbSession, GatewayDep, PaginationDep, PrincipalDep, SettingsDep, StorageDep
 from app.core.config import Settings
-from app.db.enums import ReportFormat, ReportStatus
+from app.db.enums import Permission, ReportFormat, ReportStatus
 from app.db.models.report import Report
 from app.reporting.generate import generate
-from app.schemas.report import ReportDetailOut, ReportGenerateIn, ReportOut
+from app.schemas.report import (
+    ReportDetailOut,
+    ReportGenerateIn,
+    ReportOut,
+    ReportScheduleCreateIn,
+    ReportScheduleOut,
+    ReportShareCreateIn,
+    ReportShareIssuedOut,
+    ReportShareLinkOut,
+    ReportTemplateCreateIn,
+    ReportTemplateOut,
+)
+from app.schemas.organization import ClientOrganizationPortfolioOut
+from app.schemas.common import Page
 from app.services import assessment as assessment_service
 from app.services import report as report_service
+from app.services import report_sharing
+from app.services import report_template as report_template_service
+from app.services.organization import list_client_portfolio
+from app.services.audit import AuditAction, record
 
 router = APIRouter(tags=["reports"])
+
+
+@router.get("/report-templates", response_model=list[ReportTemplateOut])
+async def list_report_templates(
+    principal: PrincipalDep, session: DbSession
+) -> list[ReportTemplateOut]:
+    rows = await report_template_service.list_templates(session, principal)
+    return [ReportTemplateOut.model_validate(row) for row in rows]
+
+
+@router.post("/report-templates", response_model=ReportTemplateOut, status_code=status.HTTP_201_CREATED)
+async def create_report_template(
+    payload: ReportTemplateCreateIn, principal: PrincipalDep, session: DbSession
+) -> ReportTemplateOut:
+    row = await report_template_service.create_template(session, principal, payload)
+    await session.commit()
+    return ReportTemplateOut.model_validate(row)
+
+
+@router.get("/reports/portfolio", response_model=list[ClientOrganizationPortfolioOut])
+async def get_report_portfolio(
+    principal: PrincipalDep, session: DbSession
+) -> list[ClientOrganizationPortfolioOut]:
+    """Return aggregate-only direct-client posture; raw child findings never cross tenants."""
+    return await list_client_portfolio(session, principal)
+
+
+@router.get("/reports", response_model=Page[ReportOut])
+async def list_recent_reports(
+    principal: PrincipalDep,
+    session: DbSession,
+    pagination: PaginationDep,
+    settings: SettingsDep,
+) -> Page[ReportOut]:
+    """List the organization's latest report artifacts across all assessments."""
+    rows, total = await report_service.list_recent_reports(
+        session, principal, limit=pagination.limit, offset=pagination.offset
+    )
+    items = [report_service.report_out(row, download_url=_download_url(settings, row)) for row in rows]
+    return Page.build(items, total=total, limit=pagination.limit, offset=pagination.offset)
+
+
+@router.get("/report-schedules", response_model=list[ReportScheduleOut])
+async def list_report_schedules(principal: PrincipalDep, session: DbSession) -> list[ReportScheduleOut]:
+    from app.db.models.report import ReportSchedule
+    from app.db.repository import tenant_select
+
+    principal.require(Permission.REPORT_READ)
+    schedules = list(
+        (await session.scalars(tenant_select(ReportSchedule, principal.organization_id))).all()
+    )
+    return [ReportScheduleOut.model_validate(schedule) for schedule in schedules]
+
+
+@router.post("/report-schedules", response_model=ReportScheduleOut, status_code=status.HTTP_201_CREATED)
+async def create_report_schedule(
+    payload: ReportScheduleCreateIn, principal: PrincipalDep, session: DbSession
+) -> ReportScheduleOut:
+    schedule = await report_service.create_report_schedule(session, principal, payload)
+    await record(
+        session,
+        action=AuditAction.REPORT_SCHEDULE_CREATE,
+        principal=principal,
+        resource_type="report_schedule",
+        resource_id=schedule.id,
+        detail={"assessment_id": str(schedule.assessment_id), "cron_expression": schedule.cron_expression},
+    )
+    await session.commit()
+    return ReportScheduleOut.model_validate(schedule)
+
+
+@router.post("/reports/{report_id}/share-links", response_model=ReportShareIssuedOut, status_code=status.HTTP_201_CREATED)
+async def create_report_share_link(
+    report_id: uuid.UUID, payload: ReportShareCreateIn, principal: PrincipalDep, session: DbSession
+) -> ReportShareIssuedOut:
+    await report_service.get_report(session, principal, report_id)
+    issued = await report_sharing.issue_share_link(
+        session, principal, report_id=report_id, expires_at=payload.expires_at
+    )
+    await session.commit()
+    return ReportShareIssuedOut(id=issued.link.id, token=issued.token, expires_at=issued.link.expires_at)
+
+
+@router.get("/reports/{report_id}/share-links", response_model=list[ReportShareLinkOut])
+async def list_report_share_links(
+    report_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> list[ReportShareLinkOut]:
+    await report_service.get_report(session, principal, report_id)
+    return [
+        ReportShareLinkOut.model_validate(link)
+        for link in await report_sharing.list_share_links(session, principal, report_id=report_id)
+    ]
+
+
+@router.post("/reports/share-links/{share_link_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_report_share_link(
+    share_link_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> Response:
+    """Stop a leaked or no-longer-needed external report grant immediately."""
+    link = await report_sharing.revoke_share_link(session, principal, share_link_id)
+    await record(
+        session,
+        action=AuditAction.REPORT_SHARE_REVOKE,
+        principal=principal,
+        resource_type="report_share_link",
+        resource_id=link.id,
+        detail={"report_id": str(link.report_id)},
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/shared/reports/{token}")
+async def download_shared_report(token: str, session: DbSession, storage: StorageDep) -> Response:
+    """Download a report through a revocable, expiring opaque external grant."""
+    report, data = await report_sharing.read_shared_report_bytes(session, token, storage=storage)
+    await session.commit()
+    filename = _safe_filename(report.title, report.format)
+    return Response(
+        content=data,
+        media_type=_media_type(report),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/report-schedules/{schedule_id}/pause", response_model=ReportScheduleOut)
+async def pause_report_schedule(
+    schedule_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> ReportScheduleOut:
+    from app.core.errors import ResourceNotFoundError
+    from app.db.models.report import ReportSchedule
+    from app.db.repository import tenant_select
+
+    principal.require(Permission.REPORT_GENERATE)
+    schedule = (
+        await session.execute(
+            tenant_select(ReportSchedule, principal.organization_id)
+            .where(ReportSchedule.id == schedule_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if schedule is None:
+        raise ResourceNotFoundError("Report schedule not found")
+    schedule.is_enabled = False
+    await record(
+        session,
+        action=AuditAction.REPORT_SCHEDULE_PAUSE,
+        principal=principal,
+        resource_type="report_schedule",
+        resource_id=schedule.id,
+        detail={"assessment_id": str(schedule.assessment_id)},
+    )
+    await session.commit()
+    return ReportScheduleOut.model_validate(schedule)
+
+
+@router.post("/report-schedules/{schedule_id}/resume", response_model=ReportScheduleOut)
+async def resume_report_schedule(
+    schedule_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> ReportScheduleOut:
+    from app.core.errors import ResourceNotFoundError
+    from app.db.models.report import ReportSchedule
+    from app.db.repository import tenant_select
+    from app.services.scheduling import next_cron_time
+
+    principal.require(Permission.REPORT_GENERATE)
+    schedule = (
+        await session.execute(
+            tenant_select(ReportSchedule, principal.organization_id)
+            .where(ReportSchedule.id == schedule_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if schedule is None:
+        raise ResourceNotFoundError("Report schedule not found")
+    from app.db.base import utcnow
+
+    schedule.is_enabled = True
+    schedule.next_run_at = next_cron_time(schedule.cron_expression, schedule.timezone, utcnow())
+    await record(
+        session,
+        action=AuditAction.REPORT_SCHEDULE_RESUME,
+        principal=principal,
+        resource_type="report_schedule",
+        resource_id=schedule.id,
+        detail={"assessment_id": str(schedule.assessment_id)},
+    )
+    await session.commit()
+    return ReportScheduleOut.model_validate(schedule)
 
 
 def _download_url(settings: Settings, report: Report) -> str | None:
@@ -46,6 +252,8 @@ def _download_url(settings: Settings, report: Report) -> str | None:
 def _media_type(report: Report) -> str:
     if report.format_enum is ReportFormat.PDF:
         return "application/pdf"
+    if report.format_enum is ReportFormat.JSON:
+        return "application/json"
     return "text/html; charset=utf-8"
 
 
@@ -102,12 +310,16 @@ async def generate_report(
     """
     assessment = await assessment_service.get_assessment(session, principal, assessment_id)
 
-    if not payload.force:
+    # A supplied title is an explicit request for a distinct deliverable. Reusing the latest
+    # ready artifact in that case would return a differently titled report and make the UI's
+    # title field appear to have been ignored.
+    if not payload.force and payload.title is None:
         existing = await report_service.latest_report(
             session,
             assessment_id,
             organization_id=principal.organization_id,
             ready_only=True,
+            audience=payload.audience,
         )
         if existing is not None:
             return report_service.report_detail_out(
@@ -124,6 +336,7 @@ async def generate_report(
         principal=principal,
         gateway=gateway,
         title=payload.title,
+        template_id=payload.template_id,
     )
     return report_service.report_detail_out(report, download_url=_download_url(settings, report))
 
