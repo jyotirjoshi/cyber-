@@ -76,11 +76,20 @@ class KnowledgeSource(Base, TenantMixin, TimestampMixin):
         PgUUID(as_uuid=True), ForeignKey("knowledge_source_versions.id", ondelete="SET NULL")
     )
     tombstoned_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_until: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    index_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_index_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    embedding_profile: Mapped[str | None] = mapped_column(String(160))
+    indexed_chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
 
     __table_args__ = (
+        CheckConstraint("lease_generation >= 0 AND index_attempts >= 0 AND indexed_chunks >= 0 AND total_chunks >= 0", name="valid_knowledge_index_counters"),
+        Index("ix_knowledge_sources_index_queue", "status", "next_index_at", "lease_until"),
         UniqueConstraint(
             "collection_id", "content_hash", name="unique_knowledge_source_content"
         ),

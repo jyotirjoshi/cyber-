@@ -104,6 +104,9 @@ def resolve_effective_tools(
         if not principal.has(spec.permission):
             rejected[name] = "permission"
             continue
+        if version.autonomy_mode == "manual" and spec.side_effect != "read":
+            rejected[name] = "manual_mode"
+            continue
         if (
             name in organization_policy.disabled_tools
             or spec.side_effect not in organization_policy.allowed_side_effects
@@ -120,7 +123,7 @@ def resolve_effective_tools(
             continue
         organization_approval = organization_policy.approval_overrides.get(name, "never")
         mode_approval: Literal["never", "always"] = (
-            "always" if version.autonomy_mode == "manual" and spec.side_effect != "read" else "never"
+            "always" if version.autonomy_mode == "supervised" and spec.side_effect != "read" else "never"
         )
         approval = _strictest_approval(
             spec.approval, assignment.approval_mode, organization_approval, mode_approval

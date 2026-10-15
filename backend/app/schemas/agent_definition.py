@@ -89,6 +89,32 @@ class AgentDefinitionVersionOut(BaseModel):
     retrieval_policy: dict[str, Any]
     configuration_digest: str
     created_at: dt.datetime
+    tool_names: list[str] = Field(default_factory=list)
+    collection_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class AgentToolOut(BaseModel):
+    name: str
+    version: int
+    permission: str
+    side_effect: str
+    approval: str
+    timeout_seconds: int
+    permitted: bool
+    input_schema: dict[str, Any]
+
+
+class EffectiveAgentToolOut(BaseModel):
+    name: str
+    approval: str
+    timeout_seconds: int
+    per_run_call_limit: int
+
+
+class AgentPolicyPreviewOut(BaseModel):
+    tools: list[EffectiveAgentToolOut]
+    rejected: dict[str, str]
+    max_tool_calls: int
 
 
 __all__ = [

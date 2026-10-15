@@ -194,6 +194,31 @@ class LLMGateway:
         )
         return response
 
+    async def complete_custom(
+        self,
+        *,
+        provider: str,
+        model: str,
+        messages: Sequence[LLMMessage],
+        max_output_tokens: int,
+        temperature: float,
+        json_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        """Complete with the exact provider/model pinned by an immutable agent version."""
+        if provider not in {"anthropic", "openai", "openrouter", "google"}:
+            raise ConfigurationError(f"Unsupported custom-agent provider {provider!r}.")
+        if not model or max_output_tokens < 1:
+            raise ConfigurationError("Custom-agent model and output budget are required.")
+        bounded = enforce_prompt_budget(messages, limit=self._llm.max_prompt_chars)
+        response = await self._client(provider).complete(model=model, messages=bounded,
+            max_output_tokens=min(max_output_tokens, 200_000), temperature=temperature,
+            json_schema=json_schema)
+        logger.info("llm.complete_custom", provider=provider, model=model,
+            input_tokens=response.usage.input_tokens, output_tokens=response.usage.output_tokens,
+            estimated_input_tokens=estimate_messages_tokens(bounded), latency_ms=response.latency_ms,
+            stop_reason=response.stop_reason, prompt_trimmed=len(bounded) != len(messages))
+        return response
+
     async def complete_json(
         self,
         role: LLMRole,
