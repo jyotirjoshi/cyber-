@@ -5,6 +5,13 @@ import httpx
 
 from .errors import CynuxError
 
+SEARCH_KNOWLEDGE = """query SearchKnowledge($query: String!, $collectionIds: [ID!]!, $limit: Int!, $minSimilarity: Float!) {
+  knowledgeSearch(query: $query, collectionIds: $collectionIds, limit: $limit, minSimilarity: $minSimilarity) {
+    chunkId sourceId text score
+    citation { collectionId sourceId sourceVersionId filename page section ordinal contentHash provider }
+  }
+}"""
+
 AGENTS = """query Agents($first: Int!, $after: String) {
   agentDefinitions(first: $first, after: $after) {
     nodes { id name description isEnabled versionCount activeVersionId createdAt updatedAt }

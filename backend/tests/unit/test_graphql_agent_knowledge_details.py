@@ -15,6 +15,101 @@ from app.graphql.ids import encode_global_id
 from app.graphql.schema import schema
 from app.services.context import Principal
 
+SEARCH = """query($ids: [ID!]!, $query: String!, $limit: Int = 6) {
+  knowledgeSearch(collectionIds: $ids, query: $query, limit: $limit) {
+    chunkId sourceId text score
+    citation { collectionId sourceId sourceVersionId filename page section ordinal contentHash provider }
+  }
+}"""
+
+
+@pytest.mark.asyncio
+async def test_search_projects_citations_and_passes_tenant_policy(detailed_context, monkeypatch):
+    from app.services.knowledge_retrieval import KnowledgeCitation, KnowledgeHit
+
+    context, _, collection_id, _, _ = detailed_context
+    chunk, source, version = (uuid.UUID(int=n) for n in (21, 22, 23))
+    calls = []
+
+    async def retrieve(retriever, query, policy):
+        # The provider/database ranking is covered by retrieval service tests.
+        # This checks the new resolver's authorization, policy and wire projection.
+        calls.append((retriever.principal, query, policy))
+        return [KnowledgeHit(chunk, source, "Require owner approval.", 0.032,
+            KnowledgeCitation(collection_id, source, version, "runbook.pdf", 3,
+                "Containment", 2, "a" * 64))]
+
+    monkeypatch.setattr("app.graphql.queries.InternalKnowledgeRetriever.retrieve", retrieve)
+    result = await schema.execute(SEARCH, context_value=context, variable_values={
+        "ids": [encode_global_id("KnowledgeCollection", collection_id)] * 2,
+        "query": "  containment approval  ", "limit": 3,
+    })
+    assert result.errors is None
+    assert len(calls) == 1
+    principal, query, policy = calls[0]
+    assert principal is context.principal
+    assert query == "containment approval"
+    assert policy.organization_id == context.principal.organization_id
+    assert policy.collection_ids == (collection_id,)
+    assert policy.limit == 3
+    assert result.data["knowledgeSearch"] == [{
+        "chunkId": encode_global_id("KnowledgeChunk", chunk),
+        "sourceId": encode_global_id("KnowledgeSource", source),
+        "text": "Require owner approval.", "score": 0.032,
+        "citation": {
+            "collectionId": encode_global_id("KnowledgeCollection", collection_id),
+            "sourceId": encode_global_id("KnowledgeSource", source),
+            "sourceVersionId": encode_global_id("KnowledgeSourceVersion", version),
+            "filename": "runbook.pdf", "page": 3, "section": "Containment",
+            "ordinal": 2, "contentHash": "a" * 64, "provider": "internal",
+        },
+    }]
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_foreign_collection_using_real_retriever(detailed_context):
+    context, _, _, _, _ = detailed_context
+    foreign_id = uuid.uuid4()
+    async with context.session_factory() as session:
+        session.add(KnowledgeCollection(id=foreign_id, organization_id=uuid.uuid4(),
+            name="Foreign", retrieval_provider="internal", retrieval_policy={},
+            is_enabled=True, revision=1))
+        await session.commit()
+    for identifier in (foreign_id, uuid.uuid4()):
+        result = await schema.execute(SEARCH, context_value=context, variable_values={
+            "ids": [encode_global_id("KnowledgeCollection", identifier)], "query": "approval",
+        })
+        assert result.errors[0].extensions["code"] == "RESOURCE_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [{"query": "  "}, {"query": "x" * 2001},
+                                   {"limit": 21}, {"ids": []}])
+async def test_invalid_search_fails_before_retrieval(detailed_context, monkeypatch, change):
+    context, _, collection_id, _, _ = detailed_context
+    async def unexpected(*args):
+        pytest.fail("invalid search reached retrieval")
+    monkeypatch.setattr("app.graphql.queries.InternalKnowledgeRetriever.retrieve", unexpected)
+    result = await schema.execute(SEARCH, context_value=context, variable_values={
+        "ids": [encode_global_id("KnowledgeCollection", collection_id)], "query": "approval",
+        **change,
+    })
+    assert result.errors[0].extensions["code"] == "BAD_USER_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_search_respects_feature_and_permission_guards(detailed_context):
+    context, _, collection_id, _, _ = detailed_context
+    variables = {"ids": [encode_global_id("KnowledgeCollection", collection_id)], "query": "a"}
+    context.settings.features.internal_knowledge = False
+    result = await schema.execute(SEARCH, context_value=context, variable_values=variables)
+    assert result.errors[0].extensions["code"] == "RESOURCE_NOT_FOUND"
+    context.settings.features.internal_knowledge = True
+    context.principal = Principal.for_api_key(
+        organization_id=context.principal.organization_id, scopes=frozenset())
+    result = await schema.execute(SEARCH, context_value=context, variable_values=variables)
+    assert result.errors[0].extensions["code"] == "PERMISSION_DENIED"
+
 
 @pytest.fixture
 async def detailed_context():

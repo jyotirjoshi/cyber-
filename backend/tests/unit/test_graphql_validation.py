@@ -5,6 +5,16 @@ from app.graphql.schema import schema
 
 
 @pytest.mark.asyncio
+async def test_search_fanout_through_fragments_is_rejected_before_provider_calls():
+    fields = " ".join(
+        f'a{i}: knowledgeSearch(query: "a", collectionIds: ["id"]) {{ text }}'
+        for i in range(5)
+    )
+    result = await schema.execute("{ ...Searches } fragment Searches on Query {" + fields + "}")
+    assert result.errors[0].extensions["code"] == "QUERY_TOO_COMPLEX"
+
+
+@pytest.mark.asyncio
 async def test_alias_fanout_is_rejected_before_auth_or_database():
     query = (
         "{ "

@@ -41,10 +41,10 @@ class QueryBudget(SchemaExtension):
                 variables.setdefault(
                     definition.variable.name.value, int(definition.default_value.value)
                 )
-        nodes = aliases = cost = 0
+        nodes = aliases = cost = searches = 0
 
         def walk(selection, depth=0, multiplier=1, stack=frozenset()):
-            nonlocal nodes, aliases, cost
+            nonlocal nodes, aliases, cost, searches
             if depth > 12:
                 raise PublicGraphQLError("QUERY_TOO_DEEP", "GraphQL query is too deep.")
             for field in selection.selections:
@@ -73,6 +73,15 @@ class QueryBudget(SchemaExtension):
                 if aliases > 50 or cost > 5000:
                     raise PublicGraphQLError("QUERY_TOO_COMPLEX", "GraphQL query is too complex.")
                 count = 1
+                if field.name.value == "knowledgeSearch":
+                    # Each search can invoke embedding providers; bound calls as
+                    # well as result fields, including expanded fragment aliases.
+                    searches += 1
+                    if searches > 4:
+                        raise PublicGraphQLError(
+                            "QUERY_TOO_COMPLEX", "At most four knowledge searches per request."
+                        )
+                    count = 20
                 if field.name.value in {
                     "agentDefinitions",
                     "agentDefinitionVersions",

@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from .models import Page
 from .errors import CynuxError
+from .knowledge import search_results, search_variables, upload_request, upload_result
 from .graphql import (
     AGENTS,
     COLLECTIONS,
@@ -17,6 +18,7 @@ from .graphql import (
     DELETE_KNOWLEDGE_SOURCE,
     DISABLE_AGENT,
     RESTORE_KNOWLEDGE_SOURCE,
+    SEARCH_KNOWLEDGE,
     SOURCES,
     VERSIONS,
     connection_page,
@@ -59,6 +61,34 @@ class CynuxClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def search_knowledge(
+        self, query: str, collection_ids: list[str], *, limit: int = 6,
+        min_similarity: float = 0.25,
+    ) -> list[dict[str, Any]]:
+        """Retrieve cited passages from selected collections (UUIDs or GraphQL IDs)."""
+        data = self.graphql(
+            SEARCH_KNOWLEDGE,
+            search_variables(query, collection_ids, limit, min_similarity),
+            operation_name="SearchKnowledge",
+        )
+        return search_results(data)
+
+    def upload_knowledge_source(
+        self, collection_id: str, *, filename: str, content: bytes,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload once; return a source with GraphQL IDs. Indexing completes asynchronously.
+
+        The server enforces document limits and deduplicates content per collection.
+        Use iter_knowledge_sources to inspect ready/failed indexing status.
+        """
+        path, files = upload_request(collection_id, filename, content, mime_type)
+        try:
+            response = self._client.post(path, files=files)
+        except httpx.TransportError:
+            raise CynuxError("Cynux could not be reached", retryable=True) from None
+        return upload_result(response, collection_id)
 
     def __enter__(self) -> CynuxClient:
         return self

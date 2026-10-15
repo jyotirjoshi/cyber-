@@ -2,6 +2,7 @@
 import datetime as dt
 
 import strawberry
+from pydantic import ValidationError
 from sqlalchemy import and_, or_
 from strawberry.types import Info
 
@@ -22,9 +23,12 @@ from app.graphql.types import (
     AgentToolNode,
     Connection,
     KnowledgeCollectionNode,
+    KnowledgeSearchHitNode,
     KnowledgeSourceNode,
     PageInfo,
 )
+from app.schemas.knowledge import KnowledgeSearchIn
+from app.services.knowledge_retrieval import InternalKnowledgeRetriever, RetrievalPolicy
 
 
 def _authorize(info, guard):
@@ -71,6 +75,41 @@ async def _node(context, model, projection, type_name, identifier):
 
 @strawberry.type
 class AgentKnowledgeQueries:
+    @strawberry.field
+    async def knowledge_search(
+        self,
+        info: Info,
+        query: str,
+        collection_ids: list[strawberry.ID],
+        limit: int = 6,
+        min_similarity: float = 0.25,
+    ) -> list[KnowledgeSearchHitNode]:
+        context = _authorize(info, require_internal_knowledge)
+        if not 1 <= len(collection_ids) <= 20:
+            raise PublicGraphQLError("BAD_USER_INPUT", "Select 1 to 20 knowledge collections.")
+        try:
+            payload = KnowledgeSearchIn(
+                query=query.strip(),
+                collection_ids=[
+                    decode_global_id(str(value), "KnowledgeCollection") for value in collection_ids
+                ],
+                limit=limit,
+                min_similarity=min_similarity,
+            )
+        except ValidationError as exc:
+            raise PublicGraphQLError("BAD_USER_INPUT", "Knowledge search input is invalid.") from exc
+        policy = RetrievalPolicy(
+            context.principal.organization_id,
+            tuple(dict.fromkeys(payload.collection_ids)),
+            limit=payload.limit,
+            min_similarity=payload.min_similarity,
+        )
+        async with context.session_factory() as session:
+            hits = await InternalKnowledgeRetriever(
+                session, context.principal, context.settings
+            ).retrieve(payload.query, policy)
+        return [KnowledgeSearchHitNode.from_hit(hit) for hit in hits]
+
     @strawberry.field
     async def agent_definitions(
         self, info: Info, first: int = 25, after: str | None = None

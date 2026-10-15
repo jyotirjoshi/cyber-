@@ -8,6 +8,53 @@ from app.graphql.ids import encode_global_id
 
 
 @strawberry.type
+class KnowledgeCitationNode:
+    collection_id: strawberry.ID
+    source_id: strawberry.ID
+    source_version_id: strawberry.ID
+    filename: str
+    page: int | None
+    section: str | None
+    ordinal: int
+    content_hash: str
+    provider: str
+
+
+@strawberry.type
+class KnowledgeSearchHitNode:
+    chunk_id: strawberry.ID
+    source_id: strawberry.ID
+    text: str
+    score: float
+    citation: KnowledgeCitationNode
+
+    @classmethod
+    def from_hit(cls, hit):
+        citation = hit.citation
+        return cls(
+            chunk_id=strawberry.ID(encode_global_id("KnowledgeChunk", hit.chunk_id)),
+            source_id=strawberry.ID(encode_global_id("KnowledgeSource", hit.source_id)),
+            text=hit.text,
+            score=hit.score,
+            citation=KnowledgeCitationNode(
+                collection_id=strawberry.ID(
+                    encode_global_id("KnowledgeCollection", citation.collection_id)
+                ),
+                source_id=strawberry.ID(encode_global_id("KnowledgeSource", citation.source_id)),
+                source_version_id=strawberry.ID(
+                    encode_global_id("KnowledgeSourceVersion", citation.source_version_id)
+                ),
+                filename=citation.filename,
+                page=citation.page,
+                section=citation.section,
+                ordinal=citation.ordinal,
+                content_hash=citation.content_hash,
+                provider=citation.provider,
+            ),
+        )
+
+
+@strawberry.type
 class PageInfo:
     has_next_page: bool
     end_cursor: str | None
