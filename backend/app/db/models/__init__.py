@@ -15,6 +15,14 @@ from app.db.models.agent import (
     AgentStep,
     RunDispatch,
 )
+from app.db.models.agent_definition import (
+    AgentDefinition,
+    AgentDefinitionVersion,
+    AgentEvaluation,
+    AgentTemplate,
+    AgentVersionCollection,
+    AgentVersionTool,
+)
 from app.db.models.assessment import (
     Approval,
     Assessment,
@@ -35,6 +43,15 @@ from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment, Remediation, TicketLink
 from app.db.models.identity import Membership, Organization, PasswordResetToken, User
 from app.db.models.integration import Integration, IntegrationCredential
+from app.db.models.knowledge import (
+    AgentMemoryCandidate,
+    KnowledgeChunk,
+    KnowledgeCollection,
+    KnowledgeEmbedding,
+    KnowledgeFeedback,
+    KnowledgeSource,
+    KnowledgeSourceVersion,
+)
 from app.db.models.notification import Notification
 from app.db.models.report import Report
 from app.db.models.scanner import ScannerArtifact, ScannerJob
@@ -75,4 +92,17 @@ __all__ = [
     "ScannerJob",
     "TicketLink",
     "User",
+    "AgentDefinition",
+    "AgentDefinitionVersion",
+    "AgentEvaluation",
+    "AgentTemplate",
+    "AgentVersionCollection",
+    "AgentVersionTool",
+    "AgentMemoryCandidate",
+    "KnowledgeChunk",
+    "KnowledgeCollection",
+    "KnowledgeEmbedding",
+    "KnowledgeFeedback",
+    "KnowledgeSource",
+    "KnowledgeSourceVersion",
 ]

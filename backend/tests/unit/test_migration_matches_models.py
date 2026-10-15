@@ -234,7 +234,8 @@ class MetadataOp:
 
     def execute(self, statement: Any, **kwargs: Any) -> None:
         """Data-only migrations do not change the schema metadata being compared."""
-        assert str(statement).lstrip().upper().startswith("UPDATE ")
+        sql = str(statement).lstrip().upper()
+        assert sql.startswith(("UPDATE ", "CREATE EXTENSION "))
 
 
 @pytest.fixture(scope="module")

@@ -536,6 +536,52 @@ class StepStatus(StrEnum):
     DEGRADED = "degraded"  # completed without a non-essential dependency
 
 
+class AgentAutonomyMode(StrEnum):
+    MANUAL = "manual"
+    SUPERVISED = "supervised"
+    BOUNDED = "bounded"
+
+
+class AgentToolApprovalMode(StrEnum):
+    NEVER = "never"
+    POLICY = "policy"
+    ALWAYS = "always"
+
+
+class AgentEvaluationDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class KnowledgeRetrievalProvider(StrEnum):
+    INTERNAL = "internal"
+    DIFY = "dify"
+
+
+class KnowledgeSourceStatus(StrEnum):
+    STORING = "storing"
+    STORED = "stored"
+    EXTRACTING = "extracting"
+    CHUNKING = "chunking"
+    EMBEDDING = "embedding"
+    READY = "ready"
+    FAILED = "failed"
+    DELETED = "deleted"
+
+
+class KnowledgeEmbeddingStatus(StrEnum):
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class AgentMemoryCandidateStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
 class MessageRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
@@ -696,6 +742,13 @@ __all__ = [
     "Severity",
     "StepStatus",
     "StrEnum",
+    "AgentAutonomyMode",
+    "AgentEvaluationDecision",
+    "AgentMemoryCandidateStatus",
+    "AgentToolApprovalMode",
+    "KnowledgeEmbeddingStatus",
+    "KnowledgeRetrievalProvider",
+    "KnowledgeSourceStatus",
     "ValidationStatus",
     "role_has",
 ]

@@ -13,6 +13,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from pgvector.asyncpg import register_vector
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -25,6 +27,11 @@ from app.core.config import Settings, get_settings
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+
+def _register_pgvector_connection(dbapi_connection: Any, _connection_record: Any) -> None:
+    """Register VECTOR codecs on the underlying asyncpg connection."""
+    dbapi_connection.run_async(register_vector)
 
 
 def create_engine(settings: Settings) -> AsyncEngine:
@@ -46,7 +53,9 @@ def create_engine(settings: Settings) -> AsyncEngine:
         kwargs["max_overflow"] = settings.db.max_overflow
         kwargs["pool_recycle"] = settings.db.pool_recycle_seconds
         kwargs["pool_timeout"] = settings.db.pool_timeout_seconds
-    return create_async_engine(settings.db.async_dsn, **kwargs)
+    engine = create_async_engine(settings.db.async_dsn, **kwargs)
+    event.listen(engine.sync_engine, "connect", _register_pgvector_connection)
+    return engine
 
 
 def get_engine(settings: Settings | None = None) -> AsyncEngine:
