@@ -52,7 +52,12 @@ from app.api.deps import (
     RedisDep,
     SettingsDep,
 )
-from app.core.errors import ConflictError, CynuxError, ModelUnavailableError
+from app.core.errors import (
+    ConflictError,
+    CynuxError,
+    ModelUnavailableError,
+    ResourceNotFoundError,
+)
 from app.db.enums import MessageRole, Permission
 from app.db.models.agent import AgentAction, AgentMessage, AgentRun, AgentSession
 from app.db.models.assessment import Assessment
@@ -315,6 +320,8 @@ async def post_message(
     never reference another organization's assessment; it is not stored on the message row.
     """
     principal.require(Permission.AGENT_CHAT)
+    if payload.agent_definition_id is not None and not settings.features.custom_agents:
+        raise ResourceNotFoundError("custom agents are disabled")
     org_id = principal.organization_id
     now = datetime.now(UTC)
 

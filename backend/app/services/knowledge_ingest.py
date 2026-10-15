@@ -20,6 +20,9 @@ from app.services import audit as audit_service
 from app.services.context import Principal
 from app.services.knowledge_extractors import validate_upload
 
+DEFAULT_MAX_DOCUMENTS_PER_COLLECTION = 200
+DEFAULT_MAX_STORAGE_BYTES_PER_COLLECTION = 200 * 1024 * 1024
+
 
 class StorageWriter(Protocol):
     async def put_bytes(
@@ -107,10 +110,17 @@ async def store_source(
     data: bytes,
     mime_type: str,
     storage: StorageWriter | ObjectStorage,
+    max_upload_bytes: int | None = None,
+    max_documents_per_collection: int = DEFAULT_MAX_DOCUMENTS_PER_COLLECTION,
+    max_storage_bytes_per_collection: int = DEFAULT_MAX_STORAGE_BYTES_PER_COLLECTION,
 ) -> KnowledgeSource:
     """Store one deduplicated source; failures leave a stable terminal source state."""
     principal.require(Permission.ORG_MANAGE)
-    resolved_mime = validate_upload(data, mime_type)
+    resolved_mime = validate_upload(
+        data,
+        mime_type,
+        **({"max_bytes": max_upload_bytes} if max_upload_bytes is not None else {}),
+    )
     safe_filename = filename.strip()
     if not safe_filename or len(safe_filename) > 500:
         raise ValueError("source filenames must contain 1 to 500 characters")
@@ -143,8 +153,11 @@ async def store_source(
             KnowledgeSource.collection_id == collection_id,
             KnowledgeSource.status != "deleted",
         ))).one()
-    if count >= 200 or int(size) + len(data) > 200 * 1024 * 1024:
-        raise ConflictError("Collection limit reached: 200 documents or 200 MB")
+    if (
+        count >= max_documents_per_collection
+        or int(size) + len(data) > max_storage_bytes_per_collection
+    ):
+        raise ConflictError("Collection document or storage limit reached")
 
     source_id = uuid.uuid4()
     object_key = source_object_key(

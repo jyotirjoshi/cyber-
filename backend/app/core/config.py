@@ -556,6 +556,34 @@ class ObservabilitySettings(BaseSettings):
     json_logs: bool = True
 
 
+class FeatureSettings(BaseSettings):
+    """Operational kill switches for independently deployable product surfaces."""
+
+    model_config = _cfg("CYNUX_FEATURES__")
+
+    custom_agents: bool = True
+    internal_knowledge: bool = True
+
+
+class KnowledgeSettings(BaseSettings):
+    """Hard resource ceilings for first-party document ingestion and retrieval."""
+
+    model_config = _cfg("CYNUX_KNOWLEDGE__")
+
+    indexing_concurrency: int = Field(default=2, ge=1, le=16)
+    max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
+    max_document_tokens: int = Field(default=500_000, ge=1_000, le=2_000_000)
+    max_documents_per_collection: int = Field(default=200, ge=1, le=10_000)
+    max_storage_bytes_per_collection: int = Field(
+        default=200 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=100 * 1024 * 1024 * 1024,
+    )
+    default_embedding_provider: Literal["openai", "google"] = "openai"
+    default_embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: Literal[1536] = 1536
+
+
 class AgentSettings(BaseSettings):
     model_config = _cfg("CYNUX_AGENT__")
 
@@ -651,6 +679,8 @@ class Settings(BaseSettings):
     tenable: TenableSettings = Field(default_factory=TenableSettings)
     notify: NotificationSettings = Field(default_factory=NotificationSettings)
     otel: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    features: FeatureSettings = Field(default_factory=FeatureSettings)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
 
     @field_validator("cors_origins", "allowed_hosts", mode="before")
@@ -822,12 +852,14 @@ __all__ = [
     "DefectDojoSettings",
     "DifySettings",
     "Environment",
+    "FeatureSettings",
     "IntelSettings",
     "JiraSettings",
     "LLMProvider",
     "LLMRole",
     "LLMSettings",
     "LangSmithSettings",
+    "KnowledgeSettings",
     "NotificationSettings",
     "ObservabilitySettings",
     "RedisSettings",

@@ -4,10 +4,16 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy import and_, select
 
-from app.api.deps import DbSession, PrincipalDep, SettingsDep, StorageDep
+from app.api.deps import (
+    DbSession,
+    PrincipalDep,
+    SettingsDep,
+    StorageDep,
+    require_internal_knowledge,
+)
 from app.core.errors import ConflictError, InvalidConfigurationError, ResourceNotFoundError
 from app.db.enums import Permission
 from app.db.models.knowledge import (
@@ -24,7 +30,7 @@ from app.schemas.knowledge import (
     KnowledgeSearchIn,
     KnowledgeSourceOut,
 )
-from app.services.knowledge_extractors import DEFAULT_MAX_DOCUMENT_BYTES, KnowledgeExtractionError
+from app.services.knowledge_extractors import KnowledgeExtractionError
 from app.services.knowledge_ingest import (
     create_collection,
     restore_source,
@@ -37,7 +43,11 @@ from app.services.knowledge_retrieval import (
     RetrievalPolicy,
 )
 
-router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+router = APIRouter(
+    prefix="/knowledge",
+    tags=["knowledge"],
+    dependencies=[Depends(require_internal_knowledge)],
+)
 
 
 @router.get("/collections", response_model=list[KnowledgeCollectionOut])
@@ -71,13 +81,17 @@ async def sources(collection_id: uuid.UUID, principal: PrincipalDep, session: Db
 
 @router.post("/collections/{collection_id}/sources", response_model=KnowledgeSourceOut, status_code=201)
 async def upload_source(collection_id: uuid.UUID, principal: PrincipalDep, session: DbSession,
-                        storage: StorageDep, file: Annotated[UploadFile, File()]):
+                        storage: StorageDep, settings: SettingsDep,
+                        file: Annotated[UploadFile, File()]):
     principal.require(Permission.ORG_MANAGE)
     try:
-        data = await file.read(DEFAULT_MAX_DOCUMENT_BYTES + 1)
+        data = await file.read(settings.knowledge.max_upload_bytes + 1)
         row = await store_source(session, principal, collection_id,
             filename=file.filename or "document", data=data,
-            mime_type=file.content_type or "application/octet-stream", storage=storage)
+            mime_type=file.content_type or "application/octet-stream", storage=storage,
+            max_upload_bytes=settings.knowledge.max_upload_bytes,
+            max_documents_per_collection=settings.knowledge.max_documents_per_collection,
+            max_storage_bytes_per_collection=settings.knowledge.max_storage_bytes_per_collection)
     except KnowledgeExtractionError as error:
         raise InvalidConfigurationError(error.error_code, user_message=error.error_code.replace("_", " ")) from error
     finally:

@@ -719,7 +719,7 @@ async def create_custom_reply(
     citations: list[dict[str, object]] = []
     knowledge_context: list[LLMMessage] = []
     collection_ids = tuple(link.collection_id for link in links)
-    if collection_ids and question:
+    if collection_ids and question and settings.features.internal_knowledge:
         retrieval = version.retrieval_policy or {}
         try:
             hits = await InternalKnowledgeRetriever(session, agent_principal, settings).retrieve(question,

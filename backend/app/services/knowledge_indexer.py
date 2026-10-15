@@ -88,7 +88,14 @@ def due_sources_statement(*, now: dt.datetime, limit: int = 20):
     )
 
 
-async def claim_source(session, organization_id: uuid.UUID, source_id: uuid.UUID) -> IndexLease | None:
+async def claim_source(
+    session,
+    organization_id: uuid.UUID,
+    source_id: uuid.UUID,
+    *,
+    default_embedding_provider: str = "openai",
+    default_embedding_model: str = "text-embedding-3-small",
+) -> IndexLease | None:
     now = utcnow()
     # Serialize only claims for this tenant. No lock survives the short claim transaction.
     lock_key = int.from_bytes(hashlib.sha256(f"knowledge:{organization_id}".encode()).digest()[:8],
@@ -124,8 +131,10 @@ async def claim_source(session, organization_id: uuid.UUID, source_id: uuid.UUID
     if not source.embedding_profile:
         try:
             config = (collection.retrieval_policy or {}).get("embedding", {})
-            profile = EmbeddingProfile(config.get("provider", "openai"),
-                                       config.get("model", "text-embedding-3-small"))
+            profile = EmbeddingProfile(
+                config.get("provider", default_embedding_provider),
+                config.get("model", default_embedding_model),
+            )
             source.embedding_profile = profile.key
         except (ValueError, AttributeError):
             source.status, source.error_code = "failed", "invalid_embedding_profile"
@@ -261,6 +270,8 @@ async def index_source(settings: Settings, lease: IndexLease, *, sessions=None, 
             chunks = chunk_document(blocks)
             if len(chunks) > 5000:
                 raise KnowledgeExtractionError("too_many_chunks")
+            if sum(chunk.token_count for chunk in chunks) > settings.knowledge.max_document_tokens:
+                raise KnowledgeExtractionError("document_token_limit_exceeded")
             async with sessions() as session:
                 source = await _locked_source(session, lease)
                 if source is None or not await _enabled(session, source):
@@ -309,11 +320,24 @@ async def index_source(settings: Settings, lease: IndexLease, *, sessions=None, 
 
 
 async def run_due_knowledge_indexing(settings: Settings) -> int:
+    if not settings.features.internal_knowledge:
+        return 0
+    concurrency = settings.knowledge.indexing_concurrency
     async with session_scope(settings) as session:
-        candidates = (await session.execute(due_sources_statement(now=utcnow()))).all()
-    for source_id, organization_id in candidates:
+        candidates = (
+            await session.execute(due_sources_statement(now=utcnow(), limit=concurrency))
+        ).all()
+
+    async def process(source_id: uuid.UUID, organization_id: uuid.UUID) -> int:
         async with session_scope(settings) as session:
-            lease = await claim_source(session, organization_id, source_id)
-        if lease is not None:
-            return int(await index_source(settings, lease))
-    return 0
+            lease = await claim_source(
+                session,
+                organization_id,
+                source_id,
+                default_embedding_provider=settings.knowledge.default_embedding_provider,
+                default_embedding_model=settings.knowledge.default_embedding_model,
+            )
+        return int(lease is not None and await index_source(settings, lease))
+
+    return sum(await asyncio.gather(*(process(source_id, organization_id)
+                                      for source_id, organization_id in candidates)))

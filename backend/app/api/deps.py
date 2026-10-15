@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.contextvars import bind_contextvars
 
 from app.core.config import Settings, get_settings
-from app.core.errors import AuthenticationError
+from app.core.errors import AuthenticationError, ResourceNotFoundError
 from app.core.redis_client import TokenDenyList, get_redis
 from app.core.security import TokenClaims
 from app.db.enums import IntegrationKind
@@ -53,6 +53,18 @@ def _settings() -> Settings:
 
 SettingsDep = Annotated[Settings, Depends(_settings)]
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+def require_custom_agents(settings: SettingsDep) -> None:
+    """Hide the custom-agent surface when its emergency rollout switch is off."""
+    if not settings.features.custom_agents:
+        raise ResourceNotFoundError("custom agents are disabled")
+
+
+def require_internal_knowledge(settings: SettingsDep) -> None:
+    """Hide first-party knowledge without affecting optional external Dify usage."""
+    if not settings.features.internal_knowledge:
+        raise ResourceNotFoundError("internal knowledge is disabled")
 
 
 def _redis(settings: SettingsDep) -> Redis:

@@ -62,7 +62,7 @@ function Invoke-CynuxVerification {
     }
     Add-Check "api-data-connectivity" {
         $snapshot = Invoke-RestMethod -Uri "$base/readyz" -TimeoutSec 60
-        foreach ($name in @("database", "redis")) {
+        foreach ($name in @("database", "redis", "pgvector")) {
             $dependency = @($snapshot.dependencies | Where-Object name -eq $name)
             if ($dependency.Count -ne 1 -or -not $dependency[0].healthy) { throw "$name is unreachable from the API" }
         }
@@ -70,6 +70,15 @@ function Invoke-CynuxVerification {
     Add-Check "openapi" {
         $response = Invoke-WebRequest -UseBasicParsing -Uri "$base/openapi.json"
         if ($response.StatusCode -ne 200 -or $response.Headers["content-type"] -notmatch "json") { throw "OpenAPI unavailable" }
+        $schema = $response.Content | ConvertFrom-Json
+        foreach ($path in @(
+            "/api/v1/agents/definitions",
+            "/api/v1/agents/tools",
+            "/api/v1/knowledge/collections",
+            "/api/v1/knowledge/search"
+        )) {
+            if (-not $schema.paths.PSObject.Properties[$path]) { throw "rollout route missing: $path" }
+        }
     }
     Add-Check "cors" {
         $response = Invoke-WebRequest -UseBasicParsing -Method Options -Uri "$base/api/v1/health" -Headers @{ Origin = $base; "Access-Control-Request-Method" = "GET" }

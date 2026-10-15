@@ -5,12 +5,12 @@ import uuid
 from types import SimpleNamespace
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import and_, or_
 
 from app.agent.tools.policy import OrganizationToolPolicy, resolve_effective_tools
 from app.agent.tools.registry import default_tool_registry
-from app.api.deps import DbSession, PaginationDep, PrincipalDep
+from app.api.deps import DbSession, PaginationDep, PrincipalDep, require_custom_agents
 from app.core.errors import ResourceNotFoundError
 from app.db.base import utcnow
 from app.db.enums import Permission
@@ -41,7 +41,11 @@ from app.schemas.agent_learning import (
 from app.services import agent_definition as definitions
 from app.services import agent_learning as learning
 
-router = APIRouter(prefix="/agents", tags=["custom-agents"])
+router = APIRouter(
+    prefix="/agents",
+    tags=["custom-agents"],
+    dependencies=[Depends(require_custom_agents)],
+)
 
 
 @router.get("/tools", response_model=list[AgentToolOut])

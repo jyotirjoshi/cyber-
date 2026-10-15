@@ -61,6 +61,28 @@ async def _probe_redis(redis: Redis) -> DependencyHealth:
     return DependencyHealth(name="redis", healthy=True, latency_ms=_elapsed_ms(start))
 
 
+async def _probe_pgvector(session: AsyncSession) -> DependencyHealth:
+    """Confirm the vector extension required by first-party knowledge is installed."""
+    start = time.perf_counter()
+    try:
+        installed = bool(
+            (
+                await session.execute(
+                    text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')")
+                )
+            ).scalar_one()
+        )
+    except Exception as exc:
+        log.warning("health.pgvector_probe_failed", error=type(exc).__name__)
+        return DependencyHealth(name="pgvector", healthy=False, detail="unreachable")
+    return DependencyHealth(
+        name="pgvector",
+        healthy=installed,
+        detail="installed" if installed else "extension missing",
+        latency_ms=_elapsed_ms(start),
+    )
+
+
 async def _probe_worker(
     redis: Redis, stream: str, *, now: dt.datetime | None = None
 ) -> DependencyHealth:
@@ -85,6 +107,8 @@ def _overall(
     by_name = {d.name: d for d in deps}
     if not by_name["database"].healthy:
         return "unhealthy", ["database unreachable"]
+    if "pgvector" in by_name and not by_name["pgvector"].healthy:
+        return "unhealthy", ["pgvector extension missing"]
     if not by_name["redis"].healthy:
         return "degraded", ["redis unreachable: auth revocation and rate limiting impaired"]
     if "worker" in by_name and not by_name["worker"].healthy:
@@ -93,9 +117,16 @@ def _overall(
 
 
 async def _snapshot(
-    session: AsyncSession, redis: Redis, environment: str, stream: str
+    session: AsyncSession,
+    redis: Redis,
+    environment: str,
+    stream: str,
+    *,
+    require_pgvector: bool = False,
 ) -> HealthOut:
     deps = [await _probe_db(session), await _probe_redis(redis)]
+    if deps[0].healthy and require_pgvector:
+        deps.append(await _probe_pgvector(session))
     if deps[1].healthy:
         deps.append(await _probe_worker(redis, stream))
     status, warnings = _overall(deps)
@@ -115,14 +146,26 @@ async def healthz() -> OkOut:
 
 @router.get("/health", response_model=HealthOut, summary="Health snapshot")
 async def health(session: DbSession, redis: RedisDep, settings: SettingsDep) -> HealthOut:
-    return await _snapshot(session, redis, settings.environment, settings.redis.stream)
+    return await _snapshot(
+        session,
+        redis,
+        settings.environment,
+        settings.redis.stream,
+        require_pgvector=settings.features.internal_knowledge,
+    )
 
 
 @router.get("/readyz", response_model=HealthOut, summary="Readiness probe")
 async def readyz(
     session: DbSession, redis: RedisDep, settings: SettingsDep, response: Response
 ) -> HealthOut:
-    snapshot = await _snapshot(session, redis, settings.environment, settings.redis.stream)
+    snapshot = await _snapshot(
+        session,
+        redis,
+        settings.environment,
+        settings.redis.stream,
+        require_pgvector=settings.features.internal_knowledge,
+    )
     if snapshot.status == "unhealthy":
         response.status_code = 503
     return snapshot
