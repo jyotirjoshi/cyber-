@@ -132,7 +132,7 @@ def test_limits_only_tighten_and_external_writes_always_require_approval() -> No
     assert effective.per_run_call_limit == 3
 
 
-def test_manual_agents_keep_write_capability_but_force_human_approval() -> None:
+def test_manual_agents_do_not_expose_mutation_tools() -> None:
     from app.agent.tools.policy import OrganizationToolPolicy, resolve_effective_tools
 
     principal = _principal(Permission.FINDING_REMEDIATE)
@@ -142,7 +142,8 @@ def test_manual_agents_keep_write_capability_but_force_human_approval() -> None:
         OrganizationToolPolicy(),
     )
 
-    assert policy.tools["update_canonical_work"].approval == "always"
+    assert "update_canonical_work" not in policy.tools
+    assert policy.rejected["update_canonical_work"] == "manual_mode"
 
 
 def test_unknown_tool_versions_are_not_exposed_to_the_model() -> None:

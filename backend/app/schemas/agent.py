@@ -43,6 +43,8 @@ class AgentMessageIn(BaseModel):
     content: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
     #: Bind the turn to an existing assessment so the agent answers with its context.
     assessment_id: uuid.UUID | None = None
+    #: Used only when creating a conversation. The selected active version is pinned.
+    agent_definition_id: uuid.UUID | None = None
 
 
 class AgentMessageOut(BaseModel):
@@ -192,6 +194,7 @@ class AgentSessionOut(BaseModel):
     title: str
     is_archived: bool = False
     message_count: int = 0
+    agent_version_id: uuid.UUID | None = None
     last_activity_at: dt.datetime | None = None
     created_at: dt.datetime
 

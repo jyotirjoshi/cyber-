@@ -12,6 +12,9 @@
  */
 
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "./tokens";
+import { knowledgeFileType } from "./knowledge";
+import type { AgentConfiguration, AgentDefinition, AgentVersion, AgentTool, AgentPolicyPreview, MemoryCandidate, MemoryApproval } from "./agent-definition";
+import type { CollectionCreateInput, KnowledgeCollection, KnowledgeHit, KnowledgeSource } from "./knowledge";
 import type {
   AgentActionOut,
   AgentActionProposeIn,
@@ -408,6 +411,34 @@ export function saveBlob(file: DownloadedFile): void {
 // ---------------------------------------------------------------------------
 
 export const api = {
+  customAgents: {
+    list: (offset = 0) => request<AgentDefinition[]>("GET", `/agents/definitions?limit=50&offset=${offset}`),
+    get: (id: string) => request<AgentDefinition>("GET", `/agents/definitions/${id}`),
+    create: (body: AgentConfiguration & { name: string; description?: string }) => request<AgentDefinition>("POST", "/agents/definitions", { body }),
+    versions: (id: string, offset = 0) => request<AgentVersion[]>("GET", `/agents/definitions/${id}/versions?limit=50&offset=${offset}`),
+    version: (id: string, body: AgentConfiguration & { expected_active_version_id: string }) => request<AgentVersion>("POST", `/agents/definitions/${id}/versions`, { body }),
+    disable: (id: string) => request<AgentDefinition>("POST", `/agents/definitions/${id}/disable`),
+    tools: () => request<AgentTool[]>("GET", "/agents/tools"),
+    preview: (body: AgentConfiguration) => request<AgentPolicyPreview>("POST", "/agents/policy-preview", { body }),
+    candidates: (status: MemoryCandidate["status"], offset = 0) => request<MemoryCandidate[]>("GET", `/agents/memory-candidates?status=${status}&limit=50&offset=${offset}`),
+    approveMemory: (id: string, body: MemoryApproval) => request<MemoryCandidate>("POST", `/agents/memory-candidates/${id}/approve`, { body }),
+    rejectMemory: (id: string, rationale: string) => request<MemoryCandidate>("POST", `/agents/memory-candidates/${id}/reject`, { body: { rationale } }),
+  },
+  knowledge: {
+    collections: () => request<KnowledgeCollection[]>("GET", "/knowledge/collections"),
+    createCollection: (body: CollectionCreateInput) => request<KnowledgeCollection>("POST", "/knowledge/collections", { body }),
+    sources: (collectionId: string, offset = 0) => request<KnowledgeSource[]>("GET", `/knowledge/collections/${collectionId}/sources`, { query: { limit: 100, offset } }),
+    upload: (collectionId: string, file: File) => {
+      const body = new FormData();
+      body.append("file", new Blob([file], { type: knowledgeFileType(file.name) }), file.name);
+      return request<KnowledgeSource>("POST", `/knowledge/collections/${collectionId}/sources`, { body });
+    },
+    deleteSource: (sourceId: string) => request<KnowledgeSource>("DELETE", `/knowledge/sources/${sourceId}`),
+    restoreSource: (sourceId: string) => request<KnowledgeSource>("POST", `/knowledge/sources/${sourceId}/restore`),
+    retrySource: (sourceId: string) => request<KnowledgeSource>("POST", `/knowledge/sources/${sourceId}/retry`),
+    search: (collectionIds: string[], query: string) => request<KnowledgeHit[]>("POST", "/knowledge/search", { body: { collection_ids: collectionIds, query } }),
+    feedback: (chunkId: string, query: string, isUseful: boolean) => request<{ id: string }>("POST", "/knowledge/feedback", { body: { chunk_id: chunkId, query, is_useful: isUseful } }),
+  },
   auth: {
     register: (body: RegisterIn) =>
       request<TokenPairOut>("POST", "/auth/register", { body, auth: false }),

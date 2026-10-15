@@ -50,6 +50,12 @@ class AgentSession(Base, TenantMixin, TimestampMixin):
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    #: Immutable custom-agent behavior selected when the conversation is created.
+    #: Existing generic sessions keep this null. It is never changed on resume.
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_definition_versions.id", ondelete="RESTRICT"),
+        index=True,
+    )
     #: Derived from the first user message; editable.
     title: Mapped[str] = mapped_column(String(300), nullable=False, default="New conversation")
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

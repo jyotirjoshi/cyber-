@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Textarea } from "@/components/ui/Input";
+import { Field, Select, Textarea } from "@/components/ui/Input";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
@@ -35,8 +35,10 @@ export default function AgentIndexPage() {
     [],
     { enabled: canChat },
   );
+  const agents = useApiResource(api.customAgents.list, [], { enabled: canChat });
 
   const [content, setContent] = React.useState("");
+  const [agentDefinitionId, setAgentDefinitionId] = React.useState("");
   const [starting, setStarting] = React.useState(false);
 
   const start = async () => {
@@ -44,7 +46,10 @@ export default function AgentIndexPage() {
     if (!trimmed || starting) return;
     setStarting(true);
     try {
-      const message = await api.agent.sendMessage({ content: trimmed });
+      const message = await api.agent.sendMessage({
+        content: trimmed,
+        agent_definition_id: agentDefinitionId || undefined,
+      });
       router.push(`/agent/${message.session_id}`);
     } catch (error) {
       toast({
@@ -74,6 +79,26 @@ export default function AgentIndexPage() {
 
       <Card>
         <CardBody className="space-y-3">
+          <Field
+            label="Worker"
+            htmlFor="agent-worker"
+            hint="A custom worker keeps the exact version active when this conversation starts."
+          >
+            <Select
+              id="agent-worker"
+              value={agentDefinitionId}
+              onChange={(event) => setAgentDefinitionId(event.target.value)}
+            >
+              <option value="">Cynux general security agent</option>
+              {agents.data
+                ?.filter((agent) => agent.is_enabled)
+                .map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name} · version {agent.version_count}
+                  </option>
+                ))}
+            </Select>
+          </Field>
           <Textarea
             aria-label="Describe your objective"
             placeholder="e.g. Assess the external attack surface of example.com and prioritise anything internet-exposed."

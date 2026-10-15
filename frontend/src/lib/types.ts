@@ -1314,6 +1314,7 @@ export interface AgentMessageIn {
   session_id?: Uuid | null;
   content: string;
   assessment_id?: Uuid | null;
+  agent_definition_id?: Uuid | null;
 }
 
 export interface AgentMessageOut {
@@ -1430,6 +1431,7 @@ export interface AgentSessionOut {
   title: string;
   is_archived: boolean;
   message_count: number;
+  agent_version_id: Uuid | null;
   last_activity_at: IsoDateTime | null;
   created_at: IsoDateTime;
 }

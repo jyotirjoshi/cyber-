@@ -72,7 +72,7 @@ from app.schemas.agent import (
 from app.schemas.common import Page
 from app.services import agent_action as agent_action_service
 from app.services import audit as audit_service
-from app.services.agent_chat import create_reply, load_assessment_run_details
+from app.services.agent_chat import create_custom_reply, create_reply, load_assessment_run_details
 from app.services.agent_chat_actions import propose_chat_actions
 from app.services.context import Principal
 from app.services.events import EventEmitter
@@ -305,6 +305,7 @@ async def post_message(
     event_bus: EventBusDep,
     gateway: GatewayDep,
     settings: SettingsDep,
+    redis: RedisDep,
 ) -> AgentMessageOut:
     """Append a human turn to a conversation and broadcast it (FR-005, FR-032).
 
@@ -322,6 +323,7 @@ async def post_message(
 
     message_id: uuid.UUID | None = None
     convo_id: uuid.UUID | None = None
+    custom_version_id: uuid.UUID | None = None
     for attempt in range(_MAX_SEQ_RETRIES):
         convo, created = await _resolve_conversation(session, principal, payload)
         seq = await _next_message_seq(session, convo.id)
@@ -361,8 +363,9 @@ async def post_message(
             resource_id=convo.id,
             detail={"seq": seq},
         )
-        await session.commit()
+        custom_version_id = convo.agent_version_id
         message_id, convo_id = message.id, convo.id
+        await session.commit()
         break
 
     if message_id is None or convo_id is None:
@@ -397,27 +400,38 @@ async def post_message(
         except RedisError:
             log.warning("agent_chat_thinking_broadcast_failed", session_id=str(convo_id))
 
-        action_outcomes = await propose_chat_actions(
-            session,
-            principal,
-            session_id=convo_id,
-            question=payload.content,
-            gateway=gateway,
-            settings=settings,
-        )
-        if action_outcomes:
-            await session.commit()
-
-        assistant = await create_reply(
-            session,
-            organization_id=org_id,
-            conversation_id=convo_id,
-            gateway=gateway,
-            principal=principal,
-            action_result=json.dumps(action_outcomes, separators=(",", ":"))
-            if action_outcomes
-            else None,
-        )
+        if custom_version_id is not None:
+            assistant = await create_custom_reply(
+                session,
+                organization_id=org_id,
+                conversation_id=convo_id,
+                agent_version_id=custom_version_id,
+                gateway=gateway,
+                principal=principal,
+                settings=settings,
+                redis=redis,
+            )
+        else:
+            action_outcomes = await propose_chat_actions(
+                session,
+                principal,
+                session_id=convo_id,
+                question=payload.content,
+                gateway=gateway,
+                settings=settings,
+            )
+            if action_outcomes:
+                await session.commit()
+            assistant = await create_reply(
+                session,
+                organization_id=org_id,
+                conversation_id=convo_id,
+                gateway=gateway,
+                principal=principal,
+                action_result=json.dumps(action_outcomes, separators=(",", ":"))
+                if action_outcomes
+                else None,
+            )
         assistant_out = AgentMessageOut.model_validate(assistant)
         try:
             await emitter.message(assistant_out)
@@ -449,17 +463,28 @@ async def _resolve_conversation(
     one is loaded tenant-scoped -- a session id from another organization is a 404, not a 403.
     """
     if payload.session_id is None:
+        agent_version_id = None
+        if payload.agent_definition_id is not None:
+            from app.services.agent_definition import get_effective_agent_version
+
+            version = await get_effective_agent_version(session, principal, payload.agent_definition_id)
+            agent_version_id = version.id
         convo = AgentSession(
             id=uuid.uuid4(),
             organization_id=principal.organization_id,
             user_id=principal.user_id,
             title=_derive_title(payload.content),
+            agent_version_id=agent_version_id,
         )
         session.add(convo)
         await session.flush()
         return convo, True
     repo = TenantRepository(session, AgentSession, principal.organization_id)
     convo = await repo.get_or_404(payload.session_id)
+    if payload.agent_definition_id is not None:
+        raise ConflictError(
+            "A conversation keeps its original agent version. Start a new conversation to use another agent."
+        )
     return convo, False
 
 

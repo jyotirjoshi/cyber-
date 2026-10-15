@@ -26,6 +26,9 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: <IconDashboard /> },
   { href: "/agent", label: "Agent", icon: <IconAgent />, permission: "agent:chat" },
+  { href: "/agent/agents", label: "Custom agents", icon: <IconAgent />, permission: "agent:chat" },
+  { href: "/agent/learning", label: "Learning review", icon: <IconAgent />, permission: "org:manage" },
+  { href: "/agent/knowledge", label: "Knowledge", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/assessments", label: "Assessments", icon: <IconAssessments />, permission: "assessment:read" },
   { href: "/findings", label: "Findings", icon: <IconFindings />, permission: "finding:read" },
   { href: "/assets", label: "Assets", icon: <IconAssets />, permission: "asset:read" },
@@ -65,7 +68,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
           {items.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+            const active = pathname === item.href || (pathname.startsWith(`${item.href}/`) &&
+              !items.some((other) => other.href !== item.href && other.href.startsWith(`${item.href}/`) &&
+                (pathname === other.href || pathname.startsWith(`${other.href}/`))));
             return (
               <Link
                 key={item.href}

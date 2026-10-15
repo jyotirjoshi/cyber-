@@ -80,6 +80,7 @@ from app.services.canonical_intel_refresh import refresh_stale_intel_batch
 from app.services.canonical_risk_refresh import refresh_stale_risk_batch
 from app.services.context import Principal
 from app.services.job import cancel_jobs_for_assessment, reclaim_orphans
+from app.services.knowledge_indexer import run_due_knowledge_indexing
 from app.services.notification import deliver_pending
 from app.services.recurring_scan import run_due_scans
 from app.worker.dispatch import deliver_pending_dispatches
@@ -881,6 +882,14 @@ class AgentWorker:
                 raise
             except Exception as exc:
                 log.warning("worker.maintenance_failed", error=type(exc).__name__)
+            try:
+                indexed = await run_due_knowledge_indexing(self._settings)
+                if indexed:
+                    log.info("worker.knowledge_indexed", count=indexed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("worker.knowledge_index_failed", error=type(exc).__name__)
             try:
                 async with session_scope(self._settings) as session:
                     scheduled = await run_due_scans(session, self._settings)

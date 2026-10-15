@@ -12,6 +12,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     agent,
+    agent_definitions,
     applications,
     approvals,
     assessments,
@@ -25,6 +26,7 @@ from app.api.v1 import (
     findings,
     integrations,
     jobs,
+    knowledge,
     organization,
     reports,
 )
@@ -42,10 +44,12 @@ api_router.include_router(external_alerts.router)
 api_router.include_router(exposures.router)
 api_router.include_router(canonical.router)
 api_router.include_router(jobs.router)
+api_router.include_router(knowledge.router)
 api_router.include_router(reports.router)
 api_router.include_router(organization.router)
 api_router.include_router(integrations.router)
 api_router.include_router(audit.router)
 api_router.include_router(agent.router)
+api_router.include_router(agent_definitions.router)
 
 __all__ = ["api_router"]
