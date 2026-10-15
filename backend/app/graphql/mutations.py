@@ -8,6 +8,7 @@ from strawberry.scalars import JSON
 from strawberry.types import Info
 
 from app.api.deps import require_custom_agents
+from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition
 from app.db.repository import tenant_select
 from app.graphql.context import require_context
@@ -57,6 +58,10 @@ def _validated_payload(value: CreateAgentDefinitionInput) -> AgentDefinitionCrea
         raise PublicGraphQLError(
             "BAD_USER_INPUT", "Estimated spend must be a decimal integer string."
         ) from exc
+    if value.scope_policy is not None and not isinstance(value.scope_policy, dict):
+        raise PublicGraphQLError("BAD_USER_INPUT", "Scope policy must be an object.")
+    if value.retrieval_policy is not None and not isinstance(value.retrieval_policy, dict):
+        raise PublicGraphQLError("BAD_USER_INPUT", "Retrieval policy must be an object.")
     try:
         return AgentDefinitionCreateIn(
             name=value.name,
@@ -94,6 +99,7 @@ class AgentMutations:
     ) -> AgentDefinitionMutationPayload:
         context = require_context(info)
         require_custom_agents(context.settings)
+        context.principal.require(Permission.ORG_MANAGE)
         if not input.client_mutation_id or len(input.client_mutation_id) > 160:
             raise PublicGraphQLError(
                 "BAD_USER_INPUT",

@@ -28,7 +28,7 @@ from app.db.models.agent_definition import (
 )
 from app.db.models.audit import AuditEvent
 from app.graphql.schema import schema
-from app.services.context import Principal
+from app.services.context import ACTOR_API_KEY, Principal
 
 
 @pytest.fixture
@@ -174,3 +174,79 @@ async def test_oversized_client_mutation_id_is_rejected_before_write(mutation_co
     assert result.errors[0].extensions["code"] == "BAD_USER_INPUT"
     async with mutation_context.session_factory() as session:
         assert list((await session.scalars(select(AgentDefinition))).all()) == []
+
+
+@pytest.mark.asyncio
+async def test_replay_rechecks_current_permission(mutation_context):
+    from app.graphql.context import GraphQLContext
+
+    created = await schema.execute(
+        CREATE_AGENT,
+        context_value=mutation_context,
+        variable_values={"input": agent_input()},
+    )
+    revoked_context = GraphQLContext(
+        mutation_context.principal.downgraded_to(Role.VIEWER),
+        mutation_context.settings,
+        mutation_context.session_factory,
+    )
+    replay = await schema.execute(
+        CREATE_AGENT,
+        context_value=revoked_context,
+        variable_values={"input": agent_input()},
+    )
+    assert created.errors is None
+    assert replay.errors[0].extensions["code"] == "PERMISSION_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_api_keys_have_independent_idempotency_namespaces(mutation_context):
+    from app.graphql.context import GraphQLContext
+
+    first_context = GraphQLContext(
+        Principal(
+            user_id=None,
+            organization_id=mutation_context.principal.organization_id,
+            role=Role.OWNER,
+            actor_type=ACTOR_API_KEY,
+            credential_id=uuid.uuid4(),
+        ),
+        mutation_context.settings,
+        mutation_context.session_factory,
+    )
+    second_context = GraphQLContext(
+        Principal(
+            user_id=None,
+            organization_id=mutation_context.principal.organization_id,
+            role=Role.OWNER,
+            actor_type=ACTOR_API_KEY,
+            credential_id=uuid.uuid4(),
+        ),
+        mutation_context.settings,
+        mutation_context.session_factory,
+    )
+    first = await schema.execute(
+        CREATE_AGENT,
+        context_value=first_context,
+        variable_values={"input": agent_input(name="First key agent")},
+    )
+    second = await schema.execute(
+        CREATE_AGENT,
+        context_value=second_context,
+        variable_values={"input": agent_input(name="Second key agent")},
+    )
+    assert first.errors is None
+    assert second.errors is None
+    assert first.data != second.data
+
+
+@pytest.mark.asyncio
+async def test_non_object_policy_is_bad_user_input(mutation_context):
+    payload = agent_input()
+    payload["scopePolicy"] = "not-an-object"
+    result = await schema.execute(
+        CREATE_AGENT,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+    assert result.errors[0].extensions["code"] == "BAD_USER_INPUT"

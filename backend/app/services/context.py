@@ -44,9 +44,10 @@ ACTOR_AGENT: Final = "agent"
 ACTOR_WORKER: Final = "worker"
 #: Cynux itself: scheduled sweeps, approval expiry, retention.
 ACTOR_SYSTEM: Final = "system"
+ACTOR_API_KEY: Final = "api_key"
 
 ACTOR_TYPES: Final[frozenset[str]] = frozenset(
-    {ACTOR_USER, ACTOR_AGENT, ACTOR_WORKER, ACTOR_SYSTEM}
+    {ACTOR_USER, ACTOR_AGENT, ACTOR_WORKER, ACTOR_SYSTEM, ACTOR_API_KEY}
 )
 
 
@@ -67,6 +68,7 @@ class Principal:
     role: Role
     email: str | None = None
     actor_type: str = ACTOR_USER
+    credential_id: uuid.UUID | None = None
 
     #: Request provenance, copied onto every audit row this principal produces.
     source_ip: str | None = None
@@ -159,6 +161,7 @@ class Principal:
             role=on_behalf_of.role,
             email=on_behalf_of.email,
             actor_type=ACTOR_AGENT,
+            credential_id=on_behalf_of.credential_id,
             request_id=on_behalf_of.request_id,
             trace_id=on_behalf_of.trace_id,
         )
@@ -256,6 +259,7 @@ class Principal:
             "role": self.role.value,
             "email": self.email,
             "actor_type": self.actor_type,
+            "credential_id": str(self.credential_id) if self.credential_id else None,
             "request_id": self.request_id,
             "trace_id": self.trace_id,
         }
@@ -282,6 +286,9 @@ class Principal:
             role=Role(raw["role"]),
             email=raw.get("email"),
             actor_type=str(raw.get("actor_type") or ACTOR_USER),
+            credential_id=(
+                uuid.UUID(str(raw["credential_id"])) if raw.get("credential_id") else None
+            ),
             request_id=raw.get("request_id"),
             trace_id=raw.get("trace_id"),
         )
@@ -294,6 +301,7 @@ class Principal:
             "user_id": str(self.user_id) if self.user_id else None,
             "role": self.role.value,
             "actor_type": self.actor_type,
+            "credential_id": str(self.credential_id) if self.credential_id else None,
         }
 
     @property
@@ -307,6 +315,7 @@ class Principal:
 
 __all__ = [
     "ACTOR_AGENT",
+    "ACTOR_API_KEY",
     "ACTOR_SYSTEM",
     "ACTOR_TYPES",
     "ACTOR_USER",

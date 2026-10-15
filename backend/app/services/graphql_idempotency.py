@@ -28,7 +28,10 @@ def input_digest(value: dict[str, Any]) -> str:
 
 
 def _actor_key(principal: Principal) -> str:
-    identifier = str(principal.user_id) if principal.user_id else "machine"
+    identity = principal.user_id or principal.credential_id
+    if identity is None:
+        raise ConflictError("mutation actor identity is unavailable")
+    identifier = str(identity)
     return f"{principal.actor_type}:{identifier}"
 
 
