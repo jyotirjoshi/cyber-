@@ -42,6 +42,7 @@ from app.db.enums import (
 )
 
 if TYPE_CHECKING:
+    from app.db.models.agent_task import AgentTask
     from app.db.models.assessment import Assessment
     from app.db.models.identity import User
 
@@ -59,7 +60,8 @@ class AgentSession(Base, TenantMixin, TimestampMixin):
     #: Immutable custom-agent behavior selected when the conversation is created.
     #: Existing generic sessions keep this null. It is never changed on resume.
     agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("agent_definition_versions.id", ondelete="RESTRICT"),
+        PgUUID(as_uuid=True),
+        ForeignKey("agent_definition_versions.id", ondelete="RESTRICT"),
         index=True,
     )
     #: Derived from the first user message; editable.
@@ -332,7 +334,10 @@ class AgentSpecialistTask(Base, TenantMixin, TimestampMixin):
             name="valid_agent_specialist_status",
         ),
         CheckConstraint("target_count > 0", name="valid_agent_specialist_target_count"),
-        CheckConstraint("attempts >= 0 AND max_attempts BETWEEN 1 AND 10", name="valid_agent_specialist_attempts"),
+        CheckConstraint(
+            "attempts >= 0 AND max_attempts BETWEEN 1 AND 10",
+            name="valid_agent_specialist_attempts",
+        ),
         Index("ix_agent_specialist_tasks_run_plan", "run_id", "plan_index"),
         Index("ix_agent_specialist_tasks_org_status", "organization_id", "status"),
     )
@@ -465,6 +470,12 @@ class AgentRun(Base, TenantMixin, TimestampMixin):
         lazy=LAZY,
         order_by="RunDispatch.created_at",
     )
+    tasks: Mapped[list[AgentTask]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        lazy=LAZY,
+        order_by="AgentTask.plan_index",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -547,4 +558,14 @@ class AgentStep(Base, TenantMixin, TimestampMixin):
         return StepStatus(self.status)
 
 
-__all__ = ["AgentAction", "AgentDecision", "AgentMemory", "AgentMessage", "AgentRun", "AgentSession", "AgentSpecialistTask", "AgentStep", "RunDispatch"]
+__all__ = [
+    "AgentAction",
+    "AgentDecision",
+    "AgentMemory",
+    "AgentMessage",
+    "AgentRun",
+    "AgentSession",
+    "AgentSpecialistTask",
+    "AgentStep",
+    "RunDispatch",
+]

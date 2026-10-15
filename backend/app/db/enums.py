@@ -535,6 +535,68 @@ class AgentRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class AgentTaskStatus(StrEnum):
+    PENDING = "pending"
+    BLOCKED = "blocked"
+    READY = "ready"
+    QUEUED = "queued"
+    RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    COMPLETED = "completed"
+    DEGRADED = "degraded"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class AgentTaskKind(StrEnum):
+    AGENT = "agent"
+    TOOL = "tool"
+    APPROVAL = "approval"
+    JOIN = "join"
+    DECISION = "decision"
+    FINALIZE = "finalize"
+
+
+class AgentTaskDependencyKind(StrEnum):
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+
+
+class AgentTaskAttemptStatus(StrEnum):
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+
+
+class AgentEvidenceKind(StrEnum):
+    OBSERVATION = "observation"
+    ARTIFACT = "artifact"
+    PROVIDER_RECEIPT = "provider_receipt"
+    APPROVAL = "approval"
+    REPORT = "report"
+    METRIC = "metric"
+
+
+class AgentBudgetCategory(StrEnum):
+    MODEL = "model"
+    TOOL = "tool"
+    SCANNER = "scanner"
+    PIPELINE = "pipeline"
+    RUN = "run"
+
+
+class AgentBudgetReservationStatus(StrEnum):
+    RESERVED = "reserved"
+    SETTLED = "settled"
+    RELEASED = "released"
+    FORFEITED = "forfeited"
+
+
 class StepStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
@@ -779,6 +841,13 @@ __all__ = [
     "PERMISSIONS",
     "STAGE_ORDER",
     "AgentRunStatus",
+    "AgentTaskStatus",
+    "AgentTaskKind",
+    "AgentTaskDependencyKind",
+    "AgentTaskAttemptStatus",
+    "AgentEvidenceKind",
+    "AgentBudgetCategory",
+    "AgentBudgetReservationStatus",
     "AgentAutonomyMode",
     "AgentEvaluationDecision",
     "AgentMemoryCandidateStatus",

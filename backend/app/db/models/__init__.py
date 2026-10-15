@@ -26,6 +26,13 @@ from app.db.models.agent_definition import (
     AgentVersionCollection,
     AgentVersionTool,
 )
+from app.db.models.agent_task import (
+    AgentBudgetReservation,
+    AgentEvidence,
+    AgentTask,
+    AgentTaskAttempt,
+    AgentTaskDependency,
+)
 from app.db.models.asm import AsmSurface
 from app.db.models.assessment import (
     Approval,
@@ -84,7 +91,13 @@ from app.db.models.platform import (
     UsageMeterBucket,
     WebhookSubscription,
 )
-from app.db.models.report import Report, ReportDistribution, ReportSchedule, ReportShareLink, ReportTemplate
+from app.db.models.report import (
+    Report,
+    ReportDistribution,
+    ReportSchedule,
+    ReportShareLink,
+    ReportTemplate,
+)
 from app.db.models.scan_auth import ScanAuthProfile
 from app.db.models.scanner import ScannerArtifact, ScannerJob
 from app.db.models.threat_intelligence import (
@@ -113,6 +126,11 @@ __all__ = [
     "AgentTemplate",
     "AgentVersionCollection",
     "AgentVersionTool",
+    "AgentTask",
+    "AgentTaskDependency",
+    "AgentTaskAttempt",
+    "AgentEvidence",
+    "AgentBudgetReservation",
     "AgentMemoryCandidate",
     "RunDispatch",
     "Approval",
