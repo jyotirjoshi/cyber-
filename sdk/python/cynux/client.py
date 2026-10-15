@@ -13,6 +13,7 @@ from .graphql import (
     COLLECTIONS,
     CREATE_AGENT,
     CREATE_AGENT_VERSION,
+    CREATE_KNOWLEDGE_COLLECTION,
     DISABLE_AGENT,
     SOURCES,
     VERSIONS,
@@ -266,3 +267,22 @@ class CynuxClient:
             operation_name="DisableAgentDefinition",
         )
         return mutation_result(data, "disableAgentDefinition")
+
+    def create_knowledge_collection(
+        self,
+        configuration: dict[str, Any],
+        *,
+        idempotency_key: str,
+        client_mutation_id: str,
+    ) -> dict[str, Any]:
+        variables = mutation_input(
+            configuration,
+            idempotency_key=idempotency_key,
+            client_mutation_id=client_mutation_id,
+        )
+        data = self.graphql(
+            CREATE_KNOWLEDGE_COLLECTION,
+            {"input": variables},
+            operation_name="CreateKnowledgeCollection",
+        )
+        return mutation_result(data, "createKnowledgeCollection")

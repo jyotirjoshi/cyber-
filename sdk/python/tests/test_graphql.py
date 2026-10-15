@@ -391,3 +391,67 @@ async def test_async_client_creates_agent_version_and_disables_agent():
     assert version["version"]["version"] == 3
     assert disabled["agent"]["isEnabled"] is False
     assert operations == ["CreateAgentDefinitionVersion", "DisableAgentDefinition"]
+
+
+def test_sync_client_creates_knowledge_collection_with_explicit_idempotency():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "createKnowledgeCollection": {
+                        "collection": {"id": "collection-1", "name": "Runbooks"},
+                        "clientMutationId": "collection-client-1",
+                    }
+                }
+            },
+        )
+
+    with CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.create_knowledge_collection(
+            {
+                "name": "Runbooks",
+                "description": "Approved response procedures",
+                "retrievalProvider": "internal",
+            },
+            idempotency_key="runbooks-v1",
+            client_mutation_id="collection-client-1",
+        )
+
+    assert result["collection"]["id"] == "collection-1"
+    assert seen[0]["operationName"] == "CreateKnowledgeCollection"
+    assert seen[0]["variables"]["input"]["idempotencyKey"] == "runbooks-v1"
+
+
+@pytest.mark.asyncio
+async def test_async_client_creates_knowledge_collection_with_same_contract():
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["operationName"] == "CreateKnowledgeCollection"
+        assert body["variables"]["input"]["clientMutationId"] == "async-collection"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "createKnowledgeCollection": {
+                        "collection": {"id": "collection-async", "name": "Policies"},
+                        "clientMutationId": "async-collection",
+                    }
+                }
+            },
+        )
+
+    async with AsyncCynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.create_knowledge_collection(
+            {"name": "Policies", "retrievalProvider": "internal"},
+            idempotency_key="policies-v1",
+            client_mutation_id="async-collection",
+        )
+    assert result["collection"]["id"] == "collection-async"

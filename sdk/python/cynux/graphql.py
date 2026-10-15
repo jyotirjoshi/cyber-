@@ -47,6 +47,12 @@ DISABLE_AGENT = """mutation DisableAgentDefinition($input: DisableAgentDefinitio
     clientMutationId
   }
 }"""
+CREATE_KNOWLEDGE_COLLECTION = """mutation CreateKnowledgeCollection($input: CreateKnowledgeCollectionInput!) {
+  createKnowledgeCollection(input: $input) {
+    collection { id name description isEnabled retrievalProvider revision createdAt updatedAt }
+    clientMutationId
+  }
+}"""
 
 
 def service_root(base_url: str) -> str:

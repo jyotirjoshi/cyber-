@@ -27,6 +27,7 @@ from app.db.models.agent_definition import (
     AgentVersionTool,
 )
 from app.db.models.audit import AuditEvent
+from app.db.models.knowledge import KnowledgeCollection
 from app.graphql.ids import encode_global_id
 from app.graphql.schema import schema
 from app.services.context import ACTOR_API_KEY, Principal
@@ -43,6 +44,7 @@ async def mutation_context():
         AgentDefinitionVersion,
         AgentVersionCollection,
         AgentVersionTool,
+        KnowledgeCollection,
         AuditEvent,
     ):
         Table(
@@ -119,6 +121,13 @@ CREATE_AGENT_VERSION = """mutation($input: CreateAgentDefinitionVersionInput!) {
 DISABLE_AGENT = """mutation($input: DisableAgentDefinitionInput!) {
   disableAgentDefinition(input: $input) {
     agent { id name versionCount isEnabled }
+    clientMutationId
+  }
+}"""
+
+CREATE_KNOWLEDGE_COLLECTION = """mutation($input: CreateKnowledgeCollectionInput!) {
+  createKnowledgeCollection(input: $input) {
+    collection { id name description retrievalProvider revision isEnabled }
     clientMutationId
   }
 }"""
@@ -402,3 +411,67 @@ async def test_retrying_disable_agent_returns_one_effect_and_rechecks_permission
     async with mutation_context.session_factory() as session:
         audits = list((await session.scalars(select(AuditEvent))).all())
     assert len(audits) == 2
+
+
+@pytest.mark.asyncio
+async def test_retrying_create_knowledge_collection_returns_one_effect(mutation_context):
+    payload = {
+        "idempotencyKey": "create-incident-runbooks-v1",
+        "clientMutationId": "collection-request-10",
+        "name": "Incident runbooks",
+        "description": "Approved response procedures",
+        "retrievalProvider": "internal",
+        "retrievalPolicy": {
+            "embedding": {"provider": "openai", "model": "text-embedding-3-small"}
+        },
+    }
+    first = await schema.execute(
+        CREATE_KNOWLEDGE_COLLECTION,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+    replay = await schema.execute(
+        CREATE_KNOWLEDGE_COLLECTION,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+
+    assert first.errors is None
+    assert replay.errors is None
+    assert replay.data == first.data
+    result = first.data["createKnowledgeCollection"]
+    assert result["clientMutationId"] == "collection-request-10"
+    assert {key: value for key, value in result["collection"].items() if key != "id"} == {
+        "name": "Incident runbooks",
+        "description": "Approved response procedures",
+        "retrievalProvider": "internal",
+        "revision": 1,
+        "isEnabled": True,
+    }
+    async with mutation_context.session_factory() as session:
+        collections = list((await session.scalars(select(KnowledgeCollection))).all())
+        audits = list((await session.scalars(select(AuditEvent))).all())
+    assert len(collections) == 1
+    assert len(audits) == 1
+    assert result["collection"]["id"] == encode_global_id(
+        "KnowledgeCollection", collections[0].id
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_knowledge_collection_rejects_non_object_policy(mutation_context):
+    result = await schema.execute(
+        CREATE_KNOWLEDGE_COLLECTION,
+        context_value=mutation_context,
+        variable_values={
+            "input": {
+                "idempotencyKey": "invalid-collection",
+                "clientMutationId": "invalid-collection-request",
+                "name": "Invalid",
+                "retrievalPolicy": ["not", "an", "object"],
+            }
+        },
+    )
+    assert result.errors[0].extensions["code"] == "BAD_USER_INPUT"
+    async with mutation_context.session_factory() as session:
+        assert list((await session.scalars(select(KnowledgeCollection))).all()) == []

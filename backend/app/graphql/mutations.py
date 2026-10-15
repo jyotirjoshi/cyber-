@@ -7,17 +7,24 @@ from pydantic import ValidationError
 from strawberry.scalars import JSON
 from strawberry.types import Info
 
-from app.api.deps import require_custom_agents
+from app.api.deps import require_custom_agents, require_internal_knowledge
 from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition, AgentDefinitionVersion
+from app.db.models.knowledge import KnowledgeCollection
 from app.db.repository import tenant_select
 from app.graphql.context import require_context
 from app.graphql.errors import PublicGraphQLError
 from app.graphql.ids import decode_global_id
-from app.graphql.types import AgentDefinitionNode, AgentDefinitionVersionNode
+from app.graphql.types import (
+    AgentDefinitionNode,
+    AgentDefinitionVersionNode,
+    KnowledgeCollectionNode,
+)
 from app.schemas.agent_definition import AgentDefinitionCreateIn, AgentVersionCreateIn
+from app.schemas.knowledge import KnowledgeCollectionCreateIn
 from app.services import agent_definition as agent_service
 from app.services.graphql_idempotency import input_digest, reserve
+from app.services.knowledge_ingest import create_collection
 
 
 @strawberry.input
@@ -76,6 +83,16 @@ class DisableAgentDefinitionInput:
     agent_definition_id: strawberry.ID
 
 
+@strawberry.input
+class CreateKnowledgeCollectionInput:
+    idempotency_key: str
+    client_mutation_id: str
+    name: str
+    description: str | None = None
+    retrieval_provider: str = "internal"
+    retrieval_policy: JSON | None = None
+
+
 @strawberry.type
 class AgentDefinitionMutationPayload:
     agent: AgentDefinitionNode
@@ -85,6 +102,12 @@ class AgentDefinitionMutationPayload:
 @strawberry.type
 class AgentDefinitionVersionMutationPayload:
     version: AgentDefinitionVersionNode
+    client_mutation_id: str
+
+
+@strawberry.type
+class KnowledgeCollectionMutationPayload:
+    collection: KnowledgeCollectionNode
     client_mutation_id: str
 
 
@@ -157,6 +180,24 @@ def _validated_version_payload(
         )
     except ValidationError as exc:
         raise PublicGraphQLError("BAD_USER_INPUT", "Agent configuration is invalid.") from exc
+
+
+def _validated_collection_payload(
+    value: CreateKnowledgeCollectionInput,
+) -> KnowledgeCollectionCreateIn:
+    if value.retrieval_policy is not None and not isinstance(value.retrieval_policy, dict):
+        raise PublicGraphQLError("BAD_USER_INPUT", "Retrieval policy must be an object.")
+    try:
+        return KnowledgeCollectionCreateIn(
+            name=value.name,
+            description=value.description,
+            retrieval_provider=value.retrieval_provider,
+            retrieval_policy=dict(value.retrieval_policy or {}),
+        )
+    except ValidationError as exc:
+        raise PublicGraphQLError(
+            "BAD_USER_INPUT", "Knowledge collection configuration is invalid."
+        ) from exc
 
 
 @strawberry.type
@@ -300,6 +341,47 @@ class AgentMutations:
             await session.commit()
         return AgentDefinitionMutationPayload(
             agent=projected,
+            client_mutation_id=input.client_mutation_id,
+        )
+
+    @strawberry.mutation
+    async def create_knowledge_collection(
+        self, info: Info, input: CreateKnowledgeCollectionInput
+    ) -> KnowledgeCollectionMutationPayload:
+        context = require_context(info)
+        require_internal_knowledge(context.settings)
+        context.principal.require(Permission.ORG_MANAGE)
+        _client_mutation_id(input.client_mutation_id)
+        payload = _validated_collection_payload(input)
+        digest = input_digest(payload.model_dump(mode="json"))
+        async with context.session_factory() as session:
+            receipt, replayed = await reserve(
+                session,
+                context.principal,
+                operation="createKnowledgeCollection",
+                idempotency_key=input.idempotency_key,
+                digest=digest,
+            )
+            if replayed:
+                row = await session.scalar(
+                    tenant_select(
+                        KnowledgeCollection, context.principal.organization_id
+                    ).where(KnowledgeCollection.id == receipt.resource_id)
+                )
+                if row is None:
+                    raise PublicGraphQLError(
+                        "RESOURCE_NOT_FOUND", "The mutation result is no longer available."
+                    )
+            else:
+                row = await create_collection(session, context.principal, payload)
+                receipt.resource_type = "KnowledgeCollection"
+                receipt.resource_id = row.id
+            await session.flush()
+            await session.refresh(row)
+            projected = KnowledgeCollectionNode.from_row(row)
+            await session.commit()
+        return KnowledgeCollectionMutationPayload(
+            collection=projected,
             client_mutation_id=input.client_mutation_id,
         )
 
