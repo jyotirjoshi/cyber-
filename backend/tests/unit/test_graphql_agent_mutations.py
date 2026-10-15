@@ -27,6 +27,7 @@ from app.db.models.agent_definition import (
     AgentVersionTool,
 )
 from app.db.models.audit import AuditEvent
+from app.graphql.ids import encode_global_id
 from app.graphql.schema import schema
 from app.services.context import ACTOR_API_KEY, Principal
 
@@ -103,6 +104,20 @@ async def mutation_context():
 
 CREATE_AGENT = """mutation($input: CreateAgentDefinitionInput!) {
   createAgentDefinition(input: $input) {
+    agent { id name versionCount activeVersionId isEnabled }
+    clientMutationId
+  }
+}"""
+
+CREATE_AGENT_VERSION = """mutation($input: CreateAgentDefinitionVersionInput!) {
+  createAgentDefinitionVersion(input: $input) {
+    version { id agentDefinitionId version role model maxEstimatedSpendMicros }
+    clientMutationId
+  }
+}"""
+
+DISABLE_AGENT = """mutation($input: DisableAgentDefinitionInput!) {
+  disableAgentDefinition(input: $input) {
     agent { id name versionCount isEnabled }
     clientMutationId
   }
@@ -119,6 +134,31 @@ def agent_input(*, name="Triage"):
         "provider": "openai",
         "model": "gpt-5-mini",
         "autonomyMode": "supervised",
+    }
+
+
+async def create_agent(mutation_context):
+    result = await schema.execute(
+        CREATE_AGENT,
+        context_value=mutation_context,
+        variable_values={"input": agent_input()},
+    )
+    assert result.errors is None
+    return result.data["createAgentDefinition"]["agent"]
+
+
+def version_input(agent, *, expected_active_version_id, role="Lead analyst"):
+    return {
+        "idempotencyKey": "triage-version-2",
+        "clientMutationId": "version-request-8",
+        "agentDefinitionId": agent["id"],
+        "expectedActiveVersionId": expected_active_version_id,
+        "role": role,
+        "instructions": "Correlate findings and require supporting evidence.",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "autonomyMode": "bounded",
+        "maxEstimatedSpendMicros": "2500000",
     }
 
 
@@ -250,3 +290,115 @@ async def test_non_object_policy_is_bad_user_input(mutation_context):
         variable_values={"input": payload},
     )
     assert result.errors[0].extensions["code"] == "BAD_USER_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_retrying_create_agent_version_returns_one_immutable_version(mutation_context):
+    agent = await create_agent(mutation_context)
+    first_version_id = agent["activeVersionId"]
+    payload = version_input(agent, expected_active_version_id=first_version_id)
+
+    first = await schema.execute(
+        CREATE_AGENT_VERSION,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+    replay = await schema.execute(
+        CREATE_AGENT_VERSION,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+
+    assert first.errors is None
+    assert replay.errors is None
+    assert replay.data == first.data
+    result = first.data["createAgentDefinitionVersion"]
+    assert result["clientMutationId"] == "version-request-8"
+    assert result["version"]["agentDefinitionId"] == agent["id"]
+    assert result["version"]["version"] == 2
+    assert result["version"]["role"] == "Lead analyst"
+    assert result["version"]["maxEstimatedSpendMicros"] == "2500000"
+
+    async with mutation_context.session_factory() as session:
+        versions = list((await session.scalars(select(AgentDefinitionVersion))).all())
+        audits = list((await session.scalars(select(AuditEvent))).all())
+        stored_agent = await session.scalar(select(AgentDefinition))
+    assert len(versions) == 2
+    assert len(audits) == 2
+    assert stored_agent.version_count == 2
+    assert result["version"]["id"] == encode_global_id(
+        "AgentDefinitionVersion", stored_agent.active_version_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_version_rejects_a_stale_active_version(mutation_context):
+    agent = await create_agent(mutation_context)
+    payload = version_input(
+        agent,
+        expected_active_version_id=agent["activeVersionId"],
+    )
+    created = await schema.execute(
+        CREATE_AGENT_VERSION,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+    stale_payload = version_input(
+        agent,
+        expected_active_version_id=agent["activeVersionId"],
+        role="Stale configuration",
+    )
+    stale_payload["idempotencyKey"] = "stale-version-request"
+    stale = await schema.execute(
+        CREATE_AGENT_VERSION,
+        context_value=mutation_context,
+        variable_values={"input": stale_payload},
+    )
+
+    assert created.errors is None
+    assert stale.errors[0].extensions["code"] == "CONFLICT"
+    async with mutation_context.session_factory() as session:
+        assert len(list((await session.scalars(select(AgentDefinitionVersion))).all())) == 2
+
+
+@pytest.mark.asyncio
+async def test_retrying_disable_agent_returns_one_effect_and_rechecks_permission(
+    mutation_context,
+):
+    from app.graphql.context import GraphQLContext
+
+    agent = await create_agent(mutation_context)
+    payload = {
+        "idempotencyKey": "disable-triage-v1",
+        "clientMutationId": "disable-request-9",
+        "agentDefinitionId": agent["id"],
+    }
+    first = await schema.execute(
+        DISABLE_AGENT,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+    replay = await schema.execute(
+        DISABLE_AGENT,
+        context_value=mutation_context,
+        variable_values={"input": payload},
+    )
+    revoked_context = GraphQLContext(
+        mutation_context.principal.downgraded_to(Role.VIEWER),
+        mutation_context.settings,
+        mutation_context.session_factory,
+    )
+    denied_replay = await schema.execute(
+        DISABLE_AGENT,
+        context_value=revoked_context,
+        variable_values={"input": payload},
+    )
+
+    assert first.errors is None
+    assert replay.errors is None
+    assert replay.data == first.data
+    assert first.data["disableAgentDefinition"]["agent"]["isEnabled"] is False
+    assert denied_replay.errors[0].extensions["code"] == "PERMISSION_DENIED"
+    async with mutation_context.session_factory() as session:
+        audits = list((await session.scalars(select(AuditEvent))).all())
+    assert len(audits) == 2

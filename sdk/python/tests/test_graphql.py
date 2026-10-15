@@ -280,3 +280,114 @@ async def test_async_client_creates_agent_with_same_contract():
             client_mutation_id="client-async",
         )
     assert result["agent"]["id"] == "agent-async"
+
+
+def test_sync_client_creates_agent_version_and_disables_agent_without_retry():
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        field = (
+            "createAgentDefinitionVersion"
+            if body["operationName"] == "CreateAgentDefinitionVersion"
+            else "disableAgentDefinition"
+        )
+        result = (
+            {
+                "version": {"id": "version-2", "version": 2},
+                "clientMutationId": "client-version",
+            }
+            if field == "createAgentDefinitionVersion"
+            else {
+                "agent": {"id": "agent-1", "isEnabled": False},
+                "clientMutationId": "client-disable",
+            }
+        )
+        return httpx.Response(200, json={"data": {field: result}})
+
+    with CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        version = client.create_agent_definition_version(
+            "agent-1",
+            {
+                "expectedActiveVersionId": "version-1",
+                "role": "Lead analyst",
+                "instructions": "Use evidence",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-5",
+            },
+            idempotency_key="agent-version-2",
+            client_mutation_id="client-version",
+        )
+        disabled = client.disable_agent_definition(
+            "agent-1",
+            idempotency_key="disable-agent-1",
+            client_mutation_id="client-disable",
+        )
+
+    assert version["version"]["id"] == "version-2"
+    assert disabled["agent"]["isEnabled"] is False
+    assert len(seen) == 2
+    assert seen[0]["operationName"] == "CreateAgentDefinitionVersion"
+    assert seen[0]["variables"]["input"] == {
+        "agentDefinitionId": "agent-1",
+        "expectedActiveVersionId": "version-1",
+        "role": "Lead analyst",
+        "instructions": "Use evidence",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "idempotencyKey": "agent-version-2",
+        "clientMutationId": "client-version",
+    }
+    assert seen[1]["operationName"] == "DisableAgentDefinition"
+
+
+@pytest.mark.asyncio
+async def test_async_client_creates_agent_version_and_disables_agent():
+    operations = []
+
+    async def handler(request):
+        body = json.loads(request.content)
+        operations.append(body["operationName"])
+        if body["operationName"] == "CreateAgentDefinitionVersion":
+            data = {
+                "createAgentDefinitionVersion": {
+                    "version": {"id": "version-async", "version": 3},
+                    "clientMutationId": "async-version",
+                }
+            }
+        else:
+            data = {
+                "disableAgentDefinition": {
+                    "agent": {"id": "agent-async", "isEnabled": False},
+                    "clientMutationId": "async-disable",
+                }
+            }
+        return httpx.Response(200, json={"data": data})
+
+    async with AsyncCynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        version = await client.create_agent_definition_version(
+            "agent-async",
+            {
+                "expectedActiveVersionId": "version-2",
+                "role": "Responder",
+                "instructions": "Contain with approval",
+                "provider": "openai",
+                "model": "gpt-5-mini",
+            },
+            idempotency_key="async-version-3",
+            client_mutation_id="async-version",
+        )
+        disabled = await client.disable_agent_definition(
+            "agent-async",
+            idempotency_key="async-disable-agent",
+            client_mutation_id="async-disable",
+        )
+
+    assert version["version"]["version"] == 3
+    assert disabled["agent"]["isEnabled"] is False
+    assert operations == ["CreateAgentDefinitionVersion", "DisableAgentDefinition"]

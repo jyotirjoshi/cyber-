@@ -35,6 +35,18 @@ CREATE_AGENT = """mutation CreateAgentDefinition($input: CreateAgentDefinitionIn
     clientMutationId
   }
 }"""
+CREATE_AGENT_VERSION = """mutation CreateAgentDefinitionVersion($input: CreateAgentDefinitionVersionInput!) {
+  createAgentDefinitionVersion(input: $input) {
+    version { id agentDefinitionId version role provider model autonomyMode temperature maxOutputTokens maxParallelTasks maxRuntimeSeconds maxToolCalls maxInputTokens maxEstimatedSpendMicros createdAt }
+    clientMutationId
+  }
+}"""
+DISABLE_AGENT = """mutation DisableAgentDefinition($input: DisableAgentDefinitionInput!) {
+  disableAgentDefinition(input: $input) {
+    agent { id name description isEnabled versionCount activeVersionId createdAt updatedAt }
+    clientMutationId
+  }
+}"""
 
 
 def service_root(base_url: str) -> str:
@@ -147,3 +159,20 @@ def mutation_result(data: dict[str, Any], field: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise CynuxError("Cynux returned an invalid mutation result")
     return payload
+
+
+def mutation_input(
+    configuration: dict[str, Any],
+    *,
+    idempotency_key: str,
+    client_mutation_id: str,
+) -> dict[str, Any]:
+    if not idempotency_key or len(idempotency_key) > 160:
+        raise ValueError("idempotency_key must contain 1 to 160 characters")
+    if not client_mutation_id or len(client_mutation_id) > 160:
+        raise ValueError("client_mutation_id must contain 1 to 160 characters")
+    return {
+        **dict(configuration),
+        "idempotencyKey": idempotency_key,
+        "clientMutationId": client_mutation_id,
+    }

@@ -12,11 +12,14 @@ from .graphql import (
     AGENTS,
     COLLECTIONS,
     CREATE_AGENT,
+    CREATE_AGENT_VERSION,
+    DISABLE_AGENT,
     SOURCES,
     VERSIONS,
     connection_page,
     graphql_data,
     graphql_payload,
+    mutation_input,
     mutation_result,
     service_root,
     validate_page_size,
@@ -213,18 +216,53 @@ class CynuxClient:
         idempotency_key: str,
         client_mutation_id: str,
     ) -> dict[str, Any]:
-        if not idempotency_key or len(idempotency_key) > 160:
-            raise ValueError("idempotency_key must contain 1 to 160 characters")
-        if not client_mutation_id or len(client_mutation_id) > 160:
-            raise ValueError("client_mutation_id must contain 1 to 160 characters")
-        mutation_input = {
-            **dict(configuration),
-            "idempotencyKey": idempotency_key,
-            "clientMutationId": client_mutation_id,
-        }
+        variables = mutation_input(
+            configuration,
+            idempotency_key=idempotency_key,
+            client_mutation_id=client_mutation_id,
+        )
         data = self.graphql(
             CREATE_AGENT,
-            {"input": mutation_input},
+            {"input": variables},
             operation_name="CreateAgentDefinition",
         )
         return mutation_result(data, "createAgentDefinition")
+
+    def create_agent_definition_version(
+        self,
+        agent_definition_id: str,
+        configuration: dict[str, Any],
+        *,
+        idempotency_key: str,
+        client_mutation_id: str,
+    ) -> dict[str, Any]:
+        variables = mutation_input(
+            {**dict(configuration), "agentDefinitionId": agent_definition_id},
+            idempotency_key=idempotency_key,
+            client_mutation_id=client_mutation_id,
+        )
+        data = self.graphql(
+            CREATE_AGENT_VERSION,
+            {"input": variables},
+            operation_name="CreateAgentDefinitionVersion",
+        )
+        return mutation_result(data, "createAgentDefinitionVersion")
+
+    def disable_agent_definition(
+        self,
+        agent_definition_id: str,
+        *,
+        idempotency_key: str,
+        client_mutation_id: str,
+    ) -> dict[str, Any]:
+        variables = mutation_input(
+            {"agentDefinitionId": agent_definition_id},
+            idempotency_key=idempotency_key,
+            client_mutation_id=client_mutation_id,
+        )
+        data = self.graphql(
+            DISABLE_AGENT,
+            {"input": variables},
+            operation_name="DisableAgentDefinition",
+        )
+        return mutation_result(data, "disableAgentDefinition")
