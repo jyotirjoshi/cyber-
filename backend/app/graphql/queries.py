@@ -133,7 +133,7 @@ class AgentKnowledgeQueries:
         codec = CursorCodec(
             context.settings.security.jwt_secret.get_secret_value(),
             context.principal.organization_id,
-            "agentDefinitionVersions",
+            f"agentDefinitionVersions:{agent_id}",
         )
         async with context.session_factory() as session:
             parent = await session.scalar(
@@ -194,7 +194,7 @@ class AgentKnowledgeQueries:
         codec = CursorCodec(
             context.settings.security.jwt_secret.get_secret_value(),
             context.principal.organization_id,
-            "knowledgeSources",
+            f"knowledgeSources:{decoded_collection_id}",
         )
         async with context.session_factory() as session:
             parent = await session.scalar(

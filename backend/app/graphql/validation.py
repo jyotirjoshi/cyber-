@@ -73,7 +73,12 @@ class QueryBudget(SchemaExtension):
                 if aliases > 50 or cost > 5000:
                     raise PublicGraphQLError("QUERY_TOO_COMPLEX", "GraphQL query is too complex.")
                 count = 1
-                if field.name.value in {"agentDefinitions", "knowledgeCollections"}:
+                if field.name.value in {
+                    "agentDefinitions",
+                    "agentDefinitionVersions",
+                    "knowledgeCollections",
+                    "knowledgeSources",
+                }:
                     count = 25
                     for argument in field.arguments or ():
                         if argument.name.value == "first":

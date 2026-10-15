@@ -45,6 +45,24 @@ async def test_variable_pagination_counts_toward_budget():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "parent_argument"),
+    (
+        ("agentDefinitionVersions", 'agentDefinitionId: "opaque"'),
+        ("knowledgeSources", 'collectionId: "opaque"'),
+    ),
+)
+async def test_nested_connections_count_pagination_toward_budget(field, parent_argument):
+    selections = " ".join(
+        f"a{i}: {field}({parent_argument}, first: 100) "
+        "{ nodes { id createdAt __typename } }"
+        for i in range(20)
+    )
+    result = await schema.execute("{ " + selections + " }")
+    assert result.errors[0].extensions["code"] == "QUERY_TOO_COMPLEX"
+
+
+@pytest.mark.asyncio
 async def test_cyclic_fragments_and_oversized_documents_are_bounded():
     result = await schema.execute("{ ...Cycle } fragment Cycle on Query { ...Cycle }")
     assert result.errors[0].extensions["code"] == "QUERY_TOO_COMPLEX"

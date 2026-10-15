@@ -91,7 +91,7 @@ class AgentDefinitionVersionNode:
     max_runtime_seconds: int
     max_tool_calls: int
     max_input_tokens: int
-    max_estimated_spend_micros: int
+    max_estimated_spend_micros: str
     created_at: datetime
 
     @classmethod
@@ -112,7 +112,7 @@ class AgentDefinitionVersionNode:
             max_runtime_seconds=row.max_runtime_seconds,
             max_tool_calls=row.max_tool_calls,
             max_input_tokens=row.max_input_tokens,
-            max_estimated_spend_micros=row.max_estimated_spend_micros,
+            max_estimated_spend_micros=str(row.max_estimated_spend_micros),
             created_at=row.created_at,
         )
 
