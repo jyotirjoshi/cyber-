@@ -48,7 +48,7 @@
 ### Task 1: Pipeline persistence, immutable versions, and migration
 
 **Files:**
-- Create: `backend/alembic/versions/0092_custom_execution_pipelines.py`
+- Create: `backend/alembic/versions/0101_custom_execution_pipelines.py`
 - Create: `backend/app/db/models/pipeline.py`
 - Modify: `backend/app/db/models/__init__.py`
 - Create: `backend/app/schemas/pipeline.py`
@@ -97,7 +97,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/alembic/versions/0092_custom_execution_pipelines.py backend/app/db/models/pipeline.py backend/app/db/models/__init__.py backend/app/schemas/pipeline.py backend/tests/unit/test_pipeline_models.py backend/tests/unit/test_migration_matches_models.py
+git add backend/alembic/versions/0101_custom_execution_pipelines.py backend/app/db/models/pipeline.py backend/app/db/models/__init__.py backend/app/schemas/pipeline.py backend/tests/unit/test_pipeline_models.py backend/tests/unit/test_migration_matches_models.py
 git commit -m "feat: persist versioned execution pipelines"
 ```
 

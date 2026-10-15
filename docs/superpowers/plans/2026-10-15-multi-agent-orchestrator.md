@@ -45,7 +45,7 @@
 ### Task 1: Generic task persistence and migration
 
 **Files:**
-- Create: `backend/alembic/versions/0090_generic_agent_tasks.py`
+- Create: `backend/alembic/versions/0093_generic_agent_tasks.py`
 - Create: `backend/app/db/models/agent_task.py`
 - Modify: `backend/app/db/models/agent.py`
 - Modify: `backend/app/db/models/__init__.py`
@@ -82,7 +82,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/alembic/versions/0090_generic_agent_tasks.py backend/app/db/models/agent_task.py backend/app/db/models/agent.py backend/app/db/models/__init__.py backend/tests/unit/test_agent_task_models.py
+git add backend/alembic/versions/0093_generic_agent_tasks.py backend/app/db/models/agent_task.py backend/app/db/models/agent.py backend/app/db/models/__init__.py backend/tests/unit/test_agent_task_models.py
 git commit -m "feat: persist generic agent task graphs"
 ```
 

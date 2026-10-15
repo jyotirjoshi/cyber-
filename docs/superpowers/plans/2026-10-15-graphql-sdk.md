@@ -50,7 +50,7 @@
 **Files:**
 - Modify: `backend/pyproject.toml`
 - Modify: `backend/requirements.txt`
-- Create: `backend/alembic/versions/0091_graphql_query_indexes.py`
+- Create: `backend/alembic/versions/0094_graphql_query_indexes.py`
 - Create: `backend/app/graphql/__init__.py`
 - Create: `backend/app/graphql/schema.py`
 - Modify: `backend/app/main.py`
@@ -99,7 +99,7 @@ Expected: PASS and deterministic schema output.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/pyproject.toml backend/requirements.txt backend/alembic/versions/0091_graphql_query_indexes.py backend/app/graphql backend/app/main.py backend/tests/unit/test_graphql_schema.py backend/tests/unit/test_migration_matches_models.py
+git add backend/pyproject.toml backend/requirements.txt backend/alembic/versions/0094_graphql_query_indexes.py backend/app/graphql backend/app/main.py backend/tests/unit/test_graphql_schema.py backend/tests/unit/test_migration_matches_models.py
 git commit -m "feat: mount public graphql schema"
 ```
 
