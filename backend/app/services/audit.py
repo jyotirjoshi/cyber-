@@ -134,6 +134,9 @@ class AuditAction:
 
     # -- agent (FR-033 .. FR-036) -------------------------------------------
     AGENT_SESSION_CREATE = "agent.session.create"
+    AGENT_DEFINITION_CREATE = "agent.definition.create"
+    AGENT_DEFINITION_VERSION_CREATE = "agent.definition.version.create"
+    AGENT_DEFINITION_DISABLE = "agent.definition.disable"
     AGENT_MESSAGE = "agent.message"
     AGENT_RUN_START = "agent.run.start"
     AGENT_RUN_COMPLETE = "agent.run.complete"
