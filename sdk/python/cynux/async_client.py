@@ -10,11 +10,13 @@ from .errors import CynuxError
 from .graphql import (
     AGENTS,
     COLLECTIONS,
+    CREATE_AGENT,
     SOURCES,
     VERSIONS,
     connection_page,
     graphql_data,
     graphql_payload,
+    mutation_result,
     service_root,
     validate_page_size,
 )
@@ -103,3 +105,26 @@ class AsyncCynuxClient:
         return self._iter_graphql(
             SOURCES, "knowledgeSources", page_size, {"id": collection_id}
         )
+
+    async def create_agent_definition(
+        self,
+        configuration: dict[str, Any],
+        *,
+        idempotency_key: str,
+        client_mutation_id: str,
+    ) -> dict[str, Any]:
+        if not idempotency_key or len(idempotency_key) > 160:
+            raise ValueError("idempotency_key must contain 1 to 160 characters")
+        if not client_mutation_id or len(client_mutation_id) > 160:
+            raise ValueError("client_mutation_id must contain 1 to 160 characters")
+        mutation_input = {
+            **dict(configuration),
+            "idempotencyKey": idempotency_key,
+            "clientMutationId": client_mutation_id,
+        }
+        data = await self.graphql(
+            CREATE_AGENT,
+            {"input": mutation_input},
+            operation_name="CreateAgentDefinition",
+        )
+        return mutation_result(data, "createAgentDefinition")

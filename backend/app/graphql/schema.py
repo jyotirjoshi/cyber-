@@ -13,6 +13,7 @@ from app.api import API_VERSION
 from app.core.config import get_settings
 from app.graphql.context import GraphQLContext, build_graphql_context
 from app.graphql.errors import PublicErrors
+from app.graphql.mutations import AgentMutations
 from app.graphql.queries import AgentKnowledgeQueries
 from app.graphql.validation import QueryBudget
 
@@ -41,6 +42,11 @@ class Query(AgentKnowledgeQueries):
         )
 
 
+@strawberry.type
+class Mutation(AgentMutations):
+    pass
+
+
 class PublicSchema(strawberry.Schema):
     def process_errors(self, errors, execution_context=None):
         # Strawberry's default logger renders query text, variables and exception
@@ -55,7 +61,11 @@ class PublicSchema(strawberry.Schema):
         )
 
 
-schema = PublicSchema(query=Query, extensions=[PublicErrors, MaxTokensLimiter(10_000), QueryBudget])
+schema = PublicSchema(
+    query=Query,
+    mutation=Mutation,
+    extensions=[PublicErrors, MaxTokensLimiter(10_000), QueryBudget],
+)
 graphql_router = GraphQLRouter(
     schema,
     context_getter=build_graphql_context,

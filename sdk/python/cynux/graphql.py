@@ -29,6 +29,12 @@ SOURCES = """query KnowledgeSources($id: ID!, $first: Int!, $after: String) {
     pageInfo { hasNextPage endCursor }
   }
 }"""
+CREATE_AGENT = """mutation CreateAgentDefinition($input: CreateAgentDefinitionInput!) {
+  createAgentDefinition(input: $input) {
+    agent { id name description isEnabled versionCount activeVersionId createdAt updatedAt }
+    clientMutationId
+  }
+}"""
 
 
 def service_root(base_url: str) -> str:
@@ -134,3 +140,10 @@ def connection_page(data: dict[str, Any], field: str, previous: str | None):
     ):
         raise CynuxError("Cynux returned a non-advancing pagination cursor")
     return nodes, cursor if more else None
+
+
+def mutation_result(data: dict[str, Any], field: str) -> dict[str, Any]:
+    payload = data.get(field)
+    if not isinstance(payload, dict):
+        raise CynuxError("Cynux returned an invalid mutation result")
+    return payload

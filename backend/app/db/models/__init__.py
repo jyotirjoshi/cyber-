@@ -41,6 +41,7 @@ from app.db.models.canonical import (
 )
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment, Remediation, TicketLink
+from app.db.models.graphql import GraphQLMutationReceipt
 from app.db.models.identity import Membership, Organization, PasswordResetToken, User
 from app.db.models.integration import Integration, IntegrationCredential
 from app.db.models.knowledge import (
@@ -79,6 +80,7 @@ __all__ = [
     "Finding",
     "FindingHistory",
     "FindingObservation",
+    "GraphQLMutationReceipt",
     "FindingEnrichment",
     "Integration",
     "IntegrationCredential",

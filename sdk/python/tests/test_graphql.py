@@ -210,3 +210,73 @@ async def test_async_nested_iterators_match_sync_contract():
         assert [x async for x in client.iter_knowledge_sources("collection-id")] == [
             {"id": "one"}
         ]
+
+
+def test_sync_client_creates_agent_with_explicit_idempotency():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "createAgentDefinition": {
+                        "agent": {"id": "agent-id", "name": "Triage"},
+                        "clientMutationId": "client-1",
+                    }
+                }
+            },
+        )
+
+    with CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        result = client.create_agent_definition(
+            {
+                "name": "Triage",
+                "role": "Analyst",
+                "instructions": "Use evidence",
+                "provider": "openai",
+                "model": "gpt-5-mini",
+            },
+            idempotency_key="agent-triage-v1",
+            client_mutation_id="client-1",
+        )
+    assert result["agent"]["id"] == "agent-id"
+    assert seen[0]["variables"]["input"]["idempotencyKey"] == "agent-triage-v1"
+    assert seen[0]["operationName"] == "CreateAgentDefinition"
+
+
+@pytest.mark.asyncio
+async def test_async_client_creates_agent_with_same_contract():
+    async def handler(request):
+        body = json.loads(request.content)
+        assert body["variables"]["input"]["clientMutationId"] == "client-async"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "createAgentDefinition": {
+                        "agent": {"id": "agent-async", "name": "Responder"},
+                        "clientMutationId": "client-async",
+                    }
+                }
+            },
+        )
+
+    async with AsyncCynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.create_agent_definition(
+            {
+                "name": "Responder",
+                "role": "Analyst",
+                "instructions": "Use evidence",
+                "provider": "openai",
+                "model": "gpt-5-mini",
+            },
+            idempotency_key="agent-responder-v1",
+            client_mutation_id="client-async",
+        )
+    assert result["agent"]["id"] == "agent-async"
