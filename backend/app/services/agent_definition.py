@@ -66,19 +66,29 @@ def _version_columns(configuration: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _validate_collection_links(
-    session: AsyncSession, principal: Principal, collection_ids: list[uuid.UUID]
+async def validate_agent_links(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    tool_names: list[str],
+    collection_ids: list[uuid.UUID],
 ) -> None:
-    if not collection_ids:
-        return
-    statement = select(KnowledgeCollection.id).where(
-        KnowledgeCollection.organization_id == principal.organization_id,
-        KnowledgeCollection.id.in_(collection_ids),
-        KnowledgeCollection.is_enabled.is_(True),
-    )
-    found = set((await session.execute(statement)).scalars().all())
-    if found != set(collection_ids):
-        raise ResourceNotFoundError("one or more knowledge collections were not found")
+    """Validate link targets as one opaque set so failures do not disclose existence."""
+    from app.agent.tools.registry import default_tool_registry
+
+    registry = default_tool_registry()
+    tools_exist = all(registry.find(name, 1) is not None for name in tool_names)
+    collections_exist = True
+    if collection_ids:
+        statement = select(KnowledgeCollection.id).where(
+            KnowledgeCollection.organization_id == principal.organization_id,
+            KnowledgeCollection.id.in_(collection_ids),
+            KnowledgeCollection.is_enabled.is_(True),
+        )
+        found = set((await session.execute(statement)).scalars().all())
+        collections_exist = found == set(collection_ids)
+    if not tools_exist or not collections_exist:
+        raise ResourceNotFoundError("one or more agent links were not found")
 
 
 async def locked_tenant_agent(
@@ -101,7 +111,12 @@ async def _persist_version(
     agent: AgentDefinition,
     payload: AgentVersionConfigurationIn,
 ) -> AgentDefinitionVersion:
-    await _validate_collection_links(session, principal, payload.collection_ids)
+    await validate_agent_links(
+        session,
+        principal,
+        tool_names=payload.tool_names,
+        collection_ids=payload.collection_ids,
+    )
     configuration = normalize_agent_configuration(payload)
     version = AgentDefinitionVersion(
         id=uuid.uuid4(),
@@ -153,7 +168,12 @@ async def create_agent(
     ).scalar_one_or_none()
     if duplicate is not None:
         raise ConflictError("an agent definition with this name already exists")
-    await _validate_collection_links(session, principal, payload.collection_ids)
+    await validate_agent_links(
+        session,
+        principal,
+        tool_names=payload.tool_names,
+        collection_ids=payload.collection_ids,
+    )
     agent = AgentDefinition(
         id=uuid.uuid4(),
         organization_id=principal.organization_id,

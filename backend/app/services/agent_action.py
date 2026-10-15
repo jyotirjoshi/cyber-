@@ -340,12 +340,23 @@ def validate_action_payload(action: str, payload: Mapping[str, Any]) -> dict[str
 
 def require_action_permission(principal: Principal, action: str) -> None:
     """Authorize the proposed action with the same permission its executor requires."""
-    permission = _ACTION_PERMISSIONS.get(action)
-    if permission is None:
-        raise ValueError(f"Unsupported agent action: {action}")
+    permission = action_permission(action)
     principal.require(permission)
     if action == "update_github_alert":
         principal.require(Permission.FINDING_VALIDATE)
+
+
+def action_permission(action: str) -> Permission:
+    """Return the executor's permission without exposing the mutable registry mapping."""
+    permission = _ACTION_PERMISSIONS.get(action)
+    if permission is None:
+        raise ValueError(f"Unsupported agent action: {action}")
+    return permission
+
+
+def registered_action_names() -> tuple[str, ...]:
+    """Return the stable action surface consumed by the typed tool adapter."""
+    return tuple(_ACTION_PERMISSIONS)
 
 
 def new_agent_action(
@@ -810,12 +821,14 @@ async def resolve_action(
 
 
 __all__ = [
+    "action_permission",
     "action_payload_digest",
     "execute_and_settle_action",
     "execute_approved_action",
     "execute_approved_batch",
     "new_agent_action",
     "propose_action",
+    "registered_action_names",
     "require_action_permission",
     "resolve_action",
     "validate_action_payload",
