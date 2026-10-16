@@ -24,6 +24,8 @@ something the agent never scoped and no one validated.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import uuid
 from typing import Any
 
@@ -33,6 +35,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent.tools.registry import default_tool_registry
 from app.core.config import Settings
 from app.core.errors import ConflictError, UserError
 from app.db.enums import (
@@ -44,6 +47,8 @@ from app.db.enums import (
     RiskLevel,
     ScannerName,
 )
+from app.db.models.agent import AgentRun
+from app.db.models.agent_task import AgentTask
 from app.db.models.assessment import Approval, Assessment
 from app.db.repository import TenantRepository
 from app.schemas.assessment import ApproveIn
@@ -74,6 +79,149 @@ _GRANTING_DECISIONS: frozenset[ApprovalDecision] = frozenset(
 
 #: Upper bound on how many assets one approval may authorize, matching ``ApproveIn``.
 _MAX_ASSETS = 1000
+
+
+def task_approval_digest(task: AgentTask, agent_version_id: uuid.UUID) -> str:
+    """Bind approval to the immutable executor contract and exact current input."""
+
+    encoded = json.dumps(
+        {
+            "run_id": str(task.run_id),
+            "task_id": str(task.id),
+            "agent_version_id": str(agent_version_id),
+            "tool_name": task.tool_name,
+            "tool_version": task.tool_version,
+            "input_schema_version": task.input_schema_version,
+            "input": task.input_payload,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def open_task_approval(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    task_id: uuid.UUID,
+    *,
+    agent_version_id: uuid.UUID,
+    prompt: str,
+    rationale: str | None = None,
+    expires_at: dt.datetime | None = None,
+) -> Approval:
+    """Create the single approval grant that can ever authorize one tool task."""
+
+    task = (
+        await session.execute(
+            select(AgentTask)
+            .where(
+                AgentTask.id == task_id,
+                AgentTask.organization_id == organization_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if task is None:
+        raise ConflictError("agent task is unavailable")
+    if task.kind != "tool" or task.tool_name is None:
+        raise ConflictError("only tool tasks can request tool approval")
+    existing = (
+        await session.execute(
+            select(Approval).where(
+                Approval.organization_id == organization_id,
+                Approval.agent_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    run = (
+        await session.execute(
+            select(AgentRun).where(
+                AgentRun.id == task.run_id,
+                AgentRun.organization_id == organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise ConflictError("agent run is unavailable")
+    spec = default_tool_registry().find(task.tool_name, task.tool_version)
+    if spec is None:
+        raise ConflictError("agent task tool contract is unavailable")
+    try:
+        spec.input_model.model_validate(task.input_payload)
+    except ValueError as exc:
+        raise ConflictError("agent task payload is invalid") from exc
+    approval = Approval(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        assessment_id=run.assessment_id,
+        agent_run_id=run.id,
+        agent_task_id=task.id,
+        agent_version_id=agent_version_id,
+        tool_name=task.tool_name,
+        tool_version=task.tool_version,
+        payload_digest=task_approval_digest(task, agent_version_id),
+        kind=ApprovalKind.HIGH_RISK_TOOL.value,
+        decision=ApprovalDecision.PENDING.value,
+        prompt=prompt.strip()[:4000],
+        rationale=rationale.strip()[:4000] if rationale and rationale.strip() else None,
+        requested_payload=dict(task.input_payload),
+        approved_payload={},
+        risk_level=RiskLevel.HIGH.value,
+        expires_at=expires_at or (_now() + dt.timedelta(hours=24)),
+    )
+    task.status = "awaiting_approval"
+    session.add(approval)
+    await session.flush()
+    return approval
+
+
+async def grant_task_approval(
+    session: AsyncSession,
+    principal: Principal,
+    approval_id: uuid.UUID,
+    *,
+    note: str | None = None,
+) -> Approval:
+    """Grant one task approval after checking the human can execute that tool today."""
+
+    principal.require(Permission.AGENT_CHAT)
+    approval = (
+        await session.execute(
+            select(Approval)
+            .where(
+                Approval.id == approval_id,
+                Approval.organization_id == principal.organization_id,
+                Approval.agent_task_id.isnot(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if approval is None:
+        raise ConflictError("agent task approval is unavailable")
+    if approval.decision != ApprovalDecision.PENDING.value:
+        raise ConflictError("agent task approval has already been resolved")
+    if _is_expired(approval):
+        approval.decision = ApprovalDecision.EXPIRED.value
+        approval.resolved_at = _now()
+        await session.flush()
+        raise ConflictError("agent task approval has expired")
+    if approval.tool_name is None or approval.tool_version is None:
+        raise ConflictError("agent task approval binding is incomplete")
+    spec = default_tool_registry().find(approval.tool_name, approval.tool_version)
+    if spec is None:
+        raise ConflictError("agent task tool contract is unavailable")
+    principal.require(spec.permission)
+    approval.decision = ApprovalDecision.APPROVED.value
+    approval.approved_payload = dict(approval.requested_payload)
+    approval.resolved_by_id = principal.user_id
+    approval.resolved_at = _now()
+    approval.resolution_note = note.strip()[:2000] if note and note.strip() else None
+    await session.flush()
+    return approval
 
 
 async def open_approval(
@@ -551,8 +699,11 @@ __all__ = [
     "approval_targets",
     "expire_stale",
     "get_approval",
+    "grant_task_approval",
     "granted_approval",
     "open_approval",
+    "open_task_approval",
     "pending_approval",
     "resolve_approval",
+    "task_approval_digest",
 ]

@@ -292,12 +292,21 @@ class Approval(Base, TenantMixin, TimestampMixin):
     __tablename__ = "approvals"
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    assessment_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="CASCADE"), nullable=True
     )
     agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="SET NULL")
     )
+    agent_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_tasks.id", ondelete="CASCADE")
+    )
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_definition_versions.id", ondelete="SET NULL")
+    )
+    tool_name: Mapped[str | None] = mapped_column(String(120))
+    tool_version: Mapped[int | None] = mapped_column(Integer)
+    payload_digest: Mapped[str | None] = mapped_column(String(64))
     kind: Mapped[str] = mapped_column(
         String(40), nullable=False, default=ApprovalKind.SCAN_SCOPE.value
     )
@@ -321,10 +330,11 @@ class Approval(Base, TenantMixin, TimestampMixin):
     )
     resolution_note: Mapped[str | None] = mapped_column(Text)
 
-    assessment: Mapped[Assessment] = relationship(back_populates="approvals", lazy=LAZY)
+    assessment: Mapped[Assessment | None] = relationship(back_populates="approvals", lazy=LAZY)
     resolved_by: Mapped[User | None] = relationship(lazy=LAZY, foreign_keys=[resolved_by_id])
 
     __table_args__ = (
+        UniqueConstraint("agent_task_id", name="unique_approvals_agent_task_id"),
         CheckConstraint(
             "decision IN ('pending','approved','approved_all','customized','rejected','expired')",
             name="valid_decision",
@@ -340,6 +350,15 @@ class Approval(Base, TenantMixin, TimestampMixin):
         # than through it.  Excluding the value here means the bypass cannot be
         # represented, let alone granted (section 56, "never bypass approval").
         CheckConstraint("risk_level IN ('low','medium','high')", name="valid_approval_risk"),
+        CheckConstraint(
+            "assessment_id IS NOT NULL OR agent_task_id IS NOT NULL",
+            name="valid_approval_subject",
+        ),
+        CheckConstraint(
+            "agent_task_id IS NULL OR (agent_run_id IS NOT NULL AND agent_version_id IS NOT NULL "
+            "AND tool_name IS NOT NULL AND tool_version IS NOT NULL AND payload_digest IS NOT NULL)",
+            name="valid_agent_task_approval_binding",
+        ),
         # An approval is only usable as authority if a human resolved it.
         CheckConstraint(
             "decision = 'pending' OR decision = 'expired' OR resolved_by_id IS NOT NULL",

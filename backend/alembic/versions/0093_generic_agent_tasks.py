@@ -133,6 +133,51 @@ def upgrade() -> None:
         "agent_tasks",
         ["organization_id", "status", "available_at"],
     )
+    op.alter_column(
+        "approvals",
+        "assessment_id",
+        existing_type=postgresql.UUID(as_uuid=True),
+        nullable=True,
+    )
+    op.add_column(
+        "approvals",
+        sa.Column("agent_task_id", postgresql.UUID(as_uuid=True), nullable=True),
+    )
+    op.add_column(
+        "approvals",
+        sa.Column("agent_version_id", postgresql.UUID(as_uuid=True), nullable=True),
+    )
+    op.add_column("approvals", sa.Column("tool_name", sa.String(120), nullable=True))
+    op.add_column("approvals", sa.Column("tool_version", sa.Integer(), nullable=True))
+    op.add_column("approvals", sa.Column("payload_digest", sa.String(64), nullable=True))
+    op.create_foreign_key(
+        "fk_approvals_agent_task_id_agent_tasks",
+        "approvals",
+        "agent_tasks",
+        ["agent_task_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_foreign_key(
+        "fk_approvals_agent_version_id_agent_definition_versions",
+        "approvals",
+        "agent_definition_versions",
+        ["agent_version_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
+    op.create_unique_constraint("unique_approvals_agent_task_id", "approvals", ["agent_task_id"])
+    op.create_check_constraint(
+        "ck_approvals_valid_approval_subject",
+        "approvals",
+        "assessment_id IS NOT NULL OR agent_task_id IS NOT NULL",
+    )
+    op.create_check_constraint(
+        "ck_approvals_valid_agent_task_approval_binding",
+        "approvals",
+        "agent_task_id IS NULL OR (agent_run_id IS NOT NULL AND agent_version_id IS NOT NULL "
+        "AND tool_name IS NOT NULL AND tool_version IS NOT NULL AND payload_digest IS NOT NULL)",
+    )
     op.add_column(
         "run_dispatches",
         sa.Column("task_id", postgresql.UUID(as_uuid=True), nullable=True),
@@ -336,6 +381,43 @@ def downgrade() -> None:
         "ck_run_dispatches_valid_run_dispatch_status",
         "run_dispatches",
         "status IN ('pending','sent')",
+    )
+    op.drop_constraint(
+        "ck_approvals_valid_agent_task_approval_binding",
+        "approvals",
+        type_="check",
+    )
+    op.drop_constraint(
+        "ck_approvals_valid_approval_subject",
+        "approvals",
+        type_="check",
+    )
+    op.drop_constraint(
+        "unique_approvals_agent_task_id",
+        "approvals",
+        type_="unique",
+    )
+    op.drop_constraint(
+        "fk_approvals_agent_version_id_agent_definition_versions",
+        "approvals",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "fk_approvals_agent_task_id_agent_tasks",
+        "approvals",
+        type_="foreignkey",
+    )
+    op.drop_column("approvals", "payload_digest")
+    op.drop_column("approvals", "tool_version")
+    op.drop_column("approvals", "tool_name")
+    op.drop_column("approvals", "agent_version_id")
+    op.drop_column("approvals", "agent_task_id")
+    op.execute("DELETE FROM approvals WHERE assessment_id IS NULL")
+    op.alter_column(
+        "approvals",
+        "assessment_id",
+        existing_type=postgresql.UUID(as_uuid=True),
+        nullable=False,
     )
     op.drop_constraint(
         "ck_run_dispatches_valid_run_dispatch_task_binding",

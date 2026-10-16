@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -97,6 +97,25 @@ class OrgPolicy(BaseModel):
     codeowners: str | None = Field(default=None, max_length=50_000)
     #: Maps a CODEOWNERS token (for example ``@payments-team``) to a tenant member id.
     codeowner_members: dict[str, uuid.UUID] = Field(default_factory=dict, max_length=500)
+    #: Tenant-wide custom-agent restrictions. These values only narrow immutable agent
+    #: versions and are re-evaluated immediately before every approved tool execution.
+    agent_disabled_tools: list[str] = Field(default_factory=list, max_length=500)
+    agent_allowed_side_effects: list[
+        Literal["read", "tenant_write", "external_write", "active_security"]
+    ] = Field(
+        default_factory=lambda: [
+            "read",
+            "tenant_write",
+            "external_write",
+            "active_security",
+        ],
+        max_length=4,
+    )
+    agent_tool_approval_overrides: dict[str, Literal["never", "policy", "always"]] = Field(
+        default_factory=dict, max_length=500
+    )
+    agent_max_tool_timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    agent_max_calls_per_tool: int = Field(default=20, ge=0, le=10_000)
     risk_weights: RiskWeights = Field(default_factory=RiskWeights)
 
     @field_validator("sla_targets_days")

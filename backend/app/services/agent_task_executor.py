@@ -9,16 +9,25 @@ import secrets
 import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.tools.policy import EffectiveTool, OrganizationToolPolicy, resolve_effective_tools
+from app.core.errors import ConflictError, PermissionDeniedError
 from app.db.base import utcnow
-from app.db.enums import AgentTaskAttemptStatus, AgentTaskStatus
+from app.db.enums import AgentTaskAttemptStatus, AgentTaskStatus, ApprovalDecision, Role
 from app.db.models.agent import AgentRun, RunDispatch
+from app.db.models.agent_definition import AgentDefinitionVersion, AgentVersionTool
 from app.db.models.agent_task import AgentEvidence, AgentTask, AgentTaskAttempt
+from app.db.models.assessment import Approval
+from app.db.models.identity import Membership, Organization
 from app.services.agent_scheduler import release_ready_tasks
+from app.services.approval import task_approval_digest
+from app.services.context import Principal
+from app.services.organization import load_policy
 from app.worker.dispatch import stage_task_dispatch
 
 _SETTLEMENT_STATUSES = frozenset(
@@ -80,6 +89,28 @@ class TaskHandler(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovedTaskExecutionContext:
+    """Trusted, execution-time authority for one exact approved tool invocation."""
+
+    organization_id: uuid.UUID
+    run_id: uuid.UUID
+    task_id: uuid.UUID
+    approval_id: uuid.UUID
+    agent_version_id: uuid.UUID
+    tool_name: str
+    tool_version: int
+    input_payload: dict[str, Any]
+    idempotency_key: str
+    principal: Principal
+    effective_tool: EffectiveTool
+
+
+class ApprovedTaskProvider(Protocol):
+    def __call__(self, context: ApprovedTaskExecutionContext) -> Awaitable[Any]:
+        ...
+
+
 def _token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -97,6 +128,175 @@ def _result_digest(result: TaskExecutionResult) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _aware(value: dt.datetime) -> dt.datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=dt.UTC)
+
+
+def _organization_tool_policy(organization: Organization) -> OrganizationToolPolicy:
+    policy = load_policy(organization)
+    return OrganizationToolPolicy(
+        disabled_tools=frozenset(policy.agent_disabled_tools),
+        allowed_side_effects=frozenset(policy.agent_allowed_side_effects),
+        max_timeout_seconds=policy.agent_max_tool_timeout_seconds,
+        max_calls_per_tool=policy.agent_max_calls_per_tool,
+        approval_overrides=dict(policy.agent_tool_approval_overrides),
+    )
+
+
+async def execute_approved_task(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    provider: ApprovedTaskProvider,
+) -> Any:
+    """Revalidate a human grant and current authority before the provider side effect."""
+
+    approval = (
+        await session.execute(
+            select(Approval)
+            .where(
+                Approval.id == approval_id,
+                Approval.organization_id == organization_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if approval is None or approval.agent_task_id is None:
+        raise ConflictError("agent task approval is unavailable")
+    if approval.decision not in {
+        ApprovalDecision.APPROVED.value,
+        ApprovalDecision.APPROVED_ALL.value,
+        ApprovalDecision.CUSTOMIZED.value,
+    }:
+        raise ConflictError("agent task approval is not granted")
+    if approval.expires_at is not None and _aware(approval.expires_at) <= utcnow():
+        approval.decision = ApprovalDecision.EXPIRED.value
+        approval.resolved_at = utcnow()
+        await session.flush()
+        raise ConflictError("agent task approval has expired")
+    if approval.resolved_by_id is None or approval.agent_version_id is None:
+        raise ConflictError("agent task approval binding is incomplete")
+
+    task = (
+        await session.execute(
+            select(AgentTask)
+            .where(
+                AgentTask.id == approval.agent_task_id,
+                AgentTask.organization_id == organization_id,
+                AgentTask.run_id == approval.agent_run_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if task is None or task.status != AgentTaskStatus.AWAITING_APPROVAL.value:
+        raise ConflictError("approved agent task is no longer executable")
+    if (
+        task.tool_name is None
+        or approval.tool_name != task.tool_name
+        or approval.tool_version != task.tool_version
+        or approval.payload_digest != task_approval_digest(task, approval.agent_version_id)
+        or approval.requested_payload != task.input_payload
+        or approval.approved_payload != task.input_payload
+    ):
+        raise ConflictError("approved agent task payload or executor binding changed")
+    run = (
+        await session.execute(
+            select(AgentRun).where(
+                AgentRun.id == task.run_id,
+                AgentRun.organization_id == organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None or run.status in {"completed", "failed", "cancelled"}:
+        raise ConflictError("approved agent run is no longer executable")
+
+    membership = (
+        await session.execute(
+            select(Membership).where(
+                Membership.organization_id == organization_id,
+                Membership.user_id == approval.resolved_by_id,
+                Membership.accepted_at.isnot(None),
+            )
+        )
+    ).scalar_one_or_none()
+    organization = await session.get(Organization, organization_id)
+    version = (
+        await session.execute(
+            select(AgentDefinitionVersion).where(
+                AgentDefinitionVersion.id == approval.agent_version_id,
+                AgentDefinitionVersion.organization_id == organization_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if membership is None or organization is None or not organization.is_active or version is None:
+        raise PermissionDeniedError("approved agent authority is no longer active")
+    assignments = list(
+        (
+            await session.execute(
+                select(AgentVersionTool).where(
+                    AgentVersionTool.organization_id == organization_id,
+                    AgentVersionTool.agent_version_id == version.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    human = Principal(
+        user_id=approval.resolved_by_id,
+        organization_id=organization_id,
+        role=Role(membership.role),
+    )
+    agent_principal = Principal.for_agent(organization_id=organization_id, on_behalf_of=human)
+    configured = SimpleNamespace(
+        **{column.name: getattr(version, column.name) for column in version.__table__.columns},
+        tools=assignments,
+    )
+    effective = resolve_effective_tools(
+        agent_principal,
+        configured,
+        _organization_tool_policy(organization),
+    )
+    tool = effective.tools.get(task.tool_name)
+    if tool is None or tool.spec.version != task.tool_version:
+        raise PermissionDeniedError("approved agent tool is no longer permitted")
+    try:
+        tool.spec.input_model.model_validate(task.input_payload)
+    except ValueError as exc:
+        raise ConflictError("approved agent task payload no longer matches its schema") from exc
+
+    context = ApprovedTaskExecutionContext(
+        organization_id=organization_id,
+        run_id=task.run_id,
+        task_id=task.id,
+        approval_id=approval.id,
+        agent_version_id=version.id,
+        tool_name=task.tool_name,
+        tool_version=task.tool_version,
+        input_payload=dict(task.input_payload),
+        idempotency_key=task.idempotency_key,
+        principal=agent_principal,
+        effective_tool=tool,
+    )
+    task.status = AgentTaskStatus.RUNNING.value
+    task.started_at = task.started_at or utcnow()
+    await session.flush()
+    try:
+        result = await provider(context)
+    except Exception as exc:
+        task.status = AgentTaskStatus.FAILED.value
+        task.failure_code = type(exc).__name__
+        task.failure_detail = "Approved provider execution failed."
+        task.settled_at = utcnow()
+        await session.flush()
+        raise
+    task.status = AgentTaskStatus.COMPLETED.value
+    task.output_summary = {"approved_execution": True}
+    task.settled_at = utcnow()
+    await session.flush()
+    return result
 
 
 async def claim_task(
@@ -425,11 +625,14 @@ async def recover_stale_tasks(
 
 
 __all__ = [
+    "ApprovedTaskExecutionContext",
+    "ApprovedTaskProvider",
     "TaskClaim",
     "TaskEvidenceRecord",
     "TaskExecutionResult",
     "TaskHandler",
     "claim_task",
+    "execute_approved_task",
     "execute_task",
     "heartbeat_task",
     "recover_stale_tasks",
