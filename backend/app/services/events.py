@@ -63,6 +63,7 @@ log = structlog.get_logger(__name__)
 #: stage transitions -- enough that a reconnect inside one node's execution recovers
 #: everything it missed -- without turning Redis into the event store.
 REPLAY_LIMIT = 20
+RUN_REPLAY_LIMIT = 500
 
 #: Replay buffers outlive a disconnect but not an engagement. A run can sit at the
 #: approval interrupt for ``agent.approval_ttl_hours`` (72 by default), so this must
@@ -92,12 +93,22 @@ def channel_for(settings: Settings, session_id: uuid.UUID) -> str:
     return f"{settings.redis.event_channel_prefix}:session:{session_id}"
 
 
+def run_channel_for(settings: Settings, run_id: uuid.UUID) -> str:
+    """The live pub/sub channel for one durable run."""
+
+    return f"{settings.redis.event_channel_prefix}:run:{run_id}"
+
+
 def _replay_key(settings: Settings, session_id: uuid.UUID) -> str:
     return f"{settings.redis.event_channel_prefix}:replay:{session_id}"
 
 
 def _seq_key(settings: Settings, session_id: uuid.UUID) -> str:
     return f"{settings.redis.event_channel_prefix}:seq:{session_id}"
+
+
+def _run_replay_key(settings: Settings, run_id: uuid.UUID) -> str:
+    return f"{settings.redis.event_channel_prefix}:run-replay:{run_id}"
 
 
 def _now() -> dt.datetime:
@@ -172,6 +183,12 @@ class EventBus:
             pipe.rpush(replay, payload)
             pipe.ltrim(replay, -REPLAY_LIMIT, -1)
             pipe.expire(replay, REPLAY_TTL_SECONDS)
+            if event.run_id is not None:
+                run_replay = _run_replay_key(self._settings, event.run_id)
+                pipe.publish(run_channel_for(self._settings, event.run_id), payload)
+                pipe.rpush(run_replay, payload)
+                pipe.ltrim(run_replay, -RUN_REPLAY_LIMIT, -1)
+                pipe.expire(run_replay, REPLAY_TTL_SECONDS)
             await pipe.execute()
         except RedisError as exc:
             log.warning(
@@ -204,6 +221,20 @@ class EventBus:
             return []
         events = [e for e in (_parse(item) for item in raw) if e is not None]
         return [e for e in events if e.seq > after_seq]
+
+    async def replay_run(self, run_id: uuid.UUID, *, after_seq: int = 0) -> list[AgentEvent]:
+        """Bounded run history for DAG screens, excluding the caller's rendered cursor."""
+
+        try:
+            raw = await cast(
+                Awaitable[list[str]],
+                self._r.lrange(_run_replay_key(self._settings, run_id), 0, -1),
+            )
+        except RedisError as exc:
+            log.warning("event.run_replay_failed", run_id=str(run_id), error=type(exc).__name__)
+            return []
+        events = [event for event in (_parse(item) for item in raw) if event is not None]
+        return [event for event in events if event.run_id == run_id and event.seq > after_seq]
 
     async def subscribe(
         self, session_id: uuid.UUID, *, after_seq: int = 0
@@ -246,6 +277,35 @@ class EventBus:
                 # means connections are reclaimed by timeout instead of returned, which
                 # surfaces much later as pool exhaustion.
                 log.debug("event.unsubscribe_failed", error=type(exc).__name__)
+
+    async def subscribe_run(
+        self, run_id: uuid.UUID, *, after_seq: int = 0
+    ) -> AsyncIterator[AgentEvent]:
+        """Yield missed and live events for one run without leaking sibling-session events."""
+
+        pubsub = self._r.pubsub(ignore_subscribe_messages=True)
+        await pubsub.subscribe(run_channel_for(self._settings, run_id))
+        highest = after_seq
+        try:
+            for event in await self.replay_run(run_id, after_seq=after_seq):
+                highest = max(highest, event.seq)
+                yield event
+            while True:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=_POLL_TIMEOUT_SECONDS
+                )
+                if message is None:
+                    continue
+                live = _parse(message.get("data"))
+                if live is None or live.run_id != run_id or live.seq <= highest:
+                    continue
+                highest = live.seq
+                yield live
+        finally:
+            try:
+                await pubsub.aclose()
+            except RedisError as exc:
+                log.debug("event.run_unsubscribe_failed", error=type(exc).__name__)
 
 
 def _parse(raw: object) -> AgentEvent | None:

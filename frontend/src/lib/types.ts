@@ -1922,12 +1922,61 @@ export interface AgentSpecialistTaskOut {
   completed_at: IsoDateTime | null;
 }
 
+export type AgentTaskStatus =
+  | "pending"
+  | "blocked"
+  | "ready"
+  | "queued"
+  | "running"
+  | "awaiting_approval"
+  | "completed"
+  | "degraded"
+  | "skipped"
+  | "failed"
+  | "rejected"
+  | "cancelled";
+
+export interface AgentEvidenceOut {
+  id: Uuid;
+  evidence_key: string;
+  kind: "observation" | "artifact" | "provider_receipt" | "approval" | "report" | "metric";
+  artifact_reference: string;
+  content_digest: string;
+  content_type: string | null;
+  summary: Record<string, unknown>;
+  verified: boolean;
+  produced_at: IsoDateTime;
+}
+
+export interface AgentTaskOut {
+  id: Uuid;
+  task_key: string;
+  kind: "agent" | "tool" | "approval" | "join" | "decision" | "finalize";
+  status: AgentTaskStatus;
+  depends_on: string[];
+  required: boolean;
+  plan_index: number;
+  priority: number;
+  attempt_count: number;
+  max_attempts: number;
+  tool_name: string | null;
+  provider: string | null;
+  output_summary: Record<string, unknown>;
+  failure_code: string | null;
+  failure_detail: string | null;
+  started_at: IsoDateTime | null;
+  settled_at: IsoDateTime | null;
+  cancellation_requested_at: IsoDateTime | null;
+  evidence: AgentEvidenceOut[];
+}
+
 export interface AgentRunOut {
   id: Uuid;
   session_id: Uuid | null;
   assessment_id: Uuid | null;
   thread_id: string;
   graph: string;
+  objective: string | null;
   status: AgentRunStatus;
   current_node: string | null;
   interrupt_kind: string | null;
@@ -1939,10 +1988,18 @@ export interface AgentRunOut {
   total_input_tokens: number;
   total_output_tokens: number;
   tool_call_count: number;
+  total_spend_micros: number;
   started_at: IsoDateTime | null;
   completed_at: IsoDateTime | null;
   steps: AgentStepOut[];
   specialist_tasks: AgentSpecialistTaskOut[];
+  tasks?: AgentTaskOut[];
+  stop_reason?: string | null;
+}
+
+export interface AgentRunCreateIn {
+  session_id: Uuid;
+  objective: string;
 }
 
 export interface AgentSessionOut {

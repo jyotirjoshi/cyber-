@@ -53,6 +53,8 @@ def _task_scope_fk(name: str, local_task_column: str) -> sa.ForeignKeyConstraint
 
 
 def upgrade() -> None:
+    op.add_column("agent_runs", sa.Column("objective", sa.Text(), nullable=True))
+    op.add_column("agent_runs", sa.Column("stop_reason", sa.String(80), nullable=True))
     op.create_table(
         "agent_tasks",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -470,3 +472,5 @@ def downgrade() -> None:
         op.drop_index(f"ix_{table}_created_at", table_name=table)
         op.drop_index(f"ix_{table}_organization_id", table_name=table)
         op.drop_table(table)
+    op.drop_column("agent_runs", "stop_reason")
+    op.drop_column("agent_runs", "objective")

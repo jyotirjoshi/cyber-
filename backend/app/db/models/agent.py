@@ -420,6 +420,9 @@ class AgentRun(Base, TenantMixin, TimestampMixin):
     thread_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
     #: Graph name, e.g. "assessment" or "chat".
     graph: Mapped[str] = mapped_column(String(60), nullable=False, default="assessment")
+    #: Operator objective for generic multi-agent runs. Assessment runs derive their
+    #: objective from the linked assessment and therefore leave this null.
+    objective: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, default=AgentRunStatus.QUEUED.value, index=True
     )
@@ -444,6 +447,8 @@ class AgentRun(Base, TenantMixin, TimestampMixin):
     #: User-safe failure text plus the taxonomy category (FR-040).
     failure_reason: Mapped[str | None] = mapped_column(Text)
     failure_category: Mapped[str | None] = mapped_column(String(40))
+    #: Deterministic supervisor terminal reason. Successful stops are not failures.
+    stop_reason: Mapped[str | None] = mapped_column(String(80))
 
     #: LangSmith run URL, so "why did the agent do that?" starts from a trace rather
     #: than from log archaeology (section 58).

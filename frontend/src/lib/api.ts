@@ -24,6 +24,7 @@ import type {
   AgentMemoryOut,
   AgentMemoryUpsertIn,
   AgentRunOut,
+  AgentRunCreateIn,
   AgentSessionDetailOut,
   AgentSessionAutonomyIn,
   AgentSessionOut,
@@ -828,6 +829,20 @@ export const api = {
         query: { after_seq: afterSeq },
       }),
     run: (id: string) => request<AgentRunOut>("GET", `/agent/runs/${id}`),
+    createRun: (body: AgentRunCreateIn) =>
+      request<AgentRunOut>("POST", "/agent/runs", { body }),
+    runEvents: (id: string, afterSeq = 0) =>
+      request<AgentEvent[]>("GET", `/agent/runs/${id}/events`, {
+        query: { after_seq: afterSeq },
+      }),
+    cancelRun: (id: string) =>
+      request<AgentRunOut>("POST", `/agent/runs/${id}/cancel`),
+    retryRunTask: (runId: string, taskId: string) =>
+      request<AgentRunOut>("POST", `/agent/runs/${runId}/tasks/${taskId}/retry`),
+    approveRunTask: (runId: string, taskId: string, note?: string) =>
+      request<AgentRunOut>("POST", `/agent/runs/${runId}/tasks/${taskId}/approve`, {
+        body: { note },
+      }),
     sendMessage: (body: AgentMessageIn) =>
       request<AgentMessageOut>("POST", "/agent/messages", { body }),
   },

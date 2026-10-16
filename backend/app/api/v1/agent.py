@@ -59,9 +59,11 @@ from app.core.errors import (
     PermissionDeniedError,
     ResourceNotFoundError,
 )
-from app.db.enums import MessageRole, Permission
+from app.db.base import utcnow
+from app.db.enums import AgentRunStatus, AgentTaskStatus, MessageRole, Permission
 from app.db.models.agent import AgentAction, AgentMessage, AgentRun, AgentSession
-from app.db.models.assessment import Assessment
+from app.db.models.agent_task import AgentBudgetReservation, AgentTask, AgentTaskDependency
+from app.db.models.assessment import Approval, Assessment
 from app.db.repository import TenantRepository, tenant_select
 from app.schemas.agent import (
     AgentActionOut,
@@ -70,10 +72,13 @@ from app.schemas.agent import (
     AgentEvent,
     AgentMessageIn,
     AgentMessageOut,
+    AgentRunCreateIn,
     AgentRunOut,
     AgentSessionAutonomyIn,
     AgentSessionDetailOut,
     AgentSessionOut,
+    AgentTaskApprovalIn,
+    AgentTaskOut,
     AssessmentWorkOut,
 )
 from app.schemas.agent_memory import AgentMemoryOut, AgentMemoryUpsertIn
@@ -84,8 +89,10 @@ from app.services import audit as audit_service
 from app.services.agent_chat import create_custom_reply, create_reply, load_assessment_run_details
 from app.services.agent_chat_actions import propose_chat_actions
 from app.services.agent_scheduler import cancel_agent_run
+from app.services.approval import grant_task_approval
 from app.services.context import Principal
 from app.services.events import EventEmitter
+from app.worker.dispatch import deliver_run_dispatch, stage_task_dispatch
 
 log = structlog.get_logger(__name__)
 
@@ -93,6 +100,63 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 _TITLE_MAX_CHARS = 80
 _MAX_SEQ_RETRIES = 3
+_RUN_TERMINAL = frozenset(
+    {
+        AgentRunStatus.COMPLETED.value,
+        AgentRunStatus.FAILED.value,
+        AgentRunStatus.CANCELLED.value,
+    }
+)
+
+
+async def _load_run_out(
+    session: AsyncSession, organization_id: uuid.UUID, run_id: uuid.UUID
+) -> AgentRunOut:
+    """Load the complete operator projection, including stable dependency keys."""
+
+    run = await TenantRepository(session, AgentRun, organization_id).get_or_404(
+        run_id,
+        selectinload(AgentRun.steps),
+        selectinload(AgentRun.specialist_tasks),
+        selectinload(AgentRun.tasks).selectinload(AgentTask.evidence),
+    )
+    task_by_id = {task.id: task for task in run.tasks}
+    dependencies = (
+        (
+            await session.execute(
+                select(AgentTaskDependency).where(
+                    AgentTaskDependency.organization_id == organization_id,
+                    AgentTaskDependency.run_id == run_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    depends_on: dict[uuid.UUID, list[str]] = {task.id: [] for task in run.tasks}
+    for edge in dependencies:
+        parent = task_by_id.get(edge.depends_on_task_id)
+        if parent is not None:
+            depends_on.setdefault(edge.task_id, []).append(parent.task_key)
+    tasks = [
+        AgentTaskOut.model_validate(task).model_copy(
+            update={"depends_on": depends_on.get(task.id, [])}
+        )
+        for task in run.tasks
+    ]
+    total_spend_micros = int(
+        (
+            await session.execute(
+                select(func.coalesce(func.sum(AgentBudgetReservation.actual_spend_micros), 0)).where(
+                    AgentBudgetReservation.organization_id == organization_id,
+                    AgentBudgetReservation.run_id == run_id,
+                )
+            )
+        ).scalar_one()
+    )
+    return AgentRunOut.model_validate(run).model_copy(
+        update={"tasks": tasks, "total_spend_micros": total_spend_micros}
+    )
 
 
 @router.get("/memories", response_model=list[AgentMemoryOut])
@@ -344,6 +408,9 @@ async def get_session(
         selectinload(AgentSession.messages),
         selectinload(AgentSession.runs).selectinload(AgentRun.steps),
         selectinload(AgentSession.runs).selectinload(AgentRun.specialist_tasks),
+        selectinload(AgentSession.runs)
+        .selectinload(AgentRun.tasks)
+        .selectinload(AgentTask.evidence),
     )
     return AgentSessionDetailOut.model_validate(convo)
 
@@ -380,9 +447,62 @@ async def get_run(
     Steps are eager-loaded for the projection. A run id from another organization is a 404.
     """
     principal.require(Permission.AGENT_CHAT)
-    repo = TenantRepository(session, AgentRun, principal.organization_id)
-    run = await repo.get_or_404(run_id, selectinload(AgentRun.steps), selectinload(AgentRun.specialist_tasks))
-    return AgentRunOut.model_validate(run)
+    return await _load_run_out(session, principal.organization_id, run_id)
+
+
+@router.post("/runs", response_model=AgentRunOut, status_code=status.HTTP_201_CREATED)
+async def create_run(
+    payload: AgentRunCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentRunOut:
+    """Create a durable generic run for the supervisor runtime.
+
+    The run is intentionally persisted before planning. The supervisor worker consumes
+    queued generic runs and materializes only a schema-validated, policy-bounded DAG.
+    """
+
+    principal.require(Permission.AGENT_CHAT)
+    await TenantRepository(session, AgentSession, principal.organization_id).get_or_404(
+        payload.session_id
+    )
+    run_id = uuid.uuid4()
+    run = AgentRun(
+        id=run_id,
+        organization_id=principal.organization_id,
+        session_id=payload.session_id,
+        triggered_by_id=principal.user_id,
+        thread_id=str(run_id),
+        graph="multi_agent",
+        objective=payload.objective.strip(),
+        status=AgentRunStatus.QUEUED.value,
+    )
+    session.add(run)
+    await audit_service.record(
+        session,
+        action="agent.run.create",
+        principal=principal,
+        resource_type="agent_run",
+        resource_id=run_id,
+        detail={"graph": "multi_agent"},
+    )
+    await session.commit()
+    return await _load_run_out(session, principal.organization_id, run_id)
+
+
+@router.get("/runs/{run_id}/events", response_model=list[AgentEvent])
+async def list_run_events(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    event_bus: EventBusDep,
+    after_seq: Annotated[int, Query(ge=0)] = 0,
+) -> list[AgentEvent]:
+    """Replay only events belonging to this tenant-scoped run after a cursor."""
+
+    principal.require(Permission.AGENT_CHAT)
+    await TenantRepository(session, AgentRun, principal.organization_id).get_or_404(run_id)
+    return await event_bus.replay_run(run_id, after_seq=after_seq)
 
 
 @router.post("/runs/{run_id}/cancel", response_model=AgentRunOut)
@@ -398,12 +518,137 @@ async def cancel_run(
         await TenantRepository(session, AgentRun, principal.organization_id).get_or_404(run_id)
         raise ResourceNotFoundError("agent run not found")
     await session.commit()
-    reloaded = await TenantRepository(session, AgentRun, principal.organization_id).get_or_404(
-        run_id,
-        selectinload(AgentRun.steps),
-        selectinload(AgentRun.specialist_tasks),
+    return await _load_run_out(session, principal.organization_id, run_id)
+
+
+@router.post("/runs/{run_id}/tasks/{task_id}/retry", response_model=AgentRunOut)
+async def retry_run_task(
+    run_id: uuid.UUID,
+    task_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    redis: RedisDep,
+    settings: SettingsDep,
+) -> AgentRunOut:
+    """Retry one settled task with a new lease generation and durable outbox record."""
+
+    principal.require(Permission.AGENT_CHAT)
+    row = (
+        await session.execute(
+            select(AgentTask, AgentRun)
+            .join(
+                AgentRun,
+                (AgentRun.id == AgentTask.run_id)
+                & (AgentRun.organization_id == AgentTask.organization_id),
+            )
+            .where(
+                AgentTask.id == task_id,
+                AgentTask.run_id == run_id,
+                AgentTask.organization_id == principal.organization_id,
+            )
+            .with_for_update()
+        )
+    ).one_or_none()
+    if row is None:
+        raise ResourceNotFoundError("agent task not found")
+    task, run = row
+    if run.status in _RUN_TERMINAL:
+        raise ConflictError("terminal runs cannot be retried")
+    if task.status not in {
+        AgentTaskStatus.FAILED.value,
+        AgentTaskStatus.DEGRADED.value,
+    }:
+        raise ConflictError("only failed or degraded tasks can be retried")
+    if task.attempt_count >= task.max_attempts:
+        raise ConflictError("the task exhausted its retry limit")
+    task.status = AgentTaskStatus.READY.value
+    task.failure_code = None
+    task.failure_detail = None
+    task.settled_at = None
+    task.available_at = utcnow()
+    dispatch = stage_task_dispatch(
+        session,
+        organization_id=principal.organization_id,
+        run_id=run_id,
+        task_id=task.id,
+        generation=task.current_lease_generation + 1,
     )
-    return AgentRunOut.model_validate(reloaded)
+    await session.commit()
+    await deliver_run_dispatch(
+        session,
+        organization_id=principal.organization_id,
+        dispatch_id=dispatch.id,
+        redis=redis,
+        settings=settings,
+    )
+    await session.commit()
+    return await _load_run_out(session, principal.organization_id, run_id)
+
+
+@router.post("/runs/{run_id}/tasks/{task_id}/approve", response_model=AgentRunOut)
+async def approve_run_task(
+    run_id: uuid.UUID,
+    task_id: uuid.UUID,
+    payload: AgentTaskApprovalIn,
+    principal: PrincipalDep,
+    session: DbSession,
+    redis: RedisDep,
+    settings: SettingsDep,
+) -> AgentRunOut:
+    """Grant the exact task payload and queue it; executor revalidates authority again."""
+
+    principal.require(Permission.AGENT_CHAT)
+    task = (
+        await session.execute(
+            select(AgentTask)
+            .join(
+                AgentRun,
+                (AgentRun.id == AgentTask.run_id)
+                & (AgentRun.organization_id == AgentTask.organization_id),
+            )
+            .where(
+                AgentTask.id == task_id,
+                AgentTask.run_id == run_id,
+                AgentTask.organization_id == principal.organization_id,
+                AgentRun.status.notin_(_RUN_TERMINAL),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if task is None:
+        raise ResourceNotFoundError("agent task not found")
+    if task.status != AgentTaskStatus.AWAITING_APPROVAL.value:
+        raise ConflictError("the task is not awaiting approval")
+    approval = (
+        await session.execute(
+            select(Approval).where(
+                Approval.organization_id == principal.organization_id,
+                Approval.agent_task_id == task.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if approval is None:
+        raise ConflictError("agent task approval is unavailable")
+    await grant_task_approval(session, principal, approval.id, note=payload.note)
+    task.status = AgentTaskStatus.READY.value
+    task.available_at = utcnow()
+    dispatch = stage_task_dispatch(
+        session,
+        organization_id=principal.organization_id,
+        run_id=run_id,
+        task_id=task.id,
+        generation=task.current_lease_generation + 1,
+    )
+    await session.commit()
+    await deliver_run_dispatch(
+        session,
+        organization_id=principal.organization_id,
+        dispatch_id=dispatch.id,
+        redis=redis,
+        settings=settings,
+    )
+    await session.commit()
+    return await _load_run_out(session, principal.organization_id, run_id)
 
 
 @router.post(

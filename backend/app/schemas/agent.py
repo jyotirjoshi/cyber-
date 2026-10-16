@@ -24,6 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.enums import (
     AgentRunStatus,
+    AgentTaskKind,
+    AgentTaskStatus,
     AssessmentStage,
     AssessmentStatus,
     MessageRole,
@@ -199,6 +201,57 @@ class AgentSpecialistTaskOut(BaseModel):
     completed_at: dt.datetime | None = None
 
 
+class AgentEvidenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    evidence_key: str
+    kind: str
+    artifact_reference: str
+    content_digest: str
+    content_type: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+    verified: bool = False
+    produced_at: dt.datetime
+
+
+class AgentTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    task_key: str
+    kind: AgentTaskKind
+    status: AgentTaskStatus
+    depends_on: list[str] = Field(default_factory=list)
+    required: bool
+    plan_index: int
+    priority: int
+    attempt_count: int
+    max_attempts: int
+    tool_name: str | None = None
+    provider: str | None = None
+    output_summary: dict[str, Any] = Field(default_factory=dict)
+    failure_code: str | None = None
+    failure_detail: str | None = None
+    started_at: dt.datetime | None = None
+    settled_at: dt.datetime | None = None
+    cancellation_requested_at: dt.datetime | None = None
+    evidence: list[AgentEvidenceOut] = Field(default_factory=list)
+
+
+class AgentRunCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID
+    objective: str = Field(min_length=1, max_length=4000)
+
+
+class AgentTaskApprovalIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class AgentRunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -209,6 +262,7 @@ class AgentRunOut(BaseModel):
     #: needs to correlate a run with its persisted state (FR-033).
     thread_id: str
     graph: str
+    objective: str | None = None
     status: AgentRunStatus
     current_node: str | None = None
     interrupt_kind: str | None = None
@@ -216,16 +270,19 @@ class AgentRunOut(BaseModel):
     resumed_count: int = 0
     failure_reason: str | None = None
     failure_category: str | None = None
+    stop_reason: str | None = None
     #: LangSmith trace link. Tracing is mandatory per the PRD, so the link is part of the
     #: API rather than something an operator has to reconstruct.
     trace_url: str | None = None
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     tool_call_count: int = 0
+    total_spend_micros: int = 0
     started_at: dt.datetime | None = None
     completed_at: dt.datetime | None = None
     steps: list[AgentStepOut] = Field(default_factory=list)
     specialist_tasks: list[AgentSpecialistTaskOut] = Field(default_factory=list)
+    tasks: list[AgentTaskOut] = Field(default_factory=list)
 
 
 class AgentSessionOut(BaseModel):

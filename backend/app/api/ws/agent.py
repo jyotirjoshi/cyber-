@@ -32,7 +32,7 @@ from pydantic import ValidationError
 from app.api.deps import DenyListDep, EventBusDep, SettingsDep
 from app.core.errors import CynuxError, PermissionDeniedError
 from app.db.enums import Permission
-from app.db.models.agent import AgentSession
+from app.db.models.agent import AgentRun, AgentSession
 from app.db.repository import TenantRepository
 from app.db.session import session_scope
 from app.schemas.agent import ClientFrame
@@ -94,6 +94,38 @@ async def agent_stream(
     log.info("agent_ws_closed", session_id=str(session_id))
 
 
+@router.websocket("/ws/agent/runs/{run_id}")
+async def agent_run_stream(
+    websocket: WebSocket,
+    run_id: uuid.UUID,
+    settings: SettingsDep,
+    deny_list: DenyListDep,
+    event_bus: EventBusDep,
+) -> None:
+    """Stream one run's replayable event sequence, excluding sibling session events."""
+
+    await websocket.accept()
+    authenticated = await _authenticate_run(websocket, run_id, settings, deny_list)
+    if authenticated is None:
+        return
+    principal, session_id = authenticated
+    after_seq = _parse_after_seq(websocket)
+    log.info("agent_run_ws_open", run_id=str(run_id), **principal.to_log_fields())
+    outbound: asyncio.Queue[str] = asyncio.Queue(maxsize=_SEND_QUEUE_MAX)
+    tasks: list[asyncio.Task[None]] = [
+        asyncio.create_task(_writer(websocket, outbound)),
+        asyncio.create_task(_pump_run_events(event_bus, run_id, outbound, after_seq)),
+        asyncio.create_task(_pump_client(websocket, session_id, outbound)),
+    ]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    log.info("agent_run_ws_closed", run_id=str(run_id))
+
+
 async def _authenticate(
     websocket: WebSocket,
     session_id: uuid.UUID,
@@ -142,6 +174,45 @@ async def _authenticate(
         return None
 
 
+async def _authenticate_run(
+    websocket: WebSocket,
+    run_id: uuid.UUID,
+    settings: SettingsDep,
+    deny_list: DenyListDep,
+) -> tuple[Principal, uuid.UUID] | None:
+    """Authenticate and return the run's session key after tenant isolation succeeds."""
+
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=_AUTH_DEADLINE_SECONDS)
+    except (TimeoutError, WebSocketDisconnect):
+        await _close(websocket, _WS_UNAUTHENTICATED)
+        return None
+    try:
+        frame = ClientFrame.model_validate_json(raw)
+    except ValidationError:
+        await _close(websocket, _WS_UNAUTHENTICATED)
+        return None
+    if frame.type != "auth" or not frame.token:
+        await _close(websocket, _WS_UNAUTHENTICATED)
+        return None
+    try:
+        async with session_scope(settings) as db:
+            user, claims = await authenticate_token(db, deny_list, frame.token, settings=settings)
+            principal = await resolve_principal(db, user, claims)
+            principal.require(Permission.AGENT_CHAT)
+            run = await TenantRepository(db, AgentRun, principal.organization_id).get(run_id)
+        if run is None or run.session_id is None:
+            await _close(websocket, _WS_NOT_FOUND)
+            return None
+        return principal, run.session_id
+    except PermissionDeniedError:
+        await _close(websocket, _WS_FORBIDDEN)
+        return None
+    except CynuxError:
+        await _close(websocket, _WS_UNAUTHENTICATED)
+        return None
+
+
 async def _writer(websocket: WebSocket, outbound: asyncio.Queue[str]) -> None:
     """The sole task that calls ``send`` on the socket, so frames never interleave."""
     while True:
@@ -154,6 +225,13 @@ async def _pump_events(
 ) -> None:
     """Backfill the missed backlog then stream live events onto the outbound queue."""
     async for event in bus.subscribe(session_id, after_seq=after_seq):
+        await outbound.put(event_to_frame(event))
+
+
+async def _pump_run_events(
+    bus: EventBus, run_id: uuid.UUID, outbound: asyncio.Queue[str], after_seq: int
+) -> None:
+    async for event in bus.subscribe_run(run_id, after_seq=after_seq):
         await outbound.put(event_to_frame(event))
 
 
