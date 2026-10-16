@@ -72,6 +72,7 @@ Describe "Cynux production release orchestration" {
         $compute | Should Match 'cynux-backend-image'
         $compute | Should Match 'cynux-multi-agent-worker-concurrency'
         $refresh | Should Match 'CYNUX_AGENT__WORKER_MAX_CONCURRENCY'
+        $refresh | Should Match 'CYNUX_AGENT__TASK_LEASE_SECONDS'
         $refresh | Should Match 'systemctl restart cynux-worker\.service'
     }
 
