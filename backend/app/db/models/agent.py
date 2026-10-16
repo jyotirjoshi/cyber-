@@ -287,10 +287,14 @@ class RunDispatch(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "dispatch_key", name="unique_run_dispatch_key"),
-        CheckConstraint("action IN ('start','resume','task')", name="valid_run_dispatch_action"),
+        CheckConstraint(
+            "action IN ('start','resume','task','supervise')",
+            name="valid_run_dispatch_action",
+        ),
         CheckConstraint(
             "(action = 'task' AND task_id IS NOT NULL) OR "
-            "((action = 'start' OR action = 'resume') AND task_id IS NULL)",
+            "((action = 'start' OR action = 'resume' OR action = 'supervise') "
+            "AND task_id IS NULL)",
             name="valid_run_dispatch_task_binding",
         ),
         CheckConstraint(

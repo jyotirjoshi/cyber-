@@ -66,6 +66,7 @@ class RunAction(StrEnum):
     START = "start"
     RESUME = "resume"
     TASK = "task"
+    SUPERVISE = "supervise"
 
 
 @dataclass(frozen=True, slots=True)

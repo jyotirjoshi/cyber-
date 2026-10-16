@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "e2e": "playwright test",
     "test": "vitest",
     "lint": "next lint",
     "typecheck": "tsc --noEmit"
@@ -21,6 +22,7 @@
     "postcss": "^8.5.26"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.1",
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",

@@ -21,6 +21,7 @@ a customer's assessment.
 from __future__ import annotations
 
 import functools
+import uuid
 from typing import Annotated, Literal
 from urllib.parse import quote_plus
 
@@ -852,6 +853,21 @@ class FeatureSettings(BaseSettings):
 
     custom_agents: bool = True
     internal_knowledge: bool = True
+    multi_agent: bool = False
+    #: Empty means every organization after the global switch is enabled. A non-empty
+    #: list is the staged canary boundary and is evaluated on every create/worker claim.
+    multi_agent_canary_org_ids: StrList = Field(default_factory=list)
+
+    @field_validator("multi_agent_canary_org_ids", mode="before")
+    @classmethod
+    def _parse_canaries(cls, value: object) -> object:
+        return _csv(value)
+
+    def multi_agent_enabled_for(self, organization_id: uuid.UUID) -> bool:
+        if not self.multi_agent:
+            return False
+        canaries = {str(value).strip().lower() for value in self.multi_agent_canary_org_ids}
+        return not canaries or str(organization_id).lower() in canaries
 
 
 class KnowledgeSettings(BaseSettings):
@@ -877,6 +893,21 @@ class AgentSettings(BaseSettings):
     model_config = _cfg("CYNUX_AGENT__")
 
     max_concurrent_runs_per_org: int = Field(default=1, ge=1, le=32)
+    multi_agent_max_tasks: int = Field(default=30, ge=1, le=100)
+    multi_agent_max_depth: int = Field(default=3, ge=1, le=10)
+    multi_agent_max_parallel_tasks: int = Field(default=3, ge=1, le=30)
+    multi_agent_default_runtime_seconds: int = Field(default=7_200, ge=60, le=28_800)
+    multi_agent_decision_waves: int = Field(default=3, ge=1, le=12)
+    multi_agent_max_tool_calls: int = Field(default=20, ge=0, le=500)
+    multi_agent_max_input_tokens: int = Field(default=100_000, ge=1_000, le=2_000_000)
+    multi_agent_max_output_tokens: int = Field(default=20_000, ge=100, le=200_000)
+    multi_agent_max_spend_micros: int = Field(default=1_000_000, ge=0, le=10_000_000_000)
+    task_reservation_ttl_seconds: int = Field(default=900, ge=1, le=86_400)
+    task_lease_seconds: int = Field(default=90, ge=15, le=3_600)
+    stale_lease_alert_seconds: int = Field(default=180, ge=30, le=86_400)
+    queue_latency_alert_seconds: int = Field(default=120, ge=10, le=86_400)
+    worker_max_concurrency: int = Field(default=4, ge=1, le=64)
+    provider_max_parallel_tasks: dict[str, int] = Field(default_factory=dict)
     #: Hard budgets for the post-evidence adaptive specialist loop.  These are
     #: deterministic server policy; a model cannot raise them in its response.
     adaptive_max_rounds: int = Field(default=3, ge=0, le=12)

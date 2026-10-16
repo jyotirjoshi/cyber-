@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import utcnow
 from app.db.enums import AgentRunStatus, AgentTaskKind, AgentTaskStatus
 from app.db.models.agent import AgentRun, RunDispatch
-from app.db.models.agent_task import AgentTask, AgentTaskDependency
+from app.db.models.agent_task import AgentBudgetReservation, AgentTask, AgentTaskDependency
 from app.db.models.assessment import Approval
 from app.schemas.agent_plan import AgentPlanCondition, ValidatedAgentPlan
 from app.worker.dispatch import stage_task_dispatch
@@ -343,6 +343,73 @@ async def release_ready_tasks(
     return released
 
 
+async def finalize_run_if_settled(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> AgentRun | None:
+    """Settle a run only when every persisted task is terminal.
+
+    Missing events never imply success: the database task states are authoritative.
+    Required failed/rejected/cancelled tasks fail the run; optional failures complete
+    with an explicit degraded stop reason.
+    """
+
+    run = await _locked_run(session, organization_id, run_id)
+    if run is None or run.status in _RUN_TERMINAL:
+        return run
+    tasks = list(
+        (
+            await session.execute(
+                select(AgentTask).where(
+                    AgentTask.organization_id == organization_id,
+                    AgentTask.run_id == run_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not tasks or any(task.status not in _TERMINAL for task in tasks):
+        return run
+    required_failures = [task for task in tasks if task.required and task.status in _FAILURE]
+    optional_failures = [task for task in tasks if not task.required and task.status in _FAILURE]
+    run.completed_at = utcnow()
+    run.current_node = "finalize"
+    if required_failures:
+        run.status = AgentRunStatus.FAILED.value
+        run.stop_reason = "policy_blocked"
+        run.failure_category = "task_failure"
+        run.failure_reason = (
+            f"{len(required_failures)} required agent task(s) did not complete successfully."
+        )
+    else:
+        run.status = AgentRunStatus.COMPLETED.value
+        run.stop_reason = "objective_complete"
+        if optional_failures:
+            run.failure_category = "degraded"
+            run.failure_reason = (
+                f"Completed with {len(optional_failures)} optional task degradation(s)."
+            )
+    reservation = (
+        await session.execute(
+            select(AgentBudgetReservation)
+            .where(
+                AgentBudgetReservation.organization_id == organization_id,
+                AgentBudgetReservation.run_id == run_id,
+                AgentBudgetReservation.reservation_key == "supervisor-plan-v1",
+                AgentBudgetReservation.status == "reserved",
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if reservation is not None:
+        reservation.status = "settled"
+        reservation.settled_at = utcnow()
+    await session.flush()
+    return run
+
+
 async def settle_join(
     session: AsyncSession,
     organization_id: uuid.UUID,
@@ -479,6 +546,7 @@ __all__ = [
     "PlanMaterializationConflict",
     "cancel_agent_run",
     "cancel_run_tasks",
+    "finalize_run_if_settled",
     "materialize_plan",
     "release_ready_tasks",
     "settle_join",

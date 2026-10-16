@@ -123,6 +123,8 @@ Describe "Cynux production release orchestration" {
         $verify | Should Match 'storage", "cp"'
         $verify | Should Match 'wss://cynux-api-\$projectNumber\.\$region\.run\.app'
         $verify | Should Match "systemctl is-active cynux-worker"
+        $verify | Should Match "/ws/agent/runs/"
+        $verify | Should Match "CYNUX_AGENT__WORKER_MAX_CONCURRENCY"
         $verify | Should Match 'networkInterfaces\[0\].networkIP'
     }
 

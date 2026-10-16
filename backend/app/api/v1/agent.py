@@ -62,6 +62,7 @@ from app.core.errors import (
 from app.db.base import utcnow
 from app.db.enums import AgentRunStatus, AgentTaskStatus, MessageRole, Permission
 from app.db.models.agent import AgentAction, AgentMessage, AgentRun, AgentSession
+from app.db.models.agent_definition import AgentDefinitionVersion
 from app.db.models.agent_task import AgentBudgetReservation, AgentTask, AgentTaskDependency
 from app.db.models.assessment import Approval, Assessment
 from app.db.repository import TenantRepository, tenant_select
@@ -92,7 +93,8 @@ from app.services.agent_scheduler import cancel_agent_run
 from app.services.approval import grant_task_approval
 from app.services.context import Principal
 from app.services.events import EventEmitter
-from app.worker.dispatch import deliver_run_dispatch, stage_task_dispatch
+from app.worker import RunAction
+from app.worker.dispatch import deliver_run_dispatch, stage_run_dispatch, stage_task_dispatch
 
 log = structlog.get_logger(__name__)
 
@@ -455,6 +457,8 @@ async def create_run(
     payload: AgentRunCreateIn,
     principal: PrincipalDep,
     session: DbSession,
+    redis: RedisDep,
+    settings: SettingsDep,
 ) -> AgentRunOut:
     """Create a durable generic run for the supervisor runtime.
 
@@ -463,9 +467,20 @@ async def create_run(
     """
 
     principal.require(Permission.AGENT_CHAT)
-    await TenantRepository(session, AgentSession, principal.organization_id).get_or_404(
+    if not settings.features.multi_agent_enabled_for(principal.organization_id):
+        raise ResourceNotFoundError("multi-agent runs are not enabled")
+    conversation = await TenantRepository(
+        session, AgentSession, principal.organization_id
+    ).get_or_404(
         payload.session_id
     )
+    if conversation.agent_version_id is None:
+        raise ConflictError("select a configured agent before starting a multi-agent run")
+    version = await TenantRepository(
+        session, AgentDefinitionVersion, principal.organization_id
+    ).get(conversation.agent_version_id)
+    if version is None:
+        raise ConflictError("the configured agent version is unavailable")
     run_id = uuid.uuid4()
     run = AgentRun(
         id=run_id,
@@ -478,6 +493,14 @@ async def create_run(
         status=AgentRunStatus.QUEUED.value,
     )
     session.add(run)
+    dispatch = stage_run_dispatch(
+        session,
+        organization_id=principal.organization_id,
+        run_id=run_id,
+        action=RunAction.SUPERVISE,
+        principal=principal,
+    )
+    dispatch.run = run
     await audit_service.record(
         session,
         action="agent.run.create",
@@ -485,6 +508,14 @@ async def create_run(
         resource_type="agent_run",
         resource_id=run_id,
         detail={"graph": "multi_agent"},
+    )
+    await session.commit()
+    await deliver_run_dispatch(
+        session,
+        organization_id=principal.organization_id,
+        dispatch_id=dispatch.id,
+        redis=redis,
+        settings=settings,
     )
     await session.commit()
     return await _load_run_out(session, principal.organization_id, run_id)

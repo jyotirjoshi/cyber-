@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.agent import AgentRun, RunDispatch
 from app.db.models.agent_task import (
+    AgentBudgetReservation,
     AgentEvidence,
     AgentTask,
     AgentTaskAttempt,
@@ -22,6 +24,7 @@ from app.services.agent_task_executor import (
     TaskExecutionResult,
     claim_task,
     execute_task,
+    recover_all_stale_tasks,
     recover_stale_tasks,
     settle_task,
 )
@@ -73,6 +76,7 @@ async def executor_store():
         AgentTaskDependency,
         AgentTaskAttempt,
         AgentEvidence,
+        AgentBudgetReservation,
         RunDispatch,
     ):
         _copy_table(model, metadata)
@@ -85,18 +89,20 @@ async def executor_store():
         await engine.dispose()
 
 
-async def _seed_task(factory, *, max_attempts: int = 3) -> AgentTask:
+async def _seed_task(
+    factory, *, max_attempts: int = 3, organization_id: uuid.UUID = ORG_ID
+) -> AgentTask:
     async with factory() as session:
         run = AgentRun(
             id=uuid.uuid4(),
-            organization_id=ORG_ID,
+            organization_id=organization_id,
             thread_id=str(uuid.uuid4()),
             graph="multi_agent",
             status="running",
         )
         task = AgentTask(
             id=uuid.uuid4(),
-            organization_id=ORG_ID,
+            organization_id=organization_id,
             run_id=run.id,
             task_key="execute",
             kind="decision",
@@ -147,6 +153,64 @@ async def test_old_lease_cannot_settle_after_reclaim(executor_store) -> None:
     async with executor_store() as session:
         assert await settle_task(session, second, result) is True
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_long_task_renews_its_database_lease(executor_store) -> None:
+    task = await _seed_task(executor_store)
+
+    async def handler(claim):
+        await asyncio.sleep(0.8)
+        return TaskExecutionResult(status="completed", output_summary={"ok": True})
+
+    execution = asyncio.create_task(
+        execute_task(
+            ORG_ID,
+            task.id,
+            executor_store,
+            handler,
+            worker_id="worker-heartbeat",
+            lease_seconds=1,
+        )
+    )
+    await asyncio.sleep(0.55)
+    async with executor_store() as session:
+        attempt = (
+            await session.execute(
+                select(AgentTaskAttempt).where(AgentTaskAttempt.task_id == task.id)
+            )
+        ).scalar_one()
+        assert attempt.heartbeat_at > attempt.started_at
+        assert attempt.leased_until > attempt.started_at + dt.timedelta(seconds=1)
+    assert await execution is True
+
+
+@pytest.mark.asyncio
+async def test_global_recovery_redrives_expired_leases_across_tenants(executor_store) -> None:
+    second_org = uuid.UUID("20000000-0000-0000-0000-000000000002")
+    tasks = [
+        await _seed_task(executor_store, organization_id=ORG_ID),
+        await _seed_task(executor_store, organization_id=second_org),
+    ]
+    for organization_id, task in zip((ORG_ID, second_org), tasks, strict=True):
+        async with executor_store() as session:
+            assert await claim_task(
+                session,
+                organization_id,
+                task.id,
+                worker_id="worker-recovery",
+                lease_seconds=1,
+            )
+            await session.commit()
+
+    async with executor_store() as session:
+        recovered = await recover_all_stale_tasks(
+            session,
+            now=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=2),
+        )
+        await session.commit()
+
+    assert {task.id for task in recovered} == {task.id for task in tasks}
 
 
 @pytest.mark.asyncio

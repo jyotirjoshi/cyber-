@@ -2,15 +2,19 @@ locals {
   ubuntu_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64"
 
   scanner_bootstrap = templatefile("${path.module}/../templates/scanner-cloud-init.yaml.tftpl", {
-    project_id              = var.project_id
-    region                  = var.region
-    backend_image           = local.backend_image
-    database_host           = google_sql_database_instance.cynux.private_ip_address
-    database_name           = google_sql_database.cynux.name
-    database_user           = google_sql_user.cynux.name
-    artifact_bucket         = google_storage_bucket.artifacts.name
-    defectdojo_private_url  = "http://${google_compute_address.defectdojo.address}:8080"
-    defectdojo_token_secret = google_secret_manager_secret.defectdojo_api_token.secret_id
+    project_id                       = var.project_id
+    region                           = var.region
+    backend_image                    = local.backend_image
+    database_host                    = google_sql_database_instance.cynux.private_ip_address
+    database_name                    = google_sql_database.cynux.name
+    database_user                    = google_sql_user.cynux.name
+    artifact_bucket                  = google_storage_bucket.artifacts.name
+    defectdojo_private_url           = "http://${google_compute_address.defectdojo.address}:8080"
+    defectdojo_token_secret          = google_secret_manager_secret.defectdojo_api_token.secret_id
+    multi_agent_enabled              = tostring(var.multi_agent_enabled)
+    multi_agent_canary_org_ids       = join(",", var.multi_agent_canary_org_ids)
+    multi_agent_worker_concurrency   = tostring(var.multi_agent_worker_concurrency)
+    multi_agent_provider_parallelism = jsonencode(var.multi_agent_provider_parallelism)
   })
 
   defectdojo_compose = templatefile("${path.module}/../templates/defectdojo-compose.yml.tftpl", {

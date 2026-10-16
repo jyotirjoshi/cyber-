@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import json
@@ -24,7 +25,7 @@ from app.db.models.agent_definition import AgentDefinitionVersion, AgentVersionT
 from app.db.models.agent_task import AgentEvidence, AgentTask, AgentTaskAttempt
 from app.db.models.assessment import Approval
 from app.db.models.identity import Membership, Organization
-from app.services.agent_scheduler import release_ready_tasks
+from app.services.agent_scheduler import finalize_run_if_settled, release_ready_tasks
 from app.services.approval import task_approval_digest
 from app.services.context import Principal
 from app.services.organization import load_policy
@@ -39,6 +40,10 @@ _SETTLEMENT_STATUSES = frozenset(
         AgentTaskStatus.REJECTED.value,
     }
 )
+
+
+class _TaskLeaseLost(Exception):
+    """The current worker no longer owns the task generation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +139,7 @@ def _aware(value: dt.datetime) -> dt.datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=dt.UTC)
 
 
-def _organization_tool_policy(organization: Organization) -> OrganizationToolPolicy:
+def organization_tool_policy(organization: Organization) -> OrganizationToolPolicy:
     policy = load_policy(organization)
     return OrganizationToolPolicy(
         disabled_tools=frozenset(policy.agent_disabled_tools),
@@ -150,6 +155,8 @@ async def execute_approved_task(
     organization_id: uuid.UUID,
     approval_id: uuid.UUID,
     provider: ApprovedTaskProvider,
+    *,
+    manage_task_state: bool = True,
 ) -> Any:
     """Revalidate a human grant and current authority before the provider side effect."""
 
@@ -190,7 +197,10 @@ async def execute_approved_task(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if task is None or task.status != AgentTaskStatus.AWAITING_APPROVAL.value:
+    expected_statuses = {AgentTaskStatus.AWAITING_APPROVAL.value}
+    if not manage_task_state:
+        expected_statuses.add(AgentTaskStatus.RUNNING.value)
+    if task is None or task.status not in expected_statuses:
         raise ConflictError("approved agent task is no longer executable")
     if (
         task.tool_name is None
@@ -257,7 +267,7 @@ async def execute_approved_task(
     effective = resolve_effective_tools(
         agent_principal,
         configured,
-        _organization_tool_policy(organization),
+        organization_tool_policy(organization),
     )
     tool = effective.tools.get(task.tool_name)
     if tool is None or tool.spec.version != task.tool_version:
@@ -280,21 +290,24 @@ async def execute_approved_task(
         principal=agent_principal,
         effective_tool=tool,
     )
-    task.status = AgentTaskStatus.RUNNING.value
-    task.started_at = task.started_at or utcnow()
+    if manage_task_state:
+        task.status = AgentTaskStatus.RUNNING.value
+        task.started_at = task.started_at or utcnow()
     await session.flush()
     try:
         result = await provider(context)
     except Exception as exc:
-        task.status = AgentTaskStatus.FAILED.value
-        task.failure_code = type(exc).__name__
-        task.failure_detail = "Approved provider execution failed."
-        task.settled_at = utcnow()
+        if manage_task_state:
+            task.status = AgentTaskStatus.FAILED.value
+            task.failure_code = type(exc).__name__
+            task.failure_detail = "Approved provider execution failed."
+            task.settled_at = utcnow()
         await session.flush()
         raise
-    task.status = AgentTaskStatus.COMPLETED.value
-    task.output_summary = {"approved_execution": True}
-    task.settled_at = utcnow()
+    if manage_task_state:
+        task.status = AgentTaskStatus.COMPLETED.value
+        task.output_summary = {"approved_execution": True}
+        task.settled_at = utcnow()
     await session.flush()
     return result
 
@@ -488,6 +501,37 @@ async def settle_task(
                 produced_at=evidence.produced_at or now,
             )
         )
+    run = (
+        await session.execute(
+            select(AgentRun)
+            .where(
+                AgentRun.id == claim.run_id,
+                AgentRun.organization_id == claim.organization_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    input_tokens = max(0, int(result.usage.get("input_tokens", 0) or 0))
+    output_tokens = max(0, int(result.usage.get("output_tokens", 0) or 0))
+    tool_calls = max(0, int(result.usage.get("tool_calls", 0) or 0))
+    spend_micros = max(0, int(result.usage.get("spend_micros", 0) or 0))
+    if run is not None:
+        run.total_input_tokens += input_tokens
+        run.total_output_tokens += output_tokens
+        run.tool_call_count += tool_calls
+    from app.services.agent_budget import BudgetRequest, record_reserved_usage
+
+    await record_reserved_usage(
+        session,
+        claim.organization_id,
+        claim.run_id,
+        actual=BudgetRequest(
+            tasks=1,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            spend_micros=spend_micros,
+        ),
+    )
     await session.flush()
     return True
 
@@ -517,7 +561,14 @@ async def execute_task(
         await claim_session.commit()
 
     try:
-        result = await handler(claim)
+        result = await _execute_with_heartbeat(
+            claim,
+            session_factory,
+            handler,
+            lease_seconds=lease_seconds,
+        )
+    except _TaskLeaseLost:
+        return False
     except Exception as exc:
         result = TaskExecutionResult(
             status=AgentTaskStatus.FAILED.value,
@@ -539,8 +590,49 @@ async def execute_task(
             claim.organization_id,
             claim.run_id,
         )
+        await finalize_run_if_settled(
+            schedule_session,
+            claim.organization_id,
+            claim.run_id,
+        )
         await schedule_session.commit()
     return True
+
+
+async def _execute_with_heartbeat(
+    claim: TaskClaim,
+    session_factory: async_sessionmaker[AsyncSession],
+    handler: TaskHandler,
+    *,
+    lease_seconds: int,
+) -> TaskExecutionResult:
+    """Run a task while renewing its fenced lease in independent transactions."""
+
+    execution = asyncio.create_task(handler(claim), name=f"agent-task-handler-{claim.task_id}")
+    interval = max(0.25, min(float(lease_seconds) / 3.0, 30.0))
+    try:
+        while True:
+            done, _ = await asyncio.wait({execution}, timeout=interval)
+            if execution in done:
+                return await execution
+            async with session_factory() as heartbeat_session:
+                owned = await heartbeat_task(
+                    heartbeat_session,
+                    claim,
+                    lease_seconds=lease_seconds,
+                )
+                if owned:
+                    await heartbeat_session.commit()
+                else:
+                    await heartbeat_session.rollback()
+            if not owned:
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+                raise _TaskLeaseLost
+    finally:
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
 
 
 async def recover_stale_tasks(
@@ -624,6 +716,43 @@ async def recover_stale_tasks(
     return recovered
 
 
+async def recover_all_stale_tasks(
+    session: AsyncSession,
+    *,
+    now: dt.datetime | None = None,
+    organization_limit: int = 500,
+) -> list[AgentTask]:
+    """Recover expired task leases for every affected tenant in one maintenance pass."""
+
+    if not 1 <= organization_limit <= 5_000:
+        raise ValueError("organization_limit must be between 1 and 5000")
+    timestamp = now or utcnow()
+    organization_ids = list(
+        (
+            await session.execute(
+                select(AgentTaskAttempt.organization_id)
+                .where(
+                    AgentTaskAttempt.status == AgentTaskAttemptStatus.RUNNING.value,
+                    AgentTaskAttempt.leased_until <= timestamp,
+                )
+                .distinct()
+                .order_by(AgentTaskAttempt.organization_id)
+                .limit(organization_limit)
+            )
+        ).scalars()
+    )
+    recovered: list[AgentTask] = []
+    for organization_id in organization_ids:
+        recovered.extend(
+            await recover_stale_tasks(
+                session,
+                organization_id,
+                now=timestamp,
+            )
+        )
+    return recovered
+
+
 __all__ = [
     "ApprovedTaskExecutionContext",
     "ApprovedTaskProvider",
@@ -633,8 +762,10 @@ __all__ = [
     "TaskHandler",
     "claim_task",
     "execute_approved_task",
+    "organization_tool_policy",
     "execute_task",
     "heartbeat_task",
+    "recover_all_stale_tasks",
     "recover_stale_tasks",
     "settle_task",
 ]

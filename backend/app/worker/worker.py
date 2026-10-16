@@ -68,9 +68,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.registry import AgentDeps
 from app.agent.runner import AgentRunner, RunOutcome
 from app.core.config import Settings
-from app.core.errors import ConflictError, CynuxError
+from app.core.errors import ConflictError, CynuxError, PermissionDeniedError
 from app.db.enums import AgentRunStatus, AssessmentStatus, ReportFormat, ReportStatus
 from app.db.models.agent import AgentRun
+from app.db.models.agent_task import AgentTask
 from app.db.models.assessment import Assessment
 from app.db.models.report import Report
 from app.db.repository import tenant_select
@@ -78,6 +79,7 @@ from app.db.session import session_scope
 from app.integrations.storage import ObjectStorage
 from app.reporting.generate import generate as generate_report
 from app.services.agent_action import execute_approved_batch, settle_assessment_action_receipt
+from app.services.agent_task_executor import recover_all_stale_tasks
 from app.services.asm_discovery import run_due_surfaces
 from app.services.assessment import transition
 from app.services.attack_simulation import execute_pending_techniques, run_due_campaigns
@@ -225,7 +227,10 @@ class AgentWorker:
         "_settings",
         "_stopping",
         "_stream",
+        "_task_concurrency",
         "_task_handler",
+        "_task_slots",
+        "_inflight_tasks",
         "_worker_id",
     )
 
@@ -252,6 +257,9 @@ class AgentWorker:
         self._group = settings.redis.consumer_group
         self._stopping = False
         self._current_advance: asyncio.Task[RunOutcome] | None = None
+        self._task_concurrency = settings.agent.worker_max_concurrency
+        self._task_slots = asyncio.Semaphore(self._task_concurrency)
+        self._inflight_tasks: set[asyncio.Task[None]] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -284,6 +292,7 @@ class AgentWorker:
         finally:
             maintenance.cancel()
             await asyncio.gather(maintenance, return_exceptions=True)
+            await self._drain_task_dispatches(cancel=True)
             try:
                 await self._remove_liveness()
             except RedisError as exc:
@@ -305,6 +314,9 @@ class AgentWorker:
         task = self._current_advance
         if task is not None and not task.done():
             task.cancel()
+        for inflight in tuple(self._inflight_tasks):
+            if not inflight.done():
+                inflight.cancel()
 
     async def _ensure_group(self) -> None:
         """Create the consumer group (and the stream), tolerating a group that exists.
@@ -359,7 +371,7 @@ class AgentWorker:
             for message_id, fields in messages:
                 if self._stopping:
                     return
-                await self._dispatch(message_id, fields, reclaimed=False)
+                await self._dispatch_entry(message_id, fields, reclaimed=False)
 
     async def _reclaim_pending(self) -> None:
         """Claim pending entries idle longer than ``claim_idle_ms`` and dispatch them.
@@ -393,7 +405,61 @@ class AgentWorker:
             if not fields:
                 await self._ack(message_id)
                 continue
-            await self._dispatch(message_id, fields, reclaimed=True)
+            await self._dispatch_entry(message_id, fields, reclaimed=True)
+
+    async def _dispatch_entry(
+        self, message_id: str, fields: Mapping[str, str], *, reclaimed: bool
+    ) -> None:
+        """Dispatch one stream entry, parallelizing only durable DAG task messages.
+
+        Assessment and supervisor messages continue through the single-run path because
+        ``_current_advance`` is intentionally process-local state. Generic DAG tasks own
+        independent database leases, so they can safely execute in parallel up to the hard
+        worker bound. Waiting on the semaphore applies backpressure instead of claiming an
+        unbounded number of Redis entries.
+        """
+
+        if fields.get("action") != RunAction.TASK.value:
+            await self._dispatch(message_id, fields, reclaimed=reclaimed)
+            return
+        await self._task_slots.acquire()
+        if self._stopping:
+            self._task_slots.release()
+            return
+        task = asyncio.create_task(
+            self._dispatch_task_entry(message_id, fields, reclaimed=reclaimed),
+            name=f"agent-task-{message_id}",
+        )
+        self._inflight_tasks.add(task)
+        task.add_done_callback(self._task_dispatch_done)
+
+    async def _dispatch_task_entry(
+        self, message_id: str, fields: Mapping[str, str], *, reclaimed: bool
+    ) -> None:
+        try:
+            await self._dispatch(message_id, fields, reclaimed=reclaimed)
+        finally:
+            self._task_slots.release()
+
+    def _task_dispatch_done(self, task: asyncio.Task[None]) -> None:
+        self._inflight_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            log.error(
+                "worker.task_dispatch_failed",
+                worker_id=self._worker_id,
+                error=type(error).__name__,
+            )
+
+    async def _drain_task_dispatches(self, *, cancel: bool) -> None:
+        tasks = tuple(self._inflight_tasks)
+        if cancel:
+            for task in tasks:
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _dispatch(
         self, message_id: str, fields: Mapping[str, str], *, reclaimed: bool
@@ -417,6 +483,9 @@ class AgentWorker:
 
         if request.action is RunAction.TASK:
             await self._dispatch_agent_task(message_id, request)
+            return
+        if request.action is RunAction.SUPERVISE:
+            await self._dispatch_supervisor(message_id, request)
             return
 
         run_id = request.run_id
@@ -508,15 +577,86 @@ class AgentWorker:
         from app.db.session import get_sessionmaker
         from app.services.agent_task_executor import execute_task
 
+        await self._warn_if_task_queue_is_slow(ctx.organization_id, request.task_id)
         settled = await execute_task(
             ctx.organization_id,
             request.task_id,
             get_sessionmaker(self._settings),
             handler,
             worker_id=self._worker_id,
+            lease_seconds=self._settings.agent.task_lease_seconds,
         )
         if settled:
             await self._ack(message_id)
+
+    async def _warn_if_task_queue_is_slow(
+        self, organization_id: uuid.UUID, task_id: uuid.UUID
+    ) -> None:
+        async with session_scope(self._settings) as session:
+            created_at = await session.scalar(
+                tenant_select(AgentTask, organization_id)
+                .with_only_columns(AgentTask.created_at)
+                .where(AgentTask.id == task_id)
+            )
+        if created_at is None:
+            return
+        queued_at = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=dt.UTC)
+        latency = max(0.0, (_now() - queued_at).total_seconds())
+        if latency >= self._settings.agent.queue_latency_alert_seconds:
+            log.warning(
+                "worker.agent_task_queue_latency_high",
+                organization_id=str(organization_id),
+                task_id=str(task_id),
+                queue_latency_seconds=round(latency, 3),
+            )
+
+    async def _dispatch_supervisor(self, message_id: str, request: RunRequest) -> None:
+        """Materialize a generic objective exactly once, leaving transient failures pending."""
+
+        ctx = await self._load_context(request.run_id, message_id)
+        if ctx is None:
+            if await self._dead_letter(message_id, "run_missing"):
+                await self._ack(message_id)
+            return
+        from app.db.session import get_sessionmaker
+        from app.services.multi_agent_runtime import execute_supervisor_run
+
+        try:
+            await execute_supervisor_run(
+                self._settings,
+                self._deps,
+                request.run_id,
+                get_sessionmaker(self._settings),
+            )
+        except (ConflictError, PermissionDeniedError) as exc:
+            log.warning(
+                "worker.supervisor_rejected",
+                run_id=str(request.run_id),
+                error=type(exc).__name__,
+            )
+            async with session_scope(self._settings) as session:
+                run = await session.get(AgentRun, request.run_id)
+                if run is not None and run.status not in {
+                    AgentRunStatus.COMPLETED.value,
+                    AgentRunStatus.FAILED.value,
+                    AgentRunStatus.CANCELLED.value,
+                }:
+                    run.status = AgentRunStatus.FAILED.value
+                    run.failure_category = "policy"
+                    run.failure_reason = "The multi-agent supervisor could not authorize this run."
+                    run.stop_reason = "policy_blocked"
+                    run.completed_at = _now()
+                    await session.commit()
+            await self._ack(message_id)
+            return
+        except Exception as exc:
+            log.warning(
+                "worker.supervisor_retry_pending",
+                run_id=str(request.run_id),
+                error=type(exc).__name__,
+            )
+            return
+        await self._ack(message_id)
 
     def _run_slot_key(self, organization_id: uuid.UUID) -> str:
         return f"{self._stream}:run-slots:{organization_id}"
@@ -1096,6 +1236,12 @@ class AgentWorker:
         ] = (
             ("reaper", reclaim_orphans, None, "worker.maintenance_failed"),
             (
+                "agent-task-leases",
+                self._recover_agent_task_leases,
+                "worker.agent_task_leases_recovered",
+                "worker.agent_task_lease_recovery_failed",
+            ),
+            (
                 "knowledge-indexing",
                 lambda _session: run_due_knowledge_indexing(self._settings),
                 "worker.knowledge_indexed",
@@ -1256,6 +1402,9 @@ class AgentWorker:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _recover_agent_task_leases(self, session: AsyncSession) -> int:
+        return len(await recover_all_stale_tasks(session))
 
     async def _maintenance_lane(
         self,

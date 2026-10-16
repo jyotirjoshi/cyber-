@@ -90,6 +90,49 @@ variable "scanner_boot_disk_size_gb" {
   }
 }
 
+variable "multi_agent_enabled" {
+  description = "Global kill switch for durable multi-agent execution. Keep false until canary verification is complete."
+  type        = bool
+  default     = false
+}
+
+variable "multi_agent_canary_org_ids" {
+  description = "Organization UUIDs allowed while the multi-agent switch is enabled; empty enables all tenants."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for id in var.multi_agent_canary_org_ids : can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", id))
+    ])
+    error_message = "multi_agent_canary_org_ids must contain canonical UUIDs."
+  }
+}
+
+variable "multi_agent_worker_concurrency" {
+  description = "Hard upper bound for concurrent durable DAG tasks in one worker process."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.multi_agent_worker_concurrency >= 1 && var.multi_agent_worker_concurrency <= 16
+    error_message = "multi_agent_worker_concurrency must be between 1 and 16 on the initial worker host."
+  }
+}
+
+variable "multi_agent_provider_parallelism" {
+  description = "Optional per-provider concurrent task ceilings encoded into the worker policy."
+  type        = map(number)
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for name, limit in var.multi_agent_provider_parallelism : can(regex("^[a-z0-9_-]{1,40}$", name)) && limit >= 1 && limit <= 64
+    ])
+    error_message = "Provider names must be simple identifiers and limits must be between 1 and 64."
+  }
+}
+
 variable "defectdojo_version" {
   description = "Pinned upstream DefectDojo Open Source release tag."
   type        = string

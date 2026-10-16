@@ -60,6 +60,23 @@ write_files:
         printf 'CYNUX_DEFECTDOJO__VERIFY_TLS=true\n'
         printf 'CYNUX_SCANNER__NETWORK=cynux_scanner_net\n'
         printf 'CYNUX_SCANNER__ARTIFACT_WORKDIR=/var/lib/cynux/artifacts\n'
+        printf 'CYNUX_FEATURES__MULTI_AGENT=${multi_agent_enabled}\n'
+        printf 'CYNUX_FEATURES__MULTI_AGENT_CANARY_ORG_IDS=${multi_agent_canary_org_ids}\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_TASKS=30\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_DEPTH=3\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_PARALLEL_TASKS=3\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_DEFAULT_RUNTIME_SECONDS=7200\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_DECISION_WAVES=3\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_TOOL_CALLS=20\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_INPUT_TOKENS=100000\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_OUTPUT_TOKENS=20000\n'
+        printf 'CYNUX_AGENT__MULTI_AGENT_MAX_SPEND_MICROS=1000000\n'
+        printf 'CYNUX_AGENT__TASK_RESERVATION_TTL_SECONDS=900\n'
+        printf 'CYNUX_AGENT__TASK_LEASE_SECONDS=90\n'
+        printf 'CYNUX_AGENT__STALE_LEASE_ALERT_SECONDS=180\n'
+        printf 'CYNUX_AGENT__QUEUE_LATENCY_ALERT_SECONDS=120\n'
+        printf 'CYNUX_AGENT__WORKER_MAX_CONCURRENCY=${multi_agent_worker_concurrency}\n'
+        printf 'CYNUX_AGENT__PROVIDER_MAX_PARALLEL_TASKS=${multi_agent_provider_parallelism}\n'
       } > "$ENV_FILE"
       chmod 0600 "$ENV_FILE"
 

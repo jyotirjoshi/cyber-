@@ -75,7 +75,13 @@ function Invoke-CynuxVerification {
             "/api/v1/agents/definitions",
             "/api/v1/agents/tools",
             "/api/v1/knowledge/collections",
-            "/api/v1/knowledge/search"
+            "/api/v1/knowledge/search",
+            "/api/v1/agent/runs",
+            "/api/v1/agent/runs/{run_id}",
+            "/api/v1/agent/runs/{run_id}/events",
+            "/api/v1/agent/runs/{run_id}/cancel",
+            "/api/v1/agent/runs/{run_id}/tasks/{task_id}/retry",
+            "/api/v1/agent/runs/{run_id}/tasks/{task_id}/approve"
         )) {
             if (-not $schema.paths.PSObject.Properties[$path]) { throw "rollout route missing: $path" }
         }
@@ -93,6 +99,21 @@ function Invoke-CynuxVerification {
             $uri = [Uri]("wss://cynux-api-$projectNumber.$region.run.app/ws/agent/00000000-0000-0000-0000-000000000000")
             $socket.ConnectAsync($uri, $deadline.Token).GetAwaiter().GetResult()
             if ($socket.State -ne [System.Net.WebSockets.WebSocketState]::Open) { throw "WebSocket did not upgrade" }
+            $payload = [Text.Encoding]::UTF8.GetBytes('{"type":"auth","token":"verification-invalid"}')
+            $segment = [ArraySegment[byte]]::new($payload)
+            $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $deadline.Token).GetAwaiter().GetResult()
+        }
+        finally { $socket.Dispose(); $deadline.Dispose() }
+    }
+    Add-Check "multi-agent-websocket-upgrade" {
+        $socket = [System.Net.WebSockets.ClientWebSocket]::new()
+        $deadline = [Threading.CancellationTokenSource]::new(20000)
+        try {
+            $projectNumber = (Invoke-VerificationCommand $gcloud @("projects", "describe", $project, "--format=value(projectNumber)") | Select-Object -First 1).Trim()
+            if ($projectNumber -notmatch '^[0-9]+$') { throw "project number lookup failed" }
+            $uri = [Uri]("wss://cynux-api-$projectNumber.$region.run.app/ws/agent/runs/00000000-0000-0000-0000-000000000000")
+            $socket.ConnectAsync($uri, $deadline.Token).GetAwaiter().GetResult()
+            if ($socket.State -ne [System.Net.WebSockets.WebSocketState]::Open) { throw "Run WebSocket did not upgrade" }
             $payload = [Text.Encoding]::UTF8.GetBytes('{"type":"auth","token":"verification-invalid"}')
             $segment = [ArraySegment[byte]]::new($payload)
             $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $deadline.Token).GetAwaiter().GetResult()
@@ -139,6 +160,11 @@ function Invoke-CynuxVerification {
     Add-Check "worker-systemd" {
         $state = (& $gcloud compute ssh cynux-scanner-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command "sudo systemctl is-active cynux-worker" | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $state -ne "active") { throw "worker service is not active" }
+    }
+    Add-Check "worker-multi-agent-config" {
+        $command = "sudo sh -c 'grep -Eq \"^CYNUX_FEATURES__MULTI_AGENT=(true|false)$\" /etc/cynux/worker.env && grep -Eq \"^CYNUX_AGENT__WORKER_MAX_CONCURRENCY=[1-9][0-9]*$\" /etc/cynux/worker.env && grep -Eq \"^CYNUX_AGENT__TASK_LEASE_SECONDS=[1-9][0-9]*$\" /etc/cynux/worker.env' && echo configured"
+        $state = (& $gcloud compute ssh cynux-scanner-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command $command | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $state -ne "configured") { throw "worker multi-agent ceilings are missing" }
     }
     Add-Check "defectdojo-private-health" {
         $privateIp = (& $gcloud compute instances describe cynux-defectdojo-01 --project=$project --zone=$zone --format="value(networkInterfaces[0].networkIP)" | Out-String).Trim()

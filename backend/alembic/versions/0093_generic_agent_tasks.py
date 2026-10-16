@@ -201,13 +201,14 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_run_dispatches_valid_run_dispatch_action",
         "run_dispatches",
-        "action IN ('start','resume','task')",
+        "action IN ('start','resume','task','supervise')",
     )
     op.create_check_constraint(
         "ck_run_dispatches_valid_run_dispatch_task_binding",
         "run_dispatches",
         "(action = 'task' AND task_id IS NOT NULL) OR "
-        "((action = 'start' OR action = 'resume') AND task_id IS NULL)",
+        "((action = 'start' OR action = 'resume' OR action = 'supervise') "
+        "AND task_id IS NULL)",
     )
     op.drop_constraint(
         "ck_run_dispatches_valid_run_dispatch_status",

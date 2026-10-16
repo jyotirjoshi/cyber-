@@ -37,6 +37,8 @@ from app.agent.runner import AgentRunner, checkpointer_for
 from app.core.config import get_settings, validate_runtime_configuration
 from app.core.logging_conf import configure_logging
 from app.core.redis_client import close_redis, get_redis
+from app.db.session import get_sessionmaker
+from app.services.multi_agent_runtime import MultiAgentTaskHandler
 from app.services.runtime_checks import assert_worker_dependencies
 from app.worker.worker import AgentWorker
 
@@ -82,7 +84,18 @@ async def _amain() -> None:
         async with checkpointer_for(settings) as checkpointer:
             deps = AgentDeps.create(settings, redis)
             runner = AgentRunner(deps, checkpointer, worker_id=worker_id)
-            worker = AgentWorker(settings, redis, deps, runner, worker_id=worker_id)
+            worker = AgentWorker(
+                settings,
+                redis,
+                deps,
+                runner,
+                worker_id=worker_id,
+                task_handler=MultiAgentTaskHandler(
+                    settings,
+                    deps,
+                    get_sessionmaker(settings),
+                ),
+            )
             _install_signal_handlers(worker)
             try:
                 await worker.run()

@@ -68,7 +68,7 @@ def stage_run_dispatch(
     principal: Principal | None = None,
 ) -> RunDispatch:
     """Stage one idempotent run request inside the caller's transaction."""
-    if action is RunAction.START:
+    if action in {RunAction.START, RunAction.SUPERVISE}:
         if principal is None or principal.organization_id != organization_id:
             raise ValueError("A start dispatch needs the same-tenant initiating principal")
     elif principal is not None:

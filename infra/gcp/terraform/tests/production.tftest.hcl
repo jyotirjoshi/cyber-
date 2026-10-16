@@ -228,4 +228,19 @@ run "managed_foundation" {
     condition     = strcontains(google_compute_instance.scanner.metadata["user-data"], "python -m app.worker") && strcontains(google_compute_instance.scanner.metadata["user-data"], "cynux_scanner_net")
     error_message = "Scanner bootstrap must run the worker on its isolated scanner network."
   }
+
+  assert {
+    condition = (
+      local.api_env["CYNUX_FEATURES__MULTI_AGENT"] == "false" &&
+      local.api_env["CYNUX_AGENT__WORKER_MAX_CONCURRENCY"] == "4" &&
+      strcontains(google_compute_instance.scanner.metadata["user-data"], "CYNUX_FEATURES__MULTI_AGENT=false") &&
+      strcontains(google_compute_instance.scanner.metadata["user-data"], "CYNUX_AGENT__TASK_LEASE_SECONDS=90")
+    )
+    error_message = "Multi-agent execution must ship disabled with explicit API and worker ceilings."
+  }
+
+  assert {
+    condition     = length(google_logging_metric.multi_agent_events) == 4 && length(google_monitoring_alert_policy.multi_agent_events) == 4
+    error_message = "Task runtime, stale lease, queue latency, and dispatch failures need managed alerts."
+  }
 }

@@ -2,9 +2,57 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_task_messages_execute_in_parallel_with_a_hard_worker_bound(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.worker.protocol import RunAction, RunRequest
+    from app.worker.worker import AgentWorker
+
+    worker = object.__new__(AgentWorker)
+    worker._stopping = False
+    worker._task_concurrency = 2
+    worker._task_slots = asyncio.Semaphore(2)
+    worker._inflight_tasks = set()
+    worker._settings = SimpleNamespace(agent=SimpleNamespace(worker_max_concurrency=2))
+    active = 0
+    maximum = 0
+    release = asyncio.Event()
+
+    async def dispatch(self, message_id, fields, *, reclaimed):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(AgentWorker, "_dispatch", dispatch)
+    messages = [
+        RunRequest.new(uuid.uuid4(), RunAction.TASK, task_id=uuid.uuid4()).to_fields()
+        for _ in range(3)
+    ]
+
+    await worker._dispatch_entry("1-0", messages[0], reclaimed=False)
+    await worker._dispatch_entry("2-0", messages[1], reclaimed=False)
+    await asyncio.sleep(0)
+    third = asyncio.create_task(worker._dispatch_entry("3-0", messages[2], reclaimed=False))
+    await asyncio.sleep(0)
+
+    assert active == 2
+    assert maximum == 2
+    assert not third.done()
+    release.set()
+    await third
+    await worker._drain_task_dispatches(cancel=False)
+    assert maximum == 2
 
 
 @pytest.mark.asyncio
@@ -1556,32 +1604,39 @@ async def test_worker_maintenance_recovers_committed_unpublished_runs(monkeypatc
     worker._redis = object()
 
     async def one_tick(seconds):
-        worker._stopping = True
+        return None
 
     @asynccontextmanager
     async def scoped(settings):
         yield object()
 
-    async def no_op(*args, **kwargs):
-        return 0
-
     async def dispatch(session, redis, settings):
         calls.append("dispatch")
+        worker._stopping = True
         return 1
 
     async def schedule(session, settings):
         calls.append("schedule")
+        worker._stopping = True
         return 1
 
     monkeypatch.setattr(worker_module.asyncio, "sleep", one_tick)
     monkeypatch.setattr(worker_module, "session_scope", scoped)
-    monkeypatch.setattr(worker_module, "reclaim_orphans", no_op)
-    monkeypatch.setattr(worker_module, "deliver_pending", no_op)
-    monkeypatch.setattr(worker_module, "execute_approved_batch", no_op)
-    monkeypatch.setattr(worker_module, "refresh_stale_risk_batch", no_op)
     monkeypatch.setattr(worker_module, "deliver_pending_dispatches", dispatch, raising=False)
     monkeypatch.setattr(worker_module, "run_due_scans", schedule, raising=False)
-    await worker._maintenance_loop()
+    await worker._maintenance_lane(
+        lambda session: worker_module.run_due_scans(session, worker._settings),
+        "worker.recurring_scans_started",
+        "worker.recurring_scan_failed",
+    )
+    worker._stopping = False
+    await worker._maintenance_lane(
+        lambda session: worker_module.deliver_pending_dispatches(
+            session, worker._redis, worker._settings
+        ),
+        "worker.run_dispatches_published",
+        "worker.run_dispatch_failed",
+    )
     assert calls == ["schedule", "dispatch"]
 
 
@@ -1757,6 +1812,7 @@ async def test_assessment_creation_stamps_tenant_on_targets_and_append_only_auth
     from app.db.models.assessment import Assessment, AssessmentTarget, AuthorizationRecord
     from app.schemas.assessment import AssessmentCreateIn
     from app.services import assessment as service
+    from app.services import usage_metering
     from app.services.context import Principal
 
     org_id = uuid.uuid4()
@@ -1806,6 +1862,7 @@ async def test_assessment_creation_stamps_tenant_on_targets_and_append_only_auth
     monkeypatch.setattr(service, "assert_active_assessment_capacity", lambda **kwargs: None)
     monkeypatch.setattr(service, "load_entitlements", lambda entitlements: object())
     monkeypatch.setattr(service.audit_service, "record", record)
+    monkeypatch.setattr(usage_metering, "increment", record)
     session = _Session()
     await service.create_assessment(
         session,
@@ -2250,6 +2307,7 @@ async def test_worker_metrics_report_only_requesting_tenants_jobs() -> None:
                 [("queued", 3), ("running", 1), ("failed", 2)],
                 [("pending", 4)],
                 [("QUEUED", 7), ("RUNNING", 1)],
+                [("sent", 5), ("pending", 2)],
             ]
 
         async def execute(self, statement):
@@ -2257,12 +2315,18 @@ async def test_worker_metrics_report_only_requesting_tenants_jobs() -> None:
             rows = self.results.pop(0)
             return SimpleNamespace(all=lambda: rows)
 
+        async def scalar(self, statement):
+            self.statements.append(statement)
+            return 2
+
     session = _Session()
     result = await worker_metrics(principal, session)
     assert result.runs == {"queued": 3, "running": 1, "failed": 2}
     assert result.pending_dispatches == 4
     assert result.scanner_jobs == {"QUEUED": 7, "RUNNING": 1}
-    assert len(session.statements) == 3
+    assert result.notification_deliveries == {"sent": 5, "pending": 2}
+    assert result.notification_retries_due == 2
+    assert len(session.statements) == 5
     for statement in session.statements:
         sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
         assert org_id.hex in sql

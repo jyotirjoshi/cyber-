@@ -231,10 +231,46 @@ async def settle_usage(
     return reservation
 
 
+async def record_reserved_usage(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    run_id: uuid.UUID,
+    *,
+    actual: BudgetRequest,
+) -> AgentBudgetReservation | None:
+    """Atomically accumulate one task's actuals against the run reservation."""
+
+    reservation = (
+        await session.execute(
+            select(AgentBudgetReservation)
+            .where(
+                AgentBudgetReservation.organization_id == organization_id,
+                AgentBudgetReservation.run_id == run_id,
+                AgentBudgetReservation.reservation_key == "supervisor-plan-v1",
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if reservation is None or reservation.status not in {"reserved", "settled"}:
+        return reservation
+    if reservation.status == "settled":
+        raise ConflictError("settled run usage cannot be extended")
+    reservation.actual_tasks += actual.tasks
+    reservation.actual_input_tokens += actual.input_tokens
+    reservation.actual_output_tokens += actual.output_tokens
+    reservation.actual_spend_micros += actual.spend_micros
+    await session.flush()
+    from app.services.usage_metering import record_agent_usage
+
+    await record_agent_usage(session, organization_id=organization_id, actual=actual)
+    return reservation
+
+
 __all__ = [
     "BudgetLimits",
     "BudgetRemaining",
     "BudgetRequest",
     "reserve_budget",
+    "record_reserved_usage",
     "settle_usage",
 ]
