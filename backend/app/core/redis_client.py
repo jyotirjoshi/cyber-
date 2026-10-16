@@ -142,6 +142,55 @@ return {allowed, tostring(wait)}
 """  # noqa: S105 - Lua source, not a credential; S105 fires on "TOKEN" in the name.
 
 
+# Every dimension is a sorted set of random lease tokens scored by expiry time.  One
+# script removes expired members, checks every ceiling, and acquires every dimension;
+# no worker can observe or create a partially admitted task.
+AGENT_CONCURRENCY_ACQUIRE_LUA = """
+local token = ARGV[1]
+local ttl_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local conflict_enabled = tonumber(ARGV[8])
+
+for index = 1, 5 do
+  redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', now_ms)
+end
+
+for index = 1, 4 do
+  local ceiling = tonumber(ARGV[index + 3])
+  if ceiling >= 0 and redis.call('ZCARD', KEYS[index]) >= ceiling then
+    return {0, 0}
+  end
+end
+if conflict_enabled == 1 and redis.call('ZCARD', KEYS[5]) > 0 then
+  return {0, 0}
+end
+
+local expires_at = now_ms + ttl_ms
+for index = 1, 4 do
+  local ceiling = tonumber(ARGV[index + 3])
+  if ceiling >= 0 then
+    redis.call('ZADD', KEYS[index], expires_at, token)
+    redis.call('PEXPIREAT', KEYS[index], expires_at + 60000)
+  end
+end
+if conflict_enabled == 1 then
+  redis.call('ZADD', KEYS[5], expires_at, token)
+  redis.call('PEXPIREAT', KEYS[5], expires_at + 60000)
+end
+return {1, expires_at}
+"""
+
+
+AGENT_CONCURRENCY_RELEASE_LUA = """
+local token = ARGV[1]
+local removed = 0
+for index = 1, 5 do
+  removed = removed + redis.call('ZREM', KEYS[index], token)
+end
+return removed
+"""
+
+
 class TokenBucket:
     """Rate limiter for *outbound* calls, shared across API and worker processes.
 
@@ -199,6 +248,8 @@ class ResponseCache:
 
 
 __all__ = [
+    "AGENT_CONCURRENCY_ACQUIRE_LUA",
+    "AGENT_CONCURRENCY_RELEASE_LUA",
     "FixedWindowLimiter",
     "ResponseCache",
     "TokenBucket",
