@@ -67,7 +67,17 @@ class AgentTask(Base, TenantMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
     idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("agent_definition_versions.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    tool_name: Mapped[str | None] = mapped_column(String(120))
+    tool_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    input_schema_version: Mapped[str] = mapped_column(String(40), nullable=False, default="v1")
+    output_schema_version: Mapped[str] = mapped_column(String(40), nullable=False, default="v1")
     input_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    orchestration: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     output_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     plan_index: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -113,6 +123,14 @@ class AgentTask(Base, TenantMixin, TimestampMixin):
             name="valid_agent_task_status",
         ),
         CheckConstraint("plan_index >= 0", name="valid_agent_task_plan_index"),
+        CheckConstraint("tool_version > 0", name="valid_agent_task_tool_version"),
+        CheckConstraint(
+            "(kind = 'tool' AND tool_name IS NOT NULL AND agent_version_id IS NULL) OR "
+            "(kind = 'agent' AND agent_version_id IS NOT NULL AND tool_name IS NULL) OR "
+            "(kind <> 'tool' AND kind <> 'agent' AND tool_name IS NULL "
+            "AND agent_version_id IS NULL)",
+            name="valid_agent_task_executor_binding",
+        ),
         CheckConstraint("priority >= 0", name="valid_agent_task_priority"),
         CheckConstraint(
             "attempt_count >= 0 AND max_attempts BETWEEN 1 AND 10 "

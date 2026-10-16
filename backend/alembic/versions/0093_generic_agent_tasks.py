@@ -62,7 +62,13 @@ def upgrade() -> None:
         sa.Column("status", sa.String(30), nullable=False),
         sa.Column("idempotency_key", sa.String(160), nullable=False),
         sa.Column("payload_digest", sa.String(64), nullable=False),
+        sa.Column("agent_version_id", postgresql.UUID(as_uuid=True)),
+        sa.Column("tool_name", sa.String(120)),
+        sa.Column("tool_version", sa.Integer(), nullable=False),
+        sa.Column("input_schema_version", sa.String(40), nullable=False),
+        sa.Column("output_schema_version", sa.String(40), nullable=False),
         sa.Column("input_payload", postgresql.JSONB(), nullable=False),
+        sa.Column("orchestration", postgresql.JSONB(), nullable=False),
         sa.Column("output_summary", postgresql.JSONB(), nullable=False),
         sa.Column("required", sa.Boolean(), nullable=False),
         sa.Column("plan_index", sa.Integer(), nullable=False),
@@ -91,6 +97,16 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "plan_index >= 0", name=op.f("ck_agent_tasks_valid_agent_task_plan_index")
         ),
+        sa.CheckConstraint(
+            "tool_version > 0", name=op.f("ck_agent_tasks_valid_agent_task_tool_version")
+        ),
+        sa.CheckConstraint(
+            "(kind = 'tool' AND tool_name IS NOT NULL AND agent_version_id IS NULL) OR "
+            "(kind = 'agent' AND agent_version_id IS NOT NULL AND tool_name IS NULL) OR "
+            "(kind <> 'tool' AND kind <> 'agent' AND tool_name IS NULL "
+            "AND agent_version_id IS NULL)",
+            name=op.f("ck_agent_tasks_valid_agent_task_executor_binding"),
+        ),
         sa.CheckConstraint("priority >= 0", name=op.f("ck_agent_tasks_valid_agent_task_priority")),
         sa.CheckConstraint(
             "attempt_count >= 0 AND max_attempts BETWEEN 1 AND 10 "
@@ -98,6 +114,11 @@ def upgrade() -> None:
             name=op.f("ck_agent_tasks_valid_agent_task_attempts"),
         ),
         sa.ForeignKeyConstraint(["run_id"], ["agent_runs.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["agent_version_id"],
+            ["agent_definition_versions.id"],
+            ondelete="RESTRICT",
+        ),
         *_tenant_constraints(),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_agent_tasks")),
         sa.UniqueConstraint("run_id", "task_key", name="unique_agent_task_key"),
@@ -106,10 +127,40 @@ def upgrade() -> None:
     )
     _tenant_indexes("agent_tasks")
     op.create_index("ix_agent_tasks_run_plan", "agent_tasks", ["run_id", "plan_index"])
+    op.create_index("ix_agent_tasks_agent_version_id", "agent_tasks", ["agent_version_id"])
     op.create_index(
         "ix_agent_tasks_org_status_available",
         "agent_tasks",
         ["organization_id", "status", "available_at"],
+    )
+    op.add_column(
+        "run_dispatches",
+        sa.Column("task_id", postgresql.UUID(as_uuid=True), nullable=True),
+    )
+    op.create_foreign_key(
+        "fk_run_dispatches_task_id_agent_tasks",
+        "run_dispatches",
+        "agent_tasks",
+        ["task_id"],
+        ["id"],
+        ondelete="CASCADE",
+    )
+    op.create_index("ix_run_dispatches_task_id", "run_dispatches", ["task_id"])
+    op.drop_constraint(
+        "ck_run_dispatches_valid_run_dispatch_action",
+        "run_dispatches",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_run_dispatches_valid_run_dispatch_action",
+        "run_dispatches",
+        "action IN ('start','resume','task')",
+    )
+    op.create_check_constraint(
+        "ck_run_dispatches_valid_run_dispatch_task_binding",
+        "run_dispatches",
+        "(action = 'task' AND task_id IS NOT NULL) OR "
+        "((action = 'start' OR action = 'resume') AND task_id IS NULL)",
     )
 
     op.create_table(
@@ -266,6 +317,28 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_constraint(
+        "ck_run_dispatches_valid_run_dispatch_task_binding",
+        "run_dispatches",
+        type_="check",
+    )
+    op.drop_constraint(
+        "ck_run_dispatches_valid_run_dispatch_action",
+        "run_dispatches",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_run_dispatches_valid_run_dispatch_action",
+        "run_dispatches",
+        "action IN ('start','resume')",
+    )
+    op.drop_index("ix_run_dispatches_task_id", table_name="run_dispatches")
+    op.drop_constraint(
+        "fk_run_dispatches_task_id_agent_tasks",
+        "run_dispatches",
+        type_="foreignkey",
+    )
+    op.drop_column("run_dispatches", "task_id")
     explicit_indexes = {
         "agent_budget_reservations": (
             "ix_agent_budget_reservations_expiry",
@@ -281,6 +354,7 @@ def downgrade() -> None:
             "ix_agent_task_dependencies_run_task",
         ),
         "agent_tasks": (
+            "ix_agent_tasks_agent_version_id",
             "ix_agent_tasks_org_status_available",
             "ix_agent_tasks_run_plan",
         ),

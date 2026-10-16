@@ -270,6 +270,9 @@ class RunDispatch(Base, TenantMixin, TimestampMixin):
     run_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False
     )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("agent_tasks.id", ondelete="CASCADE"), index=True
+    )
     action: Mapped[str] = mapped_column(String(10), nullable=False)
     dispatch_key: Mapped[str] = mapped_column(String(160), nullable=False)
     principal: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
@@ -284,7 +287,12 @@ class RunDispatch(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint("organization_id", "dispatch_key", name="unique_run_dispatch_key"),
-        CheckConstraint("action IN ('start','resume')", name="valid_run_dispatch_action"),
+        CheckConstraint("action IN ('start','resume','task')", name="valid_run_dispatch_action"),
+        CheckConstraint(
+            "(action = 'task' AND task_id IS NOT NULL) OR "
+            "((action = 'start' OR action = 'resume') AND task_id IS NULL)",
+            name="valid_run_dispatch_task_binding",
+        ),
         CheckConstraint("status IN ('pending','sent')", name="valid_run_dispatch_status"),
         Index("ix_run_dispatches_status_available_at", "status", "available_at"),
     )

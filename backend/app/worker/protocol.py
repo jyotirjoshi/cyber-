@@ -65,6 +65,7 @@ class RunAction(StrEnum):
 
     START = "start"
     RESUME = "resume"
+    TASK = "task"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +84,7 @@ class RunRequest:
     #: ``Principal.to_dict()`` for a START (the authority to seed the run under); ``None`` for a
     #: RESUME, where the principal is recovered from the checkpoint instead.
     principal: dict[str, Any] | None = None
+    task_id: uuid.UUID | None = None
 
     @classmethod
     def new(
@@ -91,6 +93,7 @@ class RunRequest:
         action: RunAction,
         *,
         principal: dict[str, Any] | None = None,
+        task_id: uuid.UUID | None = None,
     ) -> RunRequest:
         """Build a request stamped with the current time.
 
@@ -103,6 +106,7 @@ class RunRequest:
             action=action,
             enqueued_at=dt.datetime.now(dt.UTC).isoformat(),
             principal=principal,
+            task_id=task_id,
         )
 
     def to_fields(self) -> dict[str, str]:
@@ -119,6 +123,8 @@ class RunRequest:
         }
         if self.principal is not None:
             fields["principal"] = json.dumps(self.principal, separators=(",", ":"))
+        if self.task_id is not None:
+            fields["task_id"] = str(self.task_id)
         return fields
 
     @classmethod
@@ -141,7 +147,17 @@ class RunRequest:
             action=action,
             enqueued_at=fields.get("enqueued_at", ""),
             principal=_decode_principal(fields.get("principal")),
+            task_id=_decode_optional_uuid(fields.get("task_id")),
         )
+
+
+def _decode_optional_uuid(raw: str | None) -> uuid.UUID | None:
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError as exc:
+        raise ValueError("run request task id is not a UUID") from exc
 
 
 def _decode_principal(raw: str | None) -> dict[str, Any] | None:

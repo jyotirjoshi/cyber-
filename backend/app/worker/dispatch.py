@@ -88,6 +88,33 @@ def stage_run_dispatch(
     return dispatch
 
 
+def stage_task_dispatch(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    run_id: uuid.UUID,
+    task_id: uuid.UUID,
+    generation: int,
+) -> RunDispatch:
+    """Stage one generation-specific task delivery in the existing outbox."""
+    if generation < 1:
+        raise ValueError("task dispatch generations start at one")
+    dispatch = RunDispatch(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        run_id=run_id,
+        task_id=task_id,
+        action=RunAction.TASK.value,
+        dispatch_key=f"{run_id}:task:{task_id}:{generation}",
+        principal=None,
+        status="pending",
+        attempts=0,
+        available_at=utcnow(),
+    )
+    session.add(dispatch)
+    return dispatch
+
+
 async def publish_staged_dispatch(
     dispatch: RunDispatch,
     redis: Redis,
@@ -102,6 +129,7 @@ async def publish_staged_dispatch(
         dispatch.run_id,
         RunAction(dispatch.action),
         principal=dispatch.principal,
+        task_id=dispatch.task_id,
     )
     try:
         message_id = await publish_run_request(redis, settings, request)
@@ -197,4 +225,5 @@ __all__ = [
     "publish_staged_dispatch",
     "stage_assessment_run",
     "stage_run_dispatch",
+    "stage_task_dispatch",
 ]
