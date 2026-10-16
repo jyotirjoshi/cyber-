@@ -329,9 +329,11 @@ def upgrade() -> None:
         sa.Column("reservation_key", sa.String(160), nullable=False),
         sa.Column("category", sa.String(30), nullable=False),
         sa.Column("status", sa.String(20), nullable=False),
+        sa.Column("reserved_tasks", sa.Integer(), nullable=False),
         sa.Column("reserved_input_tokens", sa.BigInteger(), nullable=False),
         sa.Column("reserved_output_tokens", sa.BigInteger(), nullable=False),
         sa.Column("reserved_spend_micros", sa.BigInteger(), nullable=False),
+        sa.Column("actual_tasks", sa.Integer(), nullable=False),
         sa.Column("actual_input_tokens", sa.BigInteger(), nullable=False),
         sa.Column("actual_output_tokens", sa.BigInteger(), nullable=False),
         sa.Column("actual_spend_micros", sa.BigInteger(), nullable=False),
@@ -347,7 +349,8 @@ def upgrade() -> None:
             name=op.f("ck_agent_budget_reservations_valid_agent_budget_reservation_status"),
         ),
         sa.CheckConstraint(
-            "reserved_input_tokens >= 0 AND reserved_output_tokens >= 0 "
+            "reserved_tasks >= 0 AND actual_tasks >= 0 AND reserved_input_tokens >= 0 "
+            "AND reserved_output_tokens >= 0 "
             "AND reserved_spend_micros >= 0 AND actual_input_tokens >= 0 "
             "AND actual_output_tokens >= 0 AND actual_spend_micros >= 0",
             name=op.f("ck_agent_budget_reservations_valid_agent_budget_reservation_amounts"),

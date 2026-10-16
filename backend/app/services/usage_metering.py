@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
 from app.db.enums import Permission
+from app.services.agent_budget import BudgetRequest
 from app.services.context import Principal
 
 log = structlog.get_logger(__name__)
@@ -36,6 +37,41 @@ class MeterEvent(str, Enum):
     REPORT_GENERATED = "report_generated"
     ASM_DISCOVERY_RUN = "asm_discovery_run"
     POSTQUANTUM_SCAN = "postquantum_scan"
+    AGENT_TASK_COMPLETED = "agent_task_completed"
+    AI_INPUT_TOKEN = "ai_input_token"  # noqa: S105 - usage unit, never a credential
+    AI_OUTPUT_TOKEN = "ai_output_token"  # noqa: S105 - usage unit, never a credential
+    AI_SPEND_MICRO = "ai_spend_micro"
+
+
+def agent_usage_quantities(actual: BudgetRequest) -> dict[MeterEvent, int]:
+    """Translate settled agent usage into append-only billable meter quantities."""
+
+    values = {
+        MeterEvent.AGENT_TASK_COMPLETED: actual.tasks,
+        MeterEvent.AI_INPUT_TOKEN: actual.input_tokens,
+        MeterEvent.AI_OUTPUT_TOKEN: actual.output_tokens,
+        MeterEvent.AI_SPEND_MICRO: actual.spend_micros,
+    }
+    return {event: quantity for event, quantity in values.items() if quantity > 0}
+
+
+async def record_agent_usage(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    actual: BudgetRequest,
+    month: dt.date | None = None,
+) -> None:
+    """Record every non-zero settled agent counter through the shared durable meter."""
+
+    for event, quantity in agent_usage_quantities(actual).items():
+        await increment(
+            session,
+            organization_id=organization_id,
+            event=event,
+            quantity=quantity,
+            month=month,
+        )
 
 
 async def increment(
@@ -97,7 +133,7 @@ async def increment(
         log.warning(
             "metering.increment_failed",
             organization_id=str(organization_id),
-            event=event.value,
+            meter_event=event.value,
             exc_type=type(exc).__name__,
         )
 
@@ -160,4 +196,10 @@ async def get_usage(
     ]
 
 
-__all__ = ["MeterEvent", "get_usage", "increment"]
+__all__ = [
+    "MeterEvent",
+    "agent_usage_quantities",
+    "get_usage",
+    "increment",
+    "record_agent_usage",
+]

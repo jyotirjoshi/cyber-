@@ -272,9 +272,11 @@ class AgentBudgetReservation(Base, TenantMixin, TimestampMixin):
     reservation_key: Mapped[str] = mapped_column(String(160), nullable=False)
     category: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="reserved")
+    reserved_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reserved_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     reserved_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     reserved_spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    actual_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     actual_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     actual_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     actual_spend_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
@@ -298,7 +300,8 @@ class AgentBudgetReservation(Base, TenantMixin, TimestampMixin):
             name="valid_agent_budget_reservation_status",
         ),
         CheckConstraint(
-            "reserved_input_tokens >= 0 AND reserved_output_tokens >= 0 "
+            "reserved_tasks >= 0 AND actual_tasks >= 0 AND reserved_input_tokens >= 0 "
+            "AND reserved_output_tokens >= 0 "
             "AND reserved_spend_micros >= 0 AND actual_input_tokens >= 0 "
             "AND actual_output_tokens >= 0 AND actual_spend_micros >= 0",
             name="valid_agent_budget_reservation_amounts",

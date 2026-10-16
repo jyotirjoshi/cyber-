@@ -20,6 +20,7 @@ from app.core.errors import ResourceNotFoundError
 from app.db.enums import Permission
 from app.db.models.agent import AgentDecision, AgentRun
 from app.db.repository import tenant_select
+from app.services.agent_supervisor import decide_next_wave, plan_objective
 from app.services.context import Principal
 
 
@@ -307,8 +308,10 @@ __all__ = [
     "DecisionRejection",
     "DecisionValidation",
     "choose_actions",
+    "decide_next_wave",
     "decision_fingerprint",
     "match_approved_jobs",
+    "plan_objective",
     "propose_next_actions",
     "validate_decision",
 ]
