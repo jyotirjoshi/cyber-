@@ -62,6 +62,19 @@ Describe "Cynux production release orchestration" {
         $deploy | Should Match '"terraform-replan"'
     }
 
+    It "refreshes the worker release on every deployment" {
+        $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
+        $compute = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "terraform\compute.tf")
+        $refresh = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "scripts\refresh-worker.sh")
+
+        $deploy | Should Match 'compute", "scp", \$workerRefresh'
+        $deploy | Should Match 'sudo bash /tmp/cynux-worker-refresh\.sh'
+        $compute | Should Match 'cynux-backend-image'
+        $compute | Should Match 'cynux-multi-agent-worker-concurrency'
+        $refresh | Should Match 'CYNUX_AGENT__WORKER_MAX_CONCURRENCY'
+        $refresh | Should Match 'systemctl restart cynux-worker\.service'
+    }
+
     It "uses the stable account-currency budget guardrail name" {
         $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
         $verify = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "verify.ps1")

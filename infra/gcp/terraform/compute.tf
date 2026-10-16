@@ -213,10 +213,15 @@ resource "google_compute_instance" "scanner" {
   }
 
   metadata = {
-    enable-oslogin         = "TRUE"
-    block-project-ssh-keys = "TRUE"
-    serial-port-enable     = "FALSE"
-    user-data              = local.scanner_bootstrap
+    enable-oslogin                         = "TRUE"
+    block-project-ssh-keys                 = "TRUE"
+    serial-port-enable                     = "FALSE"
+    user-data                              = local.scanner_bootstrap
+    cynux-backend-image                    = local.backend_image
+    cynux-multi-agent-enabled              = tostring(var.multi_agent_enabled)
+    cynux-multi-agent-canary-org-ids       = join(",", var.multi_agent_canary_org_ids)
+    cynux-multi-agent-worker-concurrency   = tostring(var.multi_agent_worker_concurrency)
+    cynux-multi-agent-provider-parallelism = jsonencode(var.multi_agent_provider_parallelism)
   }
 
   shielded_instance_config {

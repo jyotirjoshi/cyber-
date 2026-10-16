@@ -238,6 +238,9 @@ function Invoke-CynuxDeploy {
                 $null = Invoke-Checked $gcloud @("compute", "instances", "start", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--quiet")
                 $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
                 $null = Invoke-Checked python @((Join-Path $repoRoot ".tools/gcloud/google-cloud-sdk/lib/gcloud.py"), "compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo test -f /etc/systemd/system/cynux-worker.service || sudo /usr/local/sbin/cynux-worker-bootstrap")
+                $workerRefresh = Join-Path $PSScriptRoot "scripts\refresh-worker.sh"
+                $null = Invoke-Checked $gcloud @("compute", "scp", $workerRefresh, "cynux-scanner-01:/tmp/cynux-worker-refresh.sh", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet")
+                $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo bash /tmp/cynux-worker-refresh.sh")
             }
             "secret-check" {
                 foreach ($secretId in $releaseState.TerraformOutputs.secret_resource_ids.value.PSObject.Properties.Value) {
