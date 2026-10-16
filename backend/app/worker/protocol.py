@@ -86,6 +86,15 @@ class RunRequest:
     principal: dict[str, Any] | None = None
     task_id: uuid.UUID | None = None
 
+    def __post_init__(self) -> None:
+        if self.action is RunAction.TASK:
+            if self.task_id is None:
+                raise ValueError("task run requests require a task id")
+            if self.principal is not None:
+                raise ValueError("task run requests recover authority from durable state")
+        elif self.task_id is not None:
+            raise ValueError("run-level requests cannot carry a task id")
+
     @classmethod
     def new(
         cls,

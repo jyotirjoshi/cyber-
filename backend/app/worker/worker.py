@@ -102,6 +102,7 @@ from app.services.workflow import execute_due_workflows, queue_due_workflow_sche
 from app.worker.dispatch import deliver_pending_dispatches
 from app.worker.protocol import (
     WORKER_LIVENESS_MAX_AGE_SECONDS,
+    RunAction,
     RunRequest,
     worker_liveness_key,
 )
@@ -224,6 +225,7 @@ class AgentWorker:
         "_settings",
         "_stopping",
         "_stream",
+        "_task_handler",
         "_worker_id",
     )
 
@@ -235,12 +237,14 @@ class AgentWorker:
         runner: AgentRunner,
         *,
         worker_id: str,
+        task_handler: Any | None = None,
     ) -> None:
         self._settings = settings
         self._redis = redis
         self._deps = deps
         self._runner = runner
         self._worker_id = worker_id
+        self._task_handler = task_handler
         #: The consumer name inside the group. One per process, so the PEL attributes each
         #: in-flight message to the worker holding it and reclaim can find a dead one's work.
         self._consumer = worker_id
@@ -411,6 +415,10 @@ class AgentWorker:
                 await self._ack(message_id)
             return
 
+        if request.action is RunAction.TASK:
+            await self._dispatch_agent_task(message_id, request)
+            return
+
         run_id = request.run_id
         ctx = await self._load_context(run_id, message_id)
         if ctx is None:
@@ -477,6 +485,38 @@ class AgentWorker:
             await self._run(message_id, run_id, ctx, self._principal_of(request), attempts)
         finally:
             await self._release_run_slot(ctx.organization_id, run_id)
+
+    async def _dispatch_agent_task(self, message_id: str, request: RunRequest) -> None:
+        """Execute one task message when the configured orchestrator runtime is enabled."""
+        if request.task_id is None:  # guarded by RunRequest, defensive at the boundary
+            if await self._dead_letter(message_id, "task_id_missing"):
+                await self._ack(message_id)
+            return
+        handler = self._task_handler
+        if handler is None:
+            log.warning(
+                "worker.task_runtime_unavailable",
+                run_id=str(request.run_id),
+                task_id=str(request.task_id),
+            )
+            return
+        ctx = await self._load_context(request.run_id, message_id)
+        if ctx is None:
+            if await self._dead_letter(message_id, "run_missing"):
+                await self._ack(message_id)
+            return
+        from app.db.session import get_sessionmaker
+        from app.services.agent_task_executor import execute_task
+
+        settled = await execute_task(
+            ctx.organization_id,
+            request.task_id,
+            get_sessionmaker(self._settings),
+            handler,
+            worker_id=self._worker_id,
+        )
+        if settled:
+            await self._ack(message_id)
 
     def _run_slot_key(self, organization_id: uuid.UUID) -> str:
         return f"{self._stream}:run-slots:{organization_id}"
@@ -644,7 +684,9 @@ class AgentWorker:
                     run_id=run_id,
                 )
         except Exception as exc:
-            log.warning("worker.retest_completion_failed", run_id=str(run_id), error_type=type(exc).__name__)
+            log.warning(
+                "worker.retest_completion_failed", run_id=str(run_id), error_type=type(exc).__name__
+            )
 
     async def _generate_completion_reports(
         self, ctx: _RunContext, run_id: uuid.UUID | None
@@ -767,7 +809,10 @@ class AgentWorker:
         return len(candidates)
 
     async def _record_terminal_action_receipt(
-        self, ctx: _RunContext, run_id: uuid.UUID, outcome: str,
+        self,
+        ctx: _RunContext,
+        run_id: uuid.UUID,
+        outcome: str,
     ) -> None:
         """Report a settled run without re-running its assessment on transcript failure."""
         try:
@@ -781,11 +826,15 @@ class AgentWorker:
         except Exception as exc:
             log.warning(
                 "worker.action_receipt_failed",
-                run_id=str(run_id), error_type=type(exc).__name__,
+                run_id=str(run_id),
+                error_type=type(exc).__name__,
             )
 
     async def _record_terminal_retest_outcome(
-        self, ctx: _RunContext, run_id: uuid.UUID, outcome: str,
+        self,
+        ctx: _RunContext,
+        run_id: uuid.UUID,
+        outcome: str,
     ) -> None:
         if ctx.assessment_id is None:
             return
@@ -799,7 +848,9 @@ class AgentWorker:
                     evidence={"run_id": str(run_id), "assessment_status": outcome},
                 )
         except Exception as exc:
-            log.warning("worker.retest_outcome_failed", run_id=str(run_id), error_type=type(exc).__name__)
+            log.warning(
+                "worker.retest_outcome_failed", run_id=str(run_id), error_type=type(exc).__name__
+            )
 
     async def _monitor(
         self,
@@ -875,7 +926,8 @@ class AgentWorker:
             if run is None or run.organization_id != ctx.organization_id:
                 return
             receipt_eligible = run.status_enum not in {
-                AgentRunStatus.COMPLETED, AgentRunStatus.FAILED,
+                AgentRunStatus.COMPLETED,
+                AgentRunStatus.FAILED,
             }
             assessment = None
             if ctx.assessment_id is not None:
@@ -943,7 +995,8 @@ class AgentWorker:
             if run is None or run.organization_id != ctx.organization_id:
                 return
             receipt_eligible = run.status_enum not in {
-                AgentRunStatus.COMPLETED, AgentRunStatus.CANCELLED,
+                AgentRunStatus.COMPLETED,
+                AgentRunStatus.CANCELLED,
             }
             if run.status_enum not in _TERMINAL_RUN_STATUSES:
                 now = _now()
@@ -1043,108 +1096,148 @@ class AgentWorker:
         ] = (
             ("reaper", reclaim_orphans, None, "worker.maintenance_failed"),
             (
-                "knowledge-indexing", lambda _session: run_due_knowledge_indexing(self._settings),
-                "worker.knowledge_indexed", "worker.knowledge_index_failed",
+                "knowledge-indexing",
+                lambda _session: run_due_knowledge_indexing(self._settings),
+                "worker.knowledge_indexed",
+                "worker.knowledge_index_failed",
             ),
             (
-                "scans", lambda session: run_due_scans(session, self._settings),
-                "worker.recurring_scans_started", "worker.recurring_scan_failed",
+                "scans",
+                lambda session: run_due_scans(session, self._settings),
+                "worker.recurring_scans_started",
+                "worker.recurring_scan_failed",
             ),
             (
-                "reports", lambda session: run_due_report_schedules(
+                "reports",
+                lambda session: run_due_report_schedules(
                     session, self._settings, renderer=generate_report
                 ),
-                "worker.report_schedules_completed", "worker.report_schedule_failed",
+                "worker.report_schedules_completed",
+                "worker.report_schedule_failed",
             ),
             (
-                "report-distributions", reconcile_report_distributions,
-                "worker.report_distributions_reconciled", "worker.report_distribution_reconcile_failed",
+                "report-distributions",
+                reconcile_report_distributions,
+                "worker.report_distributions_reconciled",
+                "worker.report_distribution_reconcile_failed",
             ),
             (
-                "report-recovery", lambda _session: self._recover_completion_reports(),
-                "worker.completion_reports_recovery_attempted", "worker.completion_report_recovery_failed",
+                "report-recovery",
+                lambda _session: self._recover_completion_reports(),
+                "worker.completion_reports_recovery_attempted",
+                "worker.completion_report_recovery_failed",
             ),
             (
-                "campaigns", lambda session: run_due_campaigns(session, self._settings),
-                "worker.attack_simulation_campaigns_started", "worker.attack_simulation_campaign_failed",
+                "campaigns",
+                lambda session: run_due_campaigns(session, self._settings),
+                "worker.attack_simulation_campaigns_started",
+                "worker.attack_simulation_campaign_failed",
             ),
             (
-                "bas-techniques", execute_pending_techniques,
-                "worker.attack_simulation_techniques_settled", "worker.attack_simulation_technique_failed",
+                "bas-techniques",
+                execute_pending_techniques,
+                "worker.attack_simulation_techniques_settled",
+                "worker.attack_simulation_technique_failed",
             ),
             (
-                "dispatch", lambda session: deliver_pending_dispatches(
-                    session, self._redis, self._settings
-                ),
-                "worker.run_dispatches_published", "worker.run_dispatch_failed",
+                "dispatch",
+                lambda session: deliver_pending_dispatches(session, self._redis, self._settings),
+                "worker.run_dispatches_published",
+                "worker.run_dispatch_failed",
             ),
             (
-                "notifications", lambda session: deliver_pending(
+                "notifications",
+                lambda session: deliver_pending(
                     session, settings=self._settings, redis=self._redis
                 ),
-                None, "worker.notification_delivery_failed",
+                None,
+                "worker.notification_delivery_failed",
             ),
             (
-                "integration-syncs", lambda session: run_due_integration_syncs(
+                "integration-syncs",
+                lambda session: run_due_integration_syncs(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.integration_syncs_completed", "worker.integration_sync_failed",
+                "worker.integration_syncs_completed",
+                "worker.integration_sync_failed",
             ),
             (
-                "tickets", lambda session: refresh_due_ticket_statuses(
+                "tickets",
+                lambda session: refresh_due_ticket_statuses(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.ticket_statuses_refreshed", "worker.ticket_status_refresh_failed",
+                "worker.ticket_statuses_refreshed",
+                "worker.ticket_status_refresh_failed",
             ),
             (
-                "agent-actions", lambda session: execute_approved_batch(
+                "agent-actions",
+                lambda session: execute_approved_batch(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.agent_actions_settled", "worker.agent_action_execution_failed",
+                "worker.agent_actions_settled",
+                "worker.agent_action_execution_failed",
             ),
             (
-                "automations", lambda session: execute_pending_automations(
+                "automations",
+                lambda session: execute_pending_automations(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.automation_executions_settled", "worker.automation_execution_failed",
+                "worker.automation_executions_settled",
+                "worker.automation_execution_failed",
             ),
             (
-                "automation-schedules", queue_due_automation_schedules,
-                "worker.automation_schedules_queued", "worker.automation_schedule_failed",
+                "automation-schedules",
+                queue_due_automation_schedules,
+                "worker.automation_schedules_queued",
+                "worker.automation_schedule_failed",
             ),
             (
-                "workflows", lambda session: execute_due_workflows(
+                "workflows",
+                lambda session: execute_due_workflows(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.workflow_runs_settled", "worker.workflow_execution_failed",
+                "worker.workflow_runs_settled",
+                "worker.workflow_execution_failed",
             ),
             (
-                "workflow-schedules", queue_due_workflow_schedules,
-                "worker.workflow_schedules_queued", "worker.workflow_schedule_failed",
+                "workflow-schedules",
+                queue_due_workflow_schedules,
+                "worker.workflow_schedules_queued",
+                "worker.workflow_schedule_failed",
             ),
             (
-                "sla", lambda session: emit_overdue_sla_escalations(
+                "sla",
+                lambda session: emit_overdue_sla_escalations(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.sla_escalations_emitted", "worker.sla_escalation_failed",
+                "worker.sla_escalations_emitted",
+                "worker.sla_escalation_failed",
             ),
             (
-                "risk-expiry", expire_risk_acceptances,
-                "worker.risk_acceptances_expired", "worker.risk_acceptance_expiry_failed",
+                "risk-expiry",
+                expire_risk_acceptances,
+                "worker.risk_acceptances_expired",
+                "worker.risk_acceptance_expiry_failed",
             ),
             (
-                "risk-refresh", refresh_stale_risk_batch,
-                "worker.canonical_risk_refreshed", "worker.canonical_risk_refresh_failed",
+                "risk-refresh",
+                refresh_stale_risk_batch,
+                "worker.canonical_risk_refreshed",
+                "worker.canonical_risk_refresh_failed",
             ),
             (
-                "intel", lambda session: refresh_stale_intel_batch(
+                "intel",
+                lambda session: refresh_stale_intel_batch(
                     session, settings=self._settings, redis=self._redis
                 ),
-                "worker.canonical_intel_refreshed", "worker.canonical_intel_refresh_failed",
+                "worker.canonical_intel_refreshed",
+                "worker.canonical_intel_refresh_failed",
             ),
             (
-                "asm", lambda session: run_due_surfaces(session, self._settings),
-                "worker.asm_surfaces_completed", "worker.asm_surface_failed",
+                "asm",
+                lambda session: run_due_surfaces(session, self._settings),
+                "worker.asm_surfaces_completed",
+                "worker.asm_surface_failed",
             ),
         )
         tasks = [
