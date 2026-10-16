@@ -153,6 +153,13 @@ function Invoke-CynuxDeploy {
     $region = $config.CYNUX_GCP_REGION
     $zone = $config.CYNUX_GCP_ZONE
     $stateBucket = $config.CYNUX_GCP_TERRAFORM_STATE_BUCKET
+    $multiAgentEnabled = if ($config.ContainsKey("CYNUX_MULTI_AGENT_ENABLED")) {
+        $config.CYNUX_MULTI_AGENT_ENABLED.ToLowerInvariant()
+    } else { "false" }
+    if ($multiAgentEnabled -notin @("true", "false")) {
+        throw "CYNUX_MULTI_AGENT_ENABLED must be true or false."
+    }
+    $multiAgentTerraformVar = "-var=multi_agent_enabled=$multiAgentEnabled"
     $sha = (Invoke-Checked git @("-C", $repoRoot, "rev-parse", "HEAD") | Select-Object -First 1).Trim()
     $fingerprint = Get-DirtyFingerprint -RepoRoot $repoRoot
     $imageTag = Resolve-ReleaseImageTag -GitSha $sha -DirtyFingerprint $fingerprint -AllowDirtySnapshot:$AllowDirtySnapshot -SkipBuild:$SkipBuild -ExistingImageTag $ExistingImageTag
@@ -201,7 +208,7 @@ function Invoke-CynuxDeploy {
             }
             "terraform-plan" {
                 $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "init", "-reconfigure", "-backend-config=bucket=$stateBucket", "-backend-config=prefix=cynux/production")
-                $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "plan", "-out=$planFile", "-var=project_id=$project", "-var=region=$region", "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag")
+                $null = Invoke-Checked $terraform @("-chdir=$terraformDir", "plan", "-out=$planFile", "-var=project_id=$project", "-var=region=$region", "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag", $multiAgentTerraformVar)
             }
             "apply-approval" {
                 if (-not $ApproveApply) { throw "Terraform plan is ready. Re-run with -ApproveApply to create or update paid resources." }
@@ -214,14 +221,14 @@ function Invoke-CynuxDeploy {
                     "-chdir=$terraformDir", "apply", "-auto-approve",
                     "-target=google_artifact_registry_repository.cynux",
                     "-var=project_id=$project", "-var=region=$region",
-                    "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag"
+                    "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag", $multiAgentTerraformVar
                 )
             }
             "terraform-replan" {
                 $null = Invoke-Checked $terraform @(
                     "-chdir=$terraformDir", "plan", "-out=$planFile",
                     "-var=project_id=$project", "-var=region=$region",
-                    "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag"
+                    "-var=zone=$zone", "-var=image_tag=$imageTag", "-var=migration_image_tag=$MigrationImageTag", $multiAgentTerraformVar
                 )
             }
             "terraform-apply" {

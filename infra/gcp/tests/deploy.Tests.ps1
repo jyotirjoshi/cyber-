@@ -62,6 +62,14 @@ Describe "Cynux production release orchestration" {
         $deploy | Should Match '"terraform-replan"'
     }
 
+    It "persists the multi-agent production switch through Terraform" {
+        $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
+
+        $deploy | Should Match 'CYNUX_MULTI_AGENT_ENABLED'
+        $deploy | Should Match '-var=multi_agent_enabled=\$multiAgentEnabled'
+        $deploy | Should Match 'CYNUX_MULTI_AGENT_ENABLED must be true or false'
+    }
+
     It "refreshes the worker release on every deployment" {
         $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
         $compute = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "terraform\compute.tf")
