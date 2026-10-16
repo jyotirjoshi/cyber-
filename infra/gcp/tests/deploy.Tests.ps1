@@ -139,6 +139,8 @@ Describe "Cynux production release orchestration" {
         $verify | Should Match "systemctl is-active cynux-worker"
         $verify | Should Match "/ws/agent/runs/"
         $verify | Should Match "CYNUX_AGENT__WORKER_MAX_CONCURRENCY"
+        $verify | Should Match 'grep -q \^CYNUX_AGENT__TASK_LEASE_SECONDS='
+        $verify | Should Not Match "sudo sh -c.*CYNUX_FEATURES__MULTI_AGENT"
         $verify | Should Match 'networkInterfaces\[0\].networkIP'
     }
 

@@ -162,7 +162,9 @@ function Invoke-CynuxVerification {
         if ($LASTEXITCODE -ne 0 -or $state -ne "active") { throw "worker service is not active" }
     }
     Add-Check "worker-multi-agent-config" {
-        $command = 'sudo sh -c ''grep -Eq "^CYNUX_FEATURES__MULTI_AGENT=(true|false)$" /etc/cynux/worker.env && grep -Eq "^CYNUX_AGENT__WORKER_MAX_CONCURRENCY=[1-9][0-9]*$" /etc/cynux/worker.env && grep -Eq "^CYNUX_AGENT__TASK_LEASE_SECONDS=[1-9][0-9]*$" /etc/cynux/worker.env'' && echo configured'
+        # Keep this command free of nested shell quotes and regex alternation:
+        # gcloud.cmd routes those characters through cmd.exe before SSH.
+        $command = 'sudo grep -q ^CYNUX_FEATURES__MULTI_AGENT= /etc/cynux/worker.env && sudo grep -q ^CYNUX_AGENT__WORKER_MAX_CONCURRENCY= /etc/cynux/worker.env && sudo grep -q ^CYNUX_AGENT__TASK_LEASE_SECONDS= /etc/cynux/worker.env && echo configured'
         $state = (& $gcloud compute ssh cynux-scanner-01 --project=$project --zone=$zone --tunnel-through-iap --quiet --command $command | Out-String).Trim()
         if ($LASTEXITCODE -ne 0 -or $state -ne "configured") { throw "worker multi-agent ceilings are missing" }
     }
