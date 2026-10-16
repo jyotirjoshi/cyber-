@@ -14,6 +14,7 @@ from app.db.base import utcnow
 from app.db.enums import AgentRunStatus, AgentTaskKind, AgentTaskStatus
 from app.db.models.agent import AgentRun, RunDispatch
 from app.db.models.agent_task import AgentTask, AgentTaskDependency
+from app.db.models.assessment import Approval
 from app.schemas.agent_plan import AgentPlanCondition, ValidatedAgentPlan
 from app.worker.dispatch import stage_task_dispatch
 
@@ -407,6 +408,7 @@ async def cancel_run_tasks(
                     AgentTaskStatus.READY.value,
                     AgentTaskStatus.QUEUED.value,
                     AgentTaskStatus.AWAITING_APPROVAL.value,
+                    AgentTaskStatus.RUNNING.value,
                 ]
             ),
         )
@@ -420,8 +422,62 @@ async def cancel_run_tasks(
     return int(result.rowcount or 0)
 
 
+async def cancel_agent_run(
+    session: AsyncSession,
+    organization_id: uuid.UUID,
+    run_id: uuid.UUID,
+    *,
+    requested_at: dt.datetime | None = None,
+) -> AgentRun | None:
+    """Cancel a parent run, every live task, pending dispatch, and approval atomically."""
+
+    run = await _locked_run(session, organization_id, run_id)
+    if run is None:
+        return None
+    if run.status == AgentRunStatus.CANCELLED.value:
+        return run
+    if run.status in {AgentRunStatus.COMPLETED.value, AgentRunStatus.FAILED.value}:
+        return run
+    timestamp = requested_at or utcnow()
+    run.status = AgentRunStatus.CANCELLED.value
+    run.completed_at = timestamp
+    run.failure_category = "cancelled"
+    run.failure_reason = "Cancelled by an authorized operator."
+    await cancel_run_tasks(
+        session,
+        organization_id,
+        run_id,
+        requested_at=timestamp,
+    )
+    await session.execute(
+        update(RunDispatch)
+        .where(
+            RunDispatch.organization_id == organization_id,
+            RunDispatch.run_id == run_id,
+            RunDispatch.status == "pending",
+        )
+        .values(status="cancelled", last_error_code="run_cancelled")
+    )
+    await session.execute(
+        update(Approval)
+        .where(
+            Approval.organization_id == organization_id,
+            Approval.agent_run_id == run_id,
+            Approval.decision == "pending",
+        )
+        .values(
+            decision="expired",
+            resolved_at=timestamp,
+            resolution_note="Run cancelled before approval execution.",
+        )
+    )
+    await session.flush()
+    return run
+
+
 __all__ = [
     "PlanMaterializationConflict",
+    "cancel_agent_run",
     "cancel_run_tasks",
     "materialize_plan",
     "release_ready_tasks",

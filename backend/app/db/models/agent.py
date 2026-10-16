@@ -293,7 +293,9 @@ class RunDispatch(Base, TenantMixin, TimestampMixin):
             "((action = 'start' OR action = 'resume') AND task_id IS NULL)",
             name="valid_run_dispatch_task_binding",
         ),
-        CheckConstraint("status IN ('pending','sent')", name="valid_run_dispatch_status"),
+        CheckConstraint(
+            "status IN ('pending','sent','cancelled')", name="valid_run_dispatch_status"
+        ),
         Index("ix_run_dispatches_status_available_at", "status", "available_at"),
     )
 

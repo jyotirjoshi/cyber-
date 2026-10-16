@@ -83,6 +83,7 @@ from app.services import agent_memory as agent_memory_service
 from app.services import audit as audit_service
 from app.services.agent_chat import create_custom_reply, create_reply, load_assessment_run_details
 from app.services.agent_chat_actions import propose_chat_actions
+from app.services.agent_scheduler import cancel_agent_run
 from app.services.context import Principal
 from app.services.events import EventEmitter
 
@@ -382,6 +383,27 @@ async def get_run(
     repo = TenantRepository(session, AgentRun, principal.organization_id)
     run = await repo.get_or_404(run_id, selectinload(AgentRun.steps), selectinload(AgentRun.specialist_tasks))
     return AgentRunOut.model_validate(run)
+
+
+@router.post("/runs/{run_id}/cancel", response_model=AgentRunOut)
+async def cancel_run(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentRunOut:
+    """Cancel a multi-agent run and prevent every queued or late child result."""
+    principal.require(Permission.ASSESSMENT_CANCEL)
+    run = await cancel_agent_run(session, principal.organization_id, run_id)
+    if run is None:
+        await TenantRepository(session, AgentRun, principal.organization_id).get_or_404(run_id)
+        raise ResourceNotFoundError("agent run not found")
+    await session.commit()
+    reloaded = await TenantRepository(session, AgentRun, principal.organization_id).get_or_404(
+        run_id,
+        selectinload(AgentRun.steps),
+        selectinload(AgentRun.specialist_tasks),
+    )
+    return AgentRunOut.model_validate(reloaded)
 
 
 @router.post(

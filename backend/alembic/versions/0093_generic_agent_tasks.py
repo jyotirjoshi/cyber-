@@ -162,6 +162,16 @@ def upgrade() -> None:
         "(action = 'task' AND task_id IS NOT NULL) OR "
         "((action = 'start' OR action = 'resume') AND task_id IS NULL)",
     )
+    op.drop_constraint(
+        "ck_run_dispatches_valid_run_dispatch_status",
+        "run_dispatches",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_run_dispatches_valid_run_dispatch_status",
+        "run_dispatches",
+        "status IN ('pending','sent','cancelled')",
+    )
 
     op.create_table(
         "agent_task_dependencies",
@@ -317,6 +327,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_constraint(
+        "ck_run_dispatches_valid_run_dispatch_status",
+        "run_dispatches",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_run_dispatches_valid_run_dispatch_status",
+        "run_dispatches",
+        "status IN ('pending','sent')",
+    )
     op.drop_constraint(
         "ck_run_dispatches_valid_run_dispatch_task_binding",
         "run_dispatches",
