@@ -15,7 +15,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.db.enums import AssetEnvironment, AssetStatus, Criticality, CriticalitySource
+from app.db.enums import (
+    AssetEnvironment,
+    AssetRelationshipType,
+    AssetStatus,
+    Criticality,
+    CriticalitySource,
+)
 from app.schemas.custom_fields import validate_custom_fields
 
 
@@ -43,6 +49,8 @@ class AssetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    version: int = 1
+    merged_into_id: uuid.UUID | None = None
     assessment_id: uuid.UUID | None = None
     name: str
     asset_type: str
@@ -77,6 +85,11 @@ class AssetOut(BaseModel):
     seen_in_assessments: list[str] = Field(default_factory=list)
     tags: list[AssetTagOut] = Field(default_factory=list)
     created_at: dt.datetime
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def default_unflushed_version(cls, value: int | None) -> int:
+        return 1 if value is None else value
 
     @property
     def endpoint(self) -> str:
@@ -148,6 +161,112 @@ class AssetContextIn(BaseModel):
         return self
 
 
+class AssetCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=512)
+    asset_type: str = Field(min_length=1, max_length=40)
+    port: int | None = Field(default=None, ge=0, le=65535)
+    protocol: str | None = Field(default=None, max_length=20)
+    service: str | None = Field(default=None, max_length=120)
+    internet_exposed: bool = False
+    context: AssetContextIn | None = None
+
+    @field_validator("name", "asset_type", "protocol", "service")
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("asset text fields cannot be blank")
+        return cleaned
+
+
+class AssetBulkUpdateItemIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: uuid.UUID
+    expected_version: int = Field(ge=1)
+    context: AssetContextIn | None = None
+    status: AssetStatus | None = None
+
+    @model_validator(mode="after")
+    def require_update(self) -> AssetBulkUpdateItemIn:
+        if self.context is None and self.status is None:
+            raise ValueError("bulk asset item needs context or status")
+        return self
+
+
+class AssetBulkUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[AssetBulkUpdateItemIn] = Field(min_length=1, max_length=100)
+
+    @field_validator("items")
+    @classmethod
+    def unique_assets(cls, items: list[AssetBulkUpdateItemIn]) -> list[AssetBulkUpdateItemIn]:
+        if len({item.asset_id for item in items}) != len(items):
+            raise ValueError("bulk asset IDs must be unique")
+        return items
+
+
+class AssetMergeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_asset_id: uuid.UUID
+    target_asset_id: uuid.UUID
+    source_expected_version: int = Field(ge=1)
+    target_expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=3, max_length=1000)
+
+    @model_validator(mode="after")
+    def different_assets(self) -> AssetMergeIn:
+        if self.source_asset_id == self.target_asset_id:
+            raise ValueError("source and target assets must differ")
+        self.reason = self.reason.strip()
+        return self
+
+
+class AssetRelationshipIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_asset_id: uuid.UUID
+    target_asset_id: uuid.UUID
+    relationship_type: AssetRelationshipType
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def reject_self(self) -> AssetRelationshipIn:
+        if self.source_asset_id == self.target_asset_id:
+            raise ValueError("asset relationships cannot point to themselves")
+        self.evidence = validate_custom_fields(self.evidence)
+        return self
+
+
+class AssetRelationshipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    source_asset_id: uuid.UUID
+    target_asset_id: uuid.UUID
+    relationship_type: AssetRelationshipType
+    evidence: dict[str, Any]
+    created_by_id: uuid.UUID | None = None
+    created_at: dt.datetime
+
+
+class AssetMergeOut(BaseModel):
+    event_id: uuid.UUID
+    source_asset_id: uuid.UUID
+    target_asset_id: uuid.UUID
+    moved_counts: dict[str, int]
+
+
+class AssetCsvImportOut(BaseModel):
+    dry_run: bool
+    accepted: int = Field(ge=0)
+    created: int = Field(ge=0)
+    existing: int = Field(ge=0)
+    errors: list[str] = Field(default_factory=list)
+
+
 class AssetFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -204,10 +323,17 @@ class DiscoveredAssetOut(BaseModel):
 
 
 __all__ = [
+    "AssetBulkUpdateIn",
     "AssetContextIn",
+    "AssetCreateIn",
     "AssetCriticalityIn",
+    "AssetCsvImportOut",
     "AssetFilter",
+    "AssetMergeIn",
+    "AssetMergeOut",
     "AssetOut",
+    "AssetRelationshipIn",
+    "AssetRelationshipOut",
     "AssetTagIn",
     "AssetTagOut",
     "CmdbImportOut",

@@ -59,6 +59,73 @@ class AsyncCynuxClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def _rest(
+        self, method: str, path: str, *, json: dict[str, Any] | None = None
+    ) -> Any:
+        try:
+            response = await self._client.request(method, path, json=json)
+        except httpx.TransportError:
+            raise CynuxError("Cynux could not be reached", retryable=True) from None
+        if response.is_error:
+            try:
+                problem = response.json()
+            except ValueError:
+                problem = {}
+            raise CynuxError(
+                str(problem.get("detail") or "Cynux request failed"),
+                status_code=response.status_code,
+                code=problem.get("code"),
+                retryable=response.status_code in {429, 502, 503, 504},
+            )
+        return response.json() if response.content else None
+
+    async def create_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._rest("POST", "/assets", json=payload)
+
+    async def bulk_update_assets(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return await self._rest("PATCH", "/assets/bulk", json={"items": items})
+
+    async def merge_assets(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._rest("POST", "/assets/merge", json=payload)
+
+    async def asset_relationships(self, asset_id: str) -> list[dict[str, Any]]:
+        return await self._rest("GET", f"/assets/{asset_id}/relationships")
+
+    async def create_asset_relationship(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._rest("POST", "/assets/relationships", json=payload)
+
+    async def import_assets_csv(
+        self, content: bytes, *, filename: str = "assets.csv", dry_run: bool = True
+    ) -> dict[str, Any]:
+        try:
+            response = await self._client.post(
+                "/assets/csv-import",
+                data={"dry_run": str(dry_run).lower()},
+                files={"file": (filename, content, "text/csv")},
+            )
+        except httpx.TransportError:
+            raise CynuxError("Cynux could not be reached", retryable=True) from None
+        if response.is_error:
+            raise CynuxError(
+                "Cynux asset import failed", status_code=response.status_code
+            )
+        return response.json()
+
+    async def export_assets_csv(self) -> bytes:
+        try:
+            response = await self._client.get("/assets/export.csv")
+        except httpx.TransportError:
+            raise CynuxError("Cynux could not be reached", retryable=True) from None
+        if response.is_error:
+            raise CynuxError(
+                "Cynux asset export failed", status_code=response.status_code
+            )
+        return response.content
+
     async def search_knowledge(
         self, query: str, collection_ids: list[str], *, limit: int = 6,
         min_similarity: float = 0.25,

@@ -212,6 +212,8 @@ async def upsert_assets(
                 if before is not None and before[key] != value
             }
             if not is_existing or delta:
+                if is_existing and delta:
+                    asset.version = int(getattr(asset, "version", 0) or 0) + 1
                 changes.append(
                     AssetChange(
                         organization_id=assessment.organization_id,
@@ -474,6 +476,7 @@ async def tag_asset(
         )
         session.add(tag)
         await session.flush()
+    asset.version = int(getattr(asset, "version", 0) or 0) + 1
 
     await audit_service.record(
         session,
@@ -508,6 +511,7 @@ async def set_criticality(
     asset.criticality_rationale = (
         payload.rationale or f"Set to {payload.criticality.value} by an operator."
     )
+    asset.version = int(getattr(asset, "version", 0) or 0) + 1
     if asset.criticality != previous:
         organization = await session.get(
             Organization, principal.organization_id, with_for_update=True
@@ -560,6 +564,7 @@ async def set_asset_context(
     for name in changes:
         value = getattr(payload, name)
         setattr(asset, name, value.value if name == "environment" else value)
+    asset.version = int(getattr(asset, "version", 0) or 0) + 1
     audit_before = {
         key: sorted(value) if key == "custom_fields" and isinstance(value, dict) else value
         for key, value in previous.items()
@@ -602,7 +607,7 @@ async def list_assets(
     filters = filters or AssetFilter()
     page = pagination or PaginationParams()
 
-    conditions: list[Any] = []
+    conditions: list[Any] = [Asset.merged_into_id.is_(None)]
     if filters.criticality is not None:
         conditions.append(Asset.criticality == filters.criticality.value)
     if filters.environment is not None:
@@ -727,6 +732,7 @@ async def mark_out_of_scope(
         )
     asset.status = AssetStatus.OUT_OF_SCOPE.value
     asset.selected_for_scanning = False
+    asset.version = int(getattr(asset, "version", 0) or 0) + 1
     await audit_service.record(
         session,
         action=audit_service.AuditAction.ASSET_TAG,

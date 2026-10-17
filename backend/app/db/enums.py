@@ -383,6 +383,14 @@ class AssetEnvironment(StrEnum):
     TEST = "test"
 
 
+class AssetRelationshipType(StrEnum):
+    DEPENDS_ON = "depends_on"
+    CONTAINS = "contains"
+    HOSTS = "hosts"
+    CONNECTS_TO = "connects_to"
+    OWNED_BY = "owned_by"
+
+
 class Criticality(StrEnum):
     """FR-022 business context."""
 
@@ -951,6 +959,8 @@ __all__ = [
     "AssessmentDepth",
     "AssessmentStage",
     "AssessmentStatus",
+    "AssetEnvironment",
+    "AssetRelationshipType",
     "AssetStatus",
     "AuditOutcome",
     "Criticality",

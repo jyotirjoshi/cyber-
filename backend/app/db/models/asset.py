@@ -40,6 +40,10 @@ class Asset(Base, TenantMixin, TimestampMixin):
     __tablename__ = "assets"
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assets.id", ondelete="SET NULL"), index=True
+    )
     #: The assessment that first discovered it. Later assessments update in place and
     #: append to ``seen_in_assessments`` rather than creating duplicates.
     #:
@@ -228,4 +232,93 @@ class AssetChange(Base, TenantMixin, TimestampMixin):
     )
 
 
-__all__ = ["Asset", "AssetTag", "AssetChange"]
+class AssetAlias(Base, TenantMixin, TimestampMixin):
+    """Immutable lookup identity retained when inventory records are merged."""
+
+    __tablename__ = "asset_aliases"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    alias_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    alias_value: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_asset_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "alias_type", "alias_value", name="unique_asset_alias"
+        ),
+        Index("ix_asset_aliases_org_asset", "organization_id", "asset_id"),
+    )
+
+
+class AssetRelationship(Base, TenantMixin, TimestampMixin):
+    """Directed, evidence-backed topology edge between canonical assets."""
+
+    __tablename__ = "asset_relationships"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    source_asset_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    target_asset_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        CheckConstraint("source_asset_id <> target_asset_id", name="asset_relationship_no_self"),
+        CheckConstraint(
+            "relationship_type IN ('depends_on','contains','hosts','connects_to','owned_by')",
+            name="valid_asset_relationship_type",
+        ),
+        UniqueConstraint(
+            "organization_id",
+            "source_asset_id",
+            "target_asset_id",
+            "relationship_type",
+            name="unique_asset_relationship",
+        ),
+        Index("ix_asset_relationships_org_source", "organization_id", "source_asset_id"),
+        Index("ix_asset_relationships_org_target", "organization_id", "target_asset_id"),
+    )
+
+
+class AssetMergeEvent(Base, TenantMixin, TimestampMixin):
+    """Append-only explanation of a canonical asset merge."""
+
+    __tablename__ = "asset_merge_events"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    source_asset_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    target_asset_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    merged_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reason: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source_snapshot: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
+    moved_counts: Mapped[dict[str, Any]] = mapped_column(default=dict, nullable=False)
+
+    __table_args__ = (
+        Index("ix_asset_merge_events_org_target", "organization_id", "target_asset_id"),
+    )
+
+
+__all__ = [
+    "Asset",
+    "AssetAlias",
+    "AssetChange",
+    "AssetMergeEvent",
+    "AssetRelationship",
+    "AssetTag",
+]

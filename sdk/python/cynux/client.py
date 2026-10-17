@@ -187,6 +187,50 @@ class CynuxClient:
     def assets(self, **filters: Any) -> Iterator[dict[str, Any]]:
         return self.iter_all("/assets", **filters)
 
+    def create_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.request("POST", "/assets", json=payload)
+
+    def bulk_update_assets(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self.request("PATCH", "/assets/bulk", json={"items": items})
+
+    def merge_assets(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.request("POST", "/assets/merge", json=payload)
+
+    def asset_relationships(self, asset_id: str) -> list[dict[str, Any]]:
+        return self.request("GET", f"/assets/{asset_id}/relationships")
+
+    def create_asset_relationship(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.request("POST", "/assets/relationships", json=payload)
+
+    def import_assets_csv(
+        self, content: bytes, *, filename: str = "assets.csv", dry_run: bool = True
+    ) -> dict[str, Any]:
+        response = self._client.post(
+            "/assets/csv-import",
+            data={"dry_run": str(dry_run).lower()},
+            files={"file": (filename, content, "text/csv")},
+        )
+        if response.is_error:
+            try:
+                problem = response.json()
+            except ValueError:
+                problem = {}
+            raise CynuxError(
+                str(problem.get("detail") or "Cynux asset import failed"),
+                status_code=response.status_code,
+                code=problem.get("code"),
+                retryable=response.status_code in {429, 502, 503, 504},
+            )
+        return response.json()
+
+    def export_assets_csv(self) -> bytes:
+        response = self._client.get("/assets/export.csv")
+        if response.is_error:
+            raise CynuxError(
+                "Cynux asset export failed", status_code=response.status_code
+            )
+        return response.content
+
     def findings(self, **filters: Any) -> Iterator[dict[str, Any]]:
         return self.iter_all("/canonical-findings", **filters)
 

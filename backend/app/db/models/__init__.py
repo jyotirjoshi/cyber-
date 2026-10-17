@@ -49,7 +49,14 @@ from app.db.models.assessment import (
     RecurringScan,
     ScanProfile,
 )
-from app.db.models.asset import Asset, AssetChange, AssetTag
+from app.db.models.asset import (
+    Asset,
+    AssetAlias,
+    AssetChange,
+    AssetMergeEvent,
+    AssetRelationship,
+    AssetTag,
+)
 from app.db.models.audit import AuditEvent
 from app.db.models.canonical import (
     AssessmentCanonicalFinding,
@@ -157,7 +164,10 @@ __all__ = [
     "Assessment",
     "AssessmentTarget",
     "Asset",
+    "AssetAlias",
     "AssetChange",
+    "AssetMergeEvent",
+    "AssetRelationship",
     "AssetTag",
     "AttackSimulationCampaign",
     "AttackSimulationRun",

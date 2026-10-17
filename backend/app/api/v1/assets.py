@@ -34,15 +34,22 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Query, UploadFile
+from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
 
 from app.api.deps import DbSession, PaginationDep, PrincipalDep
 from app.core.errors import InvalidConfigurationError
 from app.schemas.asset import (
+    AssetBulkUpdateIn,
     AssetContextIn,
+    AssetCreateIn,
     AssetCriticalityIn,
+    AssetCsvImportOut,
     AssetFilter,
+    AssetMergeIn,
+    AssetMergeOut,
     AssetOut,
+    AssetRelationshipIn,
+    AssetRelationshipOut,
     AssetTagIn,
     CmdbImportOut,
 )
@@ -52,9 +59,98 @@ from app.schemas.policy_gate import PolicyGateOut
 from app.services import asset as asset_service
 from app.services import asset_change as asset_change_service
 from app.services import asset_cmdb as asset_cmdb_service
+from app.services import asset_merge as asset_merge_service
 from app.services import policy_gate as policy_gate_service
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+
+@router.post("", response_model=AssetOut, status_code=status.HTTP_201_CREATED)
+async def create_asset(
+    payload: AssetCreateIn, principal: PrincipalDep, session: DbSession
+) -> AssetOut:
+    row = await asset_merge_service.create_asset(session, principal, payload)
+    await session.commit()
+    row = await asset_service.get_asset(session, principal, row.id)
+    return AssetOut.model_validate(row)
+
+
+@router.patch("/bulk", response_model=list[AssetOut])
+async def bulk_update_assets(
+    payload: AssetBulkUpdateIn, principal: PrincipalDep, session: DbSession
+) -> list[AssetOut]:
+    rows = await asset_merge_service.bulk_update_assets(session, principal, payload)
+    await session.commit()
+    return [
+        AssetOut.model_validate(await asset_service.get_asset(session, principal, row.id))
+        for row in rows
+    ]
+
+
+@router.post("/merge", response_model=AssetMergeOut, status_code=status.HTTP_201_CREATED)
+async def merge_assets(
+    payload: AssetMergeIn, principal: PrincipalDep, session: DbSession
+) -> AssetMergeOut:
+    event = await asset_merge_service.merge_assets(session, principal, payload)
+    await session.commit()
+    return AssetMergeOut(
+        event_id=event.id,
+        source_asset_id=event.source_asset_id,
+        target_asset_id=event.target_asset_id,
+        moved_counts={key: int(value) for key, value in event.moved_counts.items()},
+    )
+
+
+@router.post(
+    "/relationships",
+    response_model=AssetRelationshipOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_asset_relationship(
+    payload: AssetRelationshipIn, principal: PrincipalDep, session: DbSession
+) -> AssetRelationshipOut:
+    row = await asset_merge_service.create_relationship(session, principal, payload)
+    await session.commit()
+    await session.refresh(row)
+    return AssetRelationshipOut.model_validate(row)
+
+
+@router.get("/{asset_id}/relationships", response_model=list[AssetRelationshipOut])
+async def list_asset_relationships(
+    asset_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> list[AssetRelationshipOut]:
+    rows = await asset_merge_service.list_relationships(session, principal, asset_id)
+    return [AssetRelationshipOut.model_validate(row) for row in rows]
+
+
+@router.post("/csv-import", response_model=AssetCsvImportOut)
+async def import_asset_inventory(
+    file: Annotated[UploadFile, File()],
+    principal: PrincipalDep,
+    session: DbSession,
+    dry_run: Annotated[bool, Form()] = True,
+) -> AssetCsvImportOut:
+    data = await file.read(asset_merge_service.MAX_ASSET_CSV_BYTES + 1)
+    try:
+        rows = asset_merge_service.parse_asset_csv(data)
+    except ValueError as exc:
+        raise InvalidConfigurationError("invalid asset CSV", user_message=str(exc)) from exc
+    result = await asset_merge_service.import_asset_rows(
+        session, principal, rows, dry_run=dry_run
+    )
+    if not dry_run:
+        await session.commit()
+    return AssetCsvImportOut(dry_run=dry_run, **result)
+
+
+@router.get("/export.csv", response_class=Response)
+async def export_asset_inventory(principal: PrincipalDep, session: DbSession) -> Response:
+    data = await asset_merge_service.export_inventory(session, principal)
+    return Response(
+        content=data,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="cynux-assets.csv"'},
+    )
 
 
 @router.get("/changes", response_model=AssetChangePageOut)

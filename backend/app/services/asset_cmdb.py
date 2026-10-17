@@ -180,6 +180,7 @@ async def apply_cmdb_csv(
             continue
         for key, value in changes.items():
             setattr(asset, key, value)
+        asset.version = int(getattr(asset, "version", 0) or 0) + 1
         if "criticality" in changes:
             asset.criticality_source = "cmdb"
             asset.criticality_rationale = "Imported from CMDB business tier."

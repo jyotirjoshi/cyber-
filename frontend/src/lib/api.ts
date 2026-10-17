@@ -45,11 +45,17 @@ import type {
   AssessmentOut,
   EngagementChecklistUpdateIn,
   AssetCriticalityIn,
+  AssetBulkUpdateIn,
+  AssetCreateIn,
+  AssetCsvImportOut,
+  AssetMergeIn,
+  AssetMergeOut,
   AssetChangePageOut,
   AssetContextIn,
   CmdbImportOut,
   AssetFilter,
   AssetOut,
+  AssetRelationshipOut,
   AssetTagIn,
   BulkCanonicalWorkIn,
   AttackSimulationCampaignCreateIn,
@@ -772,6 +778,18 @@ export const api = {
   },
 
   assets: {
+    create: (body: AssetCreateIn) => request<AssetOut>("POST", "/assets", { body }),
+    bulkUpdate: (body: AssetBulkUpdateIn) => request<AssetOut[]>("PATCH", "/assets/bulk", { body }),
+    merge: (body: AssetMergeIn) => request<AssetMergeOut>("POST", "/assets/merge", { body }),
+    relationships: (id: string) => request<AssetRelationshipOut[]>("GET", `/assets/${id}/relationships`),
+    createRelationship: (body: { source_asset_id: string; target_asset_id: string; relationship_type: AssetRelationshipOut["relationship_type"]; evidence?: Record<string, unknown> }) =>
+      request<AssetRelationshipOut>("POST", "/assets/relationships", { body }),
+    importCsv: (file: File, dryRun: boolean) => {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("dry_run", String(dryRun));
+      return request<AssetCsvImportOut>("POST", "/assets/csv-import", { body: form });
+    },
     list: (params?: ListParams<AssetFilter>) =>
       request<Page<AssetOut>>("GET", "/assets", { query: params }),
     changes: (params?: { limit?: number; offset?: number }) =>

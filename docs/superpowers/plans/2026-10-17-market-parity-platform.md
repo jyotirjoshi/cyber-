@@ -138,10 +138,11 @@
 **Interfaces:**
 - Produces: create, CSV import/export, bulk update, merge, relationship, custom-field, and cloud-inventory projection operations.
 
-- [ ] Add failing provenance, merge, bulk, CSV, cycle, and cross-tenant tests.
-- [ ] Implement persistence and service operations with immutable merge history.
-- [ ] Add API/SDK/UI surfaces and asynchronous large-import jobs.
-- [ ] Run asset and frontend suites.
+- [x] Add failing provenance, merge, bulk, CSV, cycle, and cross-tenant tests.
+- [x] Implement persistence and service operations with immutable merge history.
+- [x] Add API/SDK/UI surfaces with bounded CSV preview/apply imports.
+- [ ] Add durable asynchronous processing for imports above the interactive limit.
+- [x] Run asset, SDK, and frontend suites.
 
 ### Task 7: Event-driven bidirectional ticket synchronization
 

@@ -714,6 +714,8 @@ export interface AssetTagIn {
 
 export interface AssetOut {
   id: Uuid;
+  version: number;
+  merged_into_id: Uuid | null;
   assessment_id: Uuid | null;
   name: string;
   asset_type: string;
@@ -816,6 +818,58 @@ export interface AssetContextIn {
 export interface AssetCriticalityIn {
   criticality: Criticality;
   rationale?: string | null;
+}
+
+export interface AssetCreateIn {
+  name: string;
+  asset_type: string;
+  port?: number | null;
+  protocol?: string | null;
+  service?: string | null;
+  internet_exposed?: boolean;
+  context?: AssetContextIn | null;
+}
+
+export interface AssetBulkUpdateIn {
+  items: Array<{
+    asset_id: Uuid;
+    expected_version: number;
+    context?: AssetContextIn | null;
+    status?: AssetStatus | null;
+  }>;
+}
+
+export interface AssetMergeIn {
+  source_asset_id: Uuid;
+  target_asset_id: Uuid;
+  source_expected_version: number;
+  target_expected_version: number;
+  reason: string;
+}
+
+export interface AssetMergeOut {
+  event_id: Uuid;
+  source_asset_id: Uuid;
+  target_asset_id: Uuid;
+  moved_counts: Record<string, number>;
+}
+
+export interface AssetRelationshipOut {
+  id: Uuid;
+  source_asset_id: Uuid;
+  target_asset_id: Uuid;
+  relationship_type: "depends_on" | "contains" | "hosts" | "connects_to" | "owned_by";
+  evidence: Record<string, unknown>;
+  created_by_id: Uuid | null;
+  created_at: IsoDateTime;
+}
+
+export interface AssetCsvImportOut {
+  dry_run: boolean;
+  accepted: number;
+  created: number;
+  existing: number;
+  errors: string[];
 }
 
 export interface PolicyGateOut {

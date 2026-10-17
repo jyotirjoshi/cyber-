@@ -71,6 +71,7 @@ from app.db.enums import (
     AssessmentStage,
     AssessmentStatus,
     AssetEnvironment,
+    AssetRelationshipType,
     AssetStatus,
     AttackSimulationCampaignStatus,
     AuditOutcome,
@@ -173,6 +174,7 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     # --- assets -----------------------------------------------------------
     EnumColumn("assets", "status", AssetStatus),
     EnumColumn("assets", "environment", AssetEnvironment),
+    EnumColumn("asset_relationships", "relationship_type", AssetRelationshipType),
     EnumColumn("assets", "criticality", Criticality),
     EnumColumn("assets", "criticality_source", CriticalitySource),
     # --- scanners ---------------------------------------------------------

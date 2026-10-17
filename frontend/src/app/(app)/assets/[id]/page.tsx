@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import * as React from "react";
 
 import { Badge, CriticalityBadge } from "@/components/ui/Badge";
@@ -17,7 +17,7 @@ import { useAuth } from "@/lib/auth";
 import { parseCustomFields } from "@/lib/custom-fields";
 import { fieldError, getErrorMessage } from "@/lib/errors";
 import { formatDateTime, humanize } from "@/lib/format";
-import type { AssetEnvironment, AssetOut, Criticality } from "@/lib/types";
+import type { AssetEnvironment, AssetOut, AssetRelationshipOut, Criticality } from "@/lib/types";
 
 const CRITICALITIES: Criticality[] = ["critical", "high", "normal", "low", "unknown"];
 const ENVIRONMENTS: AssetEnvironment[] = ["unknown", "production", "staging", "development", "test"];
@@ -38,6 +38,7 @@ function Detail({ label, value }: { label: string; value: string | null }) {
 }
 
 export default function AssetDetailPage() {
+  const router = useRouter();
   const { can } = useAuth();
   const { toast } = useToast();
   const routeParams = useParams();
@@ -57,6 +58,16 @@ export default function AssetDetailPage() {
     [id],
     { enabled: canRead && !!id },
   );
+  const relationships = useApiResource(
+    () => api.assets.relationships(id),
+    [id],
+    { enabled: canRead && !!id },
+  );
+  const relationshipAssets = useApiResource(
+    () => api.assets.list({ limit: 100, offset: 0 }),
+    [canTag],
+    { enabled: canTag },
+  );
 
   const [critValue, setCritValue] = React.useState<Criticality>("normal");
   const [critRationale, setCritRationale] = React.useState("");
@@ -67,6 +78,10 @@ export default function AssetDetailPage() {
   const [environment, setEnvironment] = React.useState<AssetEnvironment>("unknown");
   const [groups, setGroups] = React.useState("");
   const [customFieldsText, setCustomFieldsText] = React.useState("{}");
+  const [relatedAssetId, setRelatedAssetId] = React.useState("");
+  const [relationshipType, setRelationshipType] = React.useState<AssetRelationshipOut["relationship_type"]>("depends_on");
+  const [mergeTargetId, setMergeTargetId] = React.useState("");
+  const [mergeReason, setMergeReason] = React.useState("");
 
   // Keep the criticality selector in sync with whatever the server currently reports.
   React.useEffect(() => {
@@ -138,6 +153,38 @@ export default function AssetDetailPage() {
       toast({ title: "Couldn't update asset", description: getErrorMessage(e), tone: "danger" }),
   });
 
+  const relationshipMut = useMutation(
+    () => api.assets.createRelationship({
+      source_asset_id: id,
+      target_asset_id: relatedAssetId,
+      relationship_type: relationshipType,
+    }),
+    {
+      onSuccess: () => {
+        setRelatedAssetId("");
+        void relationships.refetch();
+        toast({ title: "Asset relationship created", tone: "ok" });
+      },
+    },
+  );
+
+  const mergeMut = useMutation(
+    () => api.assets.merge({
+      source_asset_id: id,
+      target_asset_id: mergeTargetId,
+      source_expected_version: data?.version ?? 0,
+      target_expected_version:
+        relationshipAssets.data?.items.find((item) => item.id === mergeTargetId)?.version ?? 0,
+      reason: mergeReason,
+    }),
+    {
+      onSuccess: (result) => {
+        toast({ title: "Asset merged", description: "Opening the canonical asset.", tone: "ok" });
+        router.push(`/assets/${result.target_asset_id}`);
+      },
+    },
+  );
+
   if (!canRead) {
     return (
       <EmptyState title="No access" description="You don't have permission to view this." />
@@ -156,6 +203,7 @@ export default function AssetDetailPage() {
   const endpoint = assetEndpoint(asset);
   const critFieldError = fieldError(critMut.error, "criticality") ?? fieldError(critMut.error, "rationale");
   const tagFieldError = fieldError(tagMut.error, "key") ?? fieldError(tagMut.error, "value");
+  const availableAssets = (relationshipAssets.data?.items ?? []).filter((item) => item.id !== asset.id);
 
   return (
     <div className="space-y-6">
@@ -298,6 +346,32 @@ export default function AssetDetailPage() {
               )}
             </CardBody>
           </Card>
+
+          <Card>
+            <CardHeader><CardTitle>Asset topology</CardTitle></CardHeader>
+            <CardBody className="space-y-4">
+              {relationships.loading && !relationships.data ? <LoadingState label="Loading topology…" /> : relationships.error ? (
+                <ErrorState message={relationships.error} onRetry={relationships.refetch} />
+              ) : relationships.data?.length ? (
+                <ul className="divide-y divide-line rounded-lg border border-line text-sm">
+                  {relationships.data.map((edge) => {
+                    const outgoing = edge.source_asset_id === asset.id;
+                    const otherId = outgoing ? edge.target_asset_id : edge.source_asset_id;
+                    const other = availableAssets.find((candidate) => candidate.id === otherId);
+                    return <li key={edge.id} className="flex flex-wrap items-center justify-between gap-2 p-3"><span className="text-fg">{outgoing ? "This asset" : (other?.name ?? otherId)} <span className="text-muted">{humanize(edge.relationship_type)}</span> {outgoing ? (other?.name ?? otherId) : "this asset"}</span><Button size="sm" variant="ghost" onClick={() => router.push(`/assets/${otherId}`)}>Open</Button></li>;
+                  })}
+                </ul>
+              ) : <p className="text-sm text-muted">No topology relationships recorded.</p>}
+              {canTag && (
+                <form className="grid gap-3 border-t border-line pt-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end" onSubmit={(event) => { event.preventDefault(); void relationshipMut.run(); }}>
+                  <Field label="Relationship" htmlFor="relationship-type"><Select id="relationship-type" value={relationshipType} onChange={(event) => setRelationshipType(event.target.value as AssetRelationshipOut["relationship_type"])}>{["depends_on", "contains", "hosts", "connects_to", "owned_by"].map((value) => <option key={value} value={value}>{humanize(value)}</option>)}</Select></Field>
+                  <Field label="Related asset" htmlFor="related-asset"><Select id="related-asset" required value={relatedAssetId} onChange={(event) => setRelatedAssetId(event.target.value)}><option value="">Select asset</option>{availableAssets.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</Select></Field>
+                  <Button type="submit" loading={relationshipMut.loading} disabled={!relatedAssetId}>Connect</Button>
+                  <div className="sm:col-span-3"><InlineError message={relationshipMut.errorMessage} /></div>
+                </form>
+              )}
+            </CardBody>
+          </Card>
         </div>
 
         <div className="space-y-6">
@@ -344,6 +418,23 @@ export default function AssetDetailPage() {
               )}
             </CardBody>
           </Card>
+          {canTag && (
+            <Card>
+              <CardHeader><CardTitle>Merge duplicate</CardTitle></CardHeader>
+              <CardBody>
+                <form className="space-y-3" onSubmit={(event) => {
+                  event.preventDefault();
+                  if (window.confirm("Merge this asset into the selected canonical asset? Historical provenance will remain auditable.")) void mergeMut.run();
+                }}>
+                  <p className="text-sm text-muted">Retire this duplicate while preserving its alias, evidence and history.</p>
+                  <Field label="Canonical asset" htmlFor="merge-target"><Select id="merge-target" required value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)}><option value="">Select asset</option>{availableAssets.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</Select></Field>
+                  <Field label="Reason" htmlFor="merge-reason" error={fieldError(mergeMut.error, "reason")}><Textarea id="merge-reason" required minLength={3} maxLength={1000} value={mergeReason} onChange={(event) => setMergeReason(event.target.value)} rows={3} /></Field>
+                  <InlineError message={mergeMut.errorMessage} />
+                  <Button type="submit" variant="danger" size="sm" loading={mergeMut.loading} disabled={!mergeTargetId || mergeReason.trim().length < 3}>Merge asset</Button>
+                </form>
+              </CardBody>
+            </Card>
+          )}
           <Card>
             <CardHeader><CardTitle>CI/CD policy gate</CardTitle></CardHeader>
             <CardBody className="space-y-3 text-sm">

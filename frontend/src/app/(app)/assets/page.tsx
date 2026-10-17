@@ -19,7 +19,7 @@ import { canApplyCmdbPreview } from "@/lib/asset-cmdb";
 import { useAuth } from "@/lib/auth";
 import { getErrorMessage } from "@/lib/errors";
 import { humanize } from "@/lib/format";
-import type { AssetEnvironment, AssetOut, AssetStatus, CmdbImportOut, Criticality } from "@/lib/types";
+import type { AssetCsvImportOut, AssetEnvironment, AssetOut, AssetStatus, CmdbImportOut, Criticality } from "@/lib/types";
 
 const CRITICALITIES: Criticality[] = ["critical", "high", "normal", "low", "unknown"];
 const ASSET_STATUSES: AssetStatus[] = ["active", "inactive", "unreachable", "out_of_scope"];
@@ -55,6 +55,12 @@ export default function AssetsPage() {
   const [cmdbBusy, setCmdbBusy] = React.useState(false);
   const [cmdbError, setCmdbError] = React.useState<string | null>(null);
   const [selectedApplication, setSelectedApplication] = React.useState<string | null>(null);
+  const [manualName, setManualName] = React.useState("");
+  const [manualType, setManualType] = React.useState("domain");
+  const [inventoryFile, setInventoryFile] = React.useState<File | null>(null);
+  const [inventoryPreview, setInventoryPreview] = React.useState<AssetCsvImportOut | null>(null);
+  const [inventoryBusy, setInventoryBusy] = React.useState(false);
+  const [inventoryMessage, setInventoryMessage] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const query = new URLSearchParams(window.location.search);
@@ -137,6 +143,41 @@ export default function AssetsPage() {
       setCmdbError(getErrorMessage(cause));
     } finally {
       setCmdbBusy(false);
+    }
+  };
+
+  const createManualAsset = async () => {
+    if (!manualName.trim() || inventoryBusy) return;
+    setInventoryBusy(true);
+    setInventoryMessage(null);
+    try {
+      const row = await api.assets.create({ name: manualName.trim(), asset_type: manualType });
+      setManualName("");
+      setInventoryMessage(`Created ${row.name}.`);
+      void refetch();
+    } catch (cause) {
+      setInventoryMessage(getErrorMessage(cause));
+    } finally {
+      setInventoryBusy(false);
+    }
+  };
+
+  const importInventory = async (dryRun: boolean) => {
+    if (!inventoryFile || inventoryBusy) return;
+    setInventoryBusy(true);
+    setInventoryMessage(null);
+    try {
+      const result = await api.assets.importCsv(inventoryFile, dryRun);
+      if (dryRun) setInventoryPreview(result);
+      else {
+        setInventoryPreview(null);
+        setInventoryMessage(`Imported ${result.created} assets; ${result.existing} already existed.`);
+        void refetch();
+      }
+    } catch (cause) {
+      setInventoryMessage(getErrorMessage(cause));
+    } finally {
+      setInventoryBusy(false);
     }
   };
 
@@ -251,6 +292,28 @@ export default function AssetsPage() {
                 )}
               </div>
             )}
+          </CardBody>
+        </Card>
+      )}
+
+      {canTag && (
+        <Card>
+          <CardBody className="space-y-4">
+            <div>
+              <h2 className="text-sm font-semibold text-fg">Inventory operations</h2>
+              <p className="text-xs text-muted">Create a canonical asset or import a bounded CSV. CSV requires name and asset_type; optional columns are port, protocol, service, and internet_exposed.</p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-[1fr_12rem_auto]">
+              <Field label="Asset identity" htmlFor="manual-asset-name"><Input id="manual-asset-name" value={manualName} onChange={(event) => setManualName(event.target.value)} placeholder="api.example.com, 10.0.0.4, owner/repo…" /></Field>
+              <Field label="Type" htmlFor="manual-asset-type"><Select id="manual-asset-type" value={manualType} onChange={(event) => setManualType(event.target.value)}><option value="domain">Domain</option><option value="ip">IP address</option><option value="url">URL</option><option value="repo">Repository</option><option value="container">Container image</option><option value="cloud_resource">Cloud resource</option><option value="application">Application</option></Select></Field>
+              <div className="self-end"><Button disabled={!manualName.trim() || inventoryBusy} loading={inventoryBusy} onClick={() => void createManualAsset()}>Create asset</Button></div>
+            </div>
+            <div className="space-y-2 border-t border-line pt-3">
+              <input aria-label="Asset inventory CSV file" type="file" accept=".csv,text/csv" className="block w-full text-sm text-muted" onChange={(event) => { setInventoryFile(event.target.files?.[0] ?? null); setInventoryPreview(null); setInventoryMessage(null); }} />
+              <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!inventoryFile || inventoryBusy} onClick={() => void importInventory(true)}>Preview inventory CSV</Button><Button size="sm" disabled={!inventoryFile || !inventoryPreview || inventoryBusy} onClick={() => void importInventory(false)}>Apply inventory CSV</Button></div>
+              {inventoryPreview && <p className="text-xs text-muted">Preview: {inventoryPreview.accepted} accepted, {inventoryPreview.existing} existing, {inventoryPreview.errors.length} errors.</p>}
+              {inventoryMessage && <p className="text-xs text-muted">{inventoryMessage}</p>}
+            </div>
           </CardBody>
         </Card>
       )}
