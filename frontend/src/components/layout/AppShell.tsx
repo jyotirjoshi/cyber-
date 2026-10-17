@@ -29,6 +29,7 @@ const NAV: NavItem[] = [
   { href: "/agent/agents", label: "Custom agents", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/agent/learning", label: "Learning review", icon: <IconAgent />, permission: "org:manage" },
   { href: "/agent/knowledge", label: "Knowledge", icon: <IconAgent />, permission: "agent:chat" },
+  { href: "/agent/workspaces", label: "Agent workspaces", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/assessments", label: "Assessments", icon: <IconAssessments />, permission: "assessment:read" },
   { href: "/engagements", label: "PTaaS", icon: <IconAssessments />, permission: "assessment:read" },
   { href: "/findings", label: "Findings", icon: <IconFindings />, permission: "finding:read" },

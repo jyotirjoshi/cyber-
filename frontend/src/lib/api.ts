@@ -28,6 +28,9 @@ import type {
   AgentSessionDetailOut,
   AgentSessionAutonomyIn,
   AgentSessionOut,
+  AgentWorkspaceCreateIn,
+  AgentWorkspaceOut,
+  AgentWorkspaceStatus,
   AnalyzeIn,
   ApplicationPatternsOut,
   ApplicationRiskPageOut,
@@ -177,6 +180,9 @@ import type {
   WorkflowDefinitionIn,
   WorkflowDefinitionOut,
   WorkflowRunOut,
+  WorkspaceArtifactOut,
+  WorkspaceEvidenceManifest,
+  WorkspaceRecordOut,
   ScanAuthProfileIn,
   ScanAuthProfileOut,
 } from "./types";
@@ -643,6 +649,38 @@ export const api = {
       form.append("client_visible", String(input.clientVisible));
       return request<EngagementDocumentOut>("POST", `/engagements/${id}/documents/upload`, { body: form });
     },
+  },
+
+  agentWorkspaces: {
+    list: (params?: { limit?: number; offset?: number }) =>
+      request<Page<AgentWorkspaceOut>>("GET", "/agent-workspaces", { query: params }),
+    create: (body: AgentWorkspaceCreateIn) =>
+      request<AgentWorkspaceOut>("POST", "/agent-workspaces", { body }),
+    get: (id: string) => request<AgentWorkspaceOut>("GET", `/agent-workspaces/${id}`),
+    updateStatus: (
+      id: string,
+      status: Extract<AgentWorkspaceStatus, "active" | "suspended" | "closed">,
+      expectedVersion: number,
+    ) => request<AgentWorkspaceOut>("PATCH", `/agent-workspaces/${id}/status`, {
+      body: { status, expected_version: expectedVersion },
+    }),
+    putRecord: (
+      id: string,
+      body: { namespace: string; key: string; value: Record<string, unknown>; expected_version?: number },
+    ) => request<WorkspaceRecordOut>("PUT", `/agent-workspaces/${id}/records`, { body }),
+    uploadArtifact: (
+      id: string,
+      input: { file: File; kind: WorkspaceArtifactOut["kind"]; taskId?: string; isEvidence: boolean },
+    ) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("kind", input.kind);
+      form.append("is_evidence", String(input.isEvidence));
+      if (input.taskId) form.append("task_id", input.taskId);
+      return request<WorkspaceArtifactOut>("POST", `/agent-workspaces/${id}/artifacts/upload`, { body: form });
+    },
+    evidenceExport: (id: string) =>
+      request<WorkspaceEvidenceManifest>("GET", `/agent-workspaces/${id}/evidence-export`),
   },
 
   approvals: {

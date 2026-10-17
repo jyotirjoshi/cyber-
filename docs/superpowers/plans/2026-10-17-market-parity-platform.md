@@ -91,18 +91,18 @@
 - Create: `backend/app/db/models/agent_workspace.py`
 - Create: `backend/app/services/agent_workspace.py`
 - Create: `backend/app/api/v1/agent_workspaces.py`
-- Create: `backend/alembic/versions/0095_agent_workspaces.py`
+- Create: `backend/alembic/versions/0096_agent_workspaces.py`
 - Create: `frontend/src/app/(app)/agent/workspaces/page.tsx`
 - Test: `backend/tests/unit/test_agent_workspaces.py`
 
 **Interfaces:**
 - Produces: durable workspace, artifact, shared-table, credential-reference, browser-task, and shell-task contracts linked to AgentRun.
 
-- [ ] Add failing isolation, artifact, approval, quota, and reproducibility tests.
-- [ ] Implement workspace persistence and object-storage artifacts.
-- [ ] Bind active tasks to existing approval and scanner dispatch systems.
-- [ ] Add evidence export and UI.
-- [ ] Run agent and frontend suites.
+- [x] Add failing isolation, artifact, approval, quota, and reproducibility tests.
+- [x] Implement workspace persistence and object-storage artifacts.
+- [x] Bind active tasks to existing approval and scanner dispatch systems.
+- [x] Add evidence export and UI.
+- [x] Run agent and frontend suites.
 
 ### Task 5: Automation platform expansion
 
@@ -130,7 +130,7 @@
 - Modify: `backend/app/services/asset.py`
 - Modify: `backend/app/api/v1/assets.py`
 - Create: `backend/app/services/asset_merge.py`
-- Create: `backend/alembic/versions/0096_asset_inventory_operations.py`
+- Create: `backend/alembic/versions/0097_asset_inventory_operations.py`
 - Modify: `frontend/src/app/(app)/assets/page.tsx`
 - Test: `backend/tests/unit/test_asset_inventory_operations.py`
 
@@ -164,7 +164,7 @@
 - Create: `backend/app/db/models/exploit_intelligence.py`
 - Create: `backend/app/services/exploit_intelligence.py`
 - Modify: `backend/app/services/canonical_risk.py`
-- Create: `backend/alembic/versions/0097_exploit_intelligence.py`
+- Create: `backend/alembic/versions/0098_exploit_intelligence.py`
 - Modify: `frontend/src/app/(app)/threat-intelligence/page.tsx`
 - Test: `backend/tests/unit/test_exploit_intelligence.py`
 
@@ -183,7 +183,7 @@
 - Create: `backend/app/services/mfa.py`
 - Create: `backend/app/services/retention.py`
 - Create: `backend/app/db/models/workbook.py`
-- Create: `backend/alembic/versions/0098_enterprise_controls.py`
+- Create: `backend/alembic/versions/0099_enterprise_controls.py`
 - Modify: `backend/app/api/v1/organization.py`
 - Create: `backend/app/api/v1/workbooks.py`
 - Create: `frontend/src/app/(app)/reports/workbooks/page.tsx`

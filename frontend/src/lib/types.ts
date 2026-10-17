@@ -2650,3 +2650,98 @@ export interface EngagementDocumentOut {
   client_visible: boolean;
   created_at: IsoDateTime;
 }
+
+// ---------------------------------------------------------------------------
+// Durable agent execution workspaces.
+// ---------------------------------------------------------------------------
+
+export type AgentWorkspaceStatus = "active" | "suspended" | "closed" | "expired";
+
+export interface AgentWorkspaceCreateIn {
+  run_id: Uuid;
+  name: string;
+  max_bytes?: number;
+  ttl_hours?: number;
+}
+
+export interface AgentWorkspaceOut {
+  id: Uuid;
+  run_id: Uuid;
+  status: AgentWorkspaceStatus;
+  name: string;
+  max_bytes: number;
+  used_bytes: number;
+  manifest: Record<string, unknown>;
+  expires_at: IsoDateTime;
+  closed_at: IsoDateTime | null;
+  version: number;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface WorkspaceArtifactOut {
+  id: Uuid;
+  workspace_id: Uuid;
+  task_id: Uuid | null;
+  kind: "input" | "output" | "screenshot" | "har" | "console" | "report" | "evidence" | "archive";
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  summary: Record<string, unknown>;
+  is_evidence: boolean;
+  created_at: IsoDateTime;
+}
+
+export interface WorkspaceRecordOut {
+  id: Uuid;
+  workspace_id: Uuid;
+  namespace: string;
+  key: string;
+  value: Record<string, unknown>;
+  version: number;
+  updated_by_task_id: Uuid | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface WorkspaceEvidenceManifest {
+  schema_version: "v1";
+  workspace: {
+    id: Uuid;
+    run_id: Uuid;
+    name: string;
+    status: AgentWorkspaceStatus;
+    used_bytes: number;
+    max_bytes: number;
+    expires_at: IsoDateTime;
+  };
+  artifacts: Array<{
+    id: Uuid;
+    task_id: Uuid | null;
+    kind: WorkspaceArtifactOut["kind"];
+    filename: string;
+    content_type: string;
+    size_bytes: number;
+    sha256: string;
+    is_evidence: boolean;
+  }>;
+  records: Array<{
+    namespace: string;
+    key: string;
+    value: Record<string, unknown>;
+    version: number;
+  }>;
+  executions: Array<{
+    id: Uuid;
+    task_id: Uuid;
+    approval_id: Uuid;
+    kind: "shell" | "browser" | "scanner";
+    status: string;
+    executable: string;
+    argument_names: string[];
+    environment_names: string[];
+    command_digest: string;
+    result_summary: Record<string, unknown>;
+  }>;
+}

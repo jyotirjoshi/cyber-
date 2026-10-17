@@ -59,6 +59,11 @@ from app.db.enums import (
     AgentTaskKind,
     AgentTaskStatus,
     AgentToolApprovalMode,
+    AgentWorkspaceArtifactKind,
+    AgentWorkspaceCredentialStatus,
+    AgentWorkspaceExecutionKind,
+    AgentWorkspaceExecutionStatus,
+    AgentWorkspaceStatus,
     ApprovalDecision,
     ApprovalKind,
     ArtifactKind,
@@ -208,6 +213,15 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     EnumColumn("agent_runs", "status", AgentRunStatus),
     EnumColumn("agent_tasks", "kind", AgentTaskKind),
     EnumColumn("agent_tasks", "status", AgentTaskStatus),
+    EnumColumn("agent_workspaces", "status", AgentWorkspaceStatus),
+    EnumColumn("agent_workspace_artifacts", "kind", AgentWorkspaceArtifactKind),
+    EnumColumn(
+        "agent_workspace_credential_references", "status", AgentWorkspaceCredentialStatus
+    ),
+    EnumColumn(
+        "agent_workspace_executions", "execution_kind", AgentWorkspaceExecutionKind
+    ),
+    EnumColumn("agent_workspace_executions", "status", AgentWorkspaceExecutionStatus),
     EnumColumn("agent_task_dependencies", "dependency_kind", AgentTaskDependencyKind),
     EnumColumn("agent_task_attempts", "status", AgentTaskAttemptStatus),
     EnumColumn("agent_evidence", "kind", AgentEvidenceKind),

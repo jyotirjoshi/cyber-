@@ -621,6 +621,45 @@ class AgentTaskAttemptStatus(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class AgentWorkspaceStatus(StrEnum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    CLOSED = "closed"
+    EXPIRED = "expired"
+
+
+class AgentWorkspaceArtifactKind(StrEnum):
+    INPUT = "input"
+    OUTPUT = "output"
+    SCREENSHOT = "screenshot"
+    HAR = "har"
+    CONSOLE = "console"
+    REPORT = "report"
+    EVIDENCE = "evidence"
+    ARCHIVE = "archive"
+
+
+class AgentWorkspaceCredentialStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+class AgentWorkspaceExecutionKind(StrEnum):
+    SHELL = "shell"
+    BROWSER = "browser"
+    SCANNER = "scanner"
+
+
+class AgentWorkspaceExecutionStatus(StrEnum):
+    PENDING = "pending"
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class AgentEvidenceKind(StrEnum):
     OBSERVATION = "observation"
     ARTIFACT = "artifact"
@@ -900,6 +939,11 @@ __all__ = [
     "AgentEvaluationDecision",
     "AgentMemoryCandidateStatus",
     "AgentToolApprovalMode",
+    "AgentWorkspaceArtifactKind",
+    "AgentWorkspaceCredentialStatus",
+    "AgentWorkspaceExecutionKind",
+    "AgentWorkspaceExecutionStatus",
+    "AgentWorkspaceStatus",
     "ApprovalDecision",
     "ApprovalKind",
     "ArtifactKind",

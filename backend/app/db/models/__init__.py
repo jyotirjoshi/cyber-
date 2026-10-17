@@ -33,6 +33,13 @@ from app.db.models.agent_task import (
     AgentTaskAttempt,
     AgentTaskDependency,
 )
+from app.db.models.agent_workspace import (
+    AgentWorkspace,
+    AgentWorkspaceArtifact,
+    AgentWorkspaceCredentialReference,
+    AgentWorkspaceExecution,
+    AgentWorkspaceRecord,
+)
 from app.db.models.asm import AsmSurface
 from app.db.models.assessment import (
     Approval,
@@ -139,6 +146,11 @@ __all__ = [
     "AgentTaskAttempt",
     "AgentEvidence",
     "AgentBudgetReservation",
+    "AgentWorkspace",
+    "AgentWorkspaceArtifact",
+    "AgentWorkspaceCredentialReference",
+    "AgentWorkspaceExecution",
+    "AgentWorkspaceRecord",
     "AgentMemoryCandidate",
     "RunDispatch",
     "Approval",

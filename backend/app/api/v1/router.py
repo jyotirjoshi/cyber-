@@ -13,6 +13,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     agent,
     agent_definitions,
+    agent_workspaces,
     applications,
     approvals,
     asm,
@@ -70,6 +71,7 @@ api_router.include_router(integrations.router)
 api_router.include_router(audit.router)
 api_router.include_router(agent.router)
 api_router.include_router(agent_definitions.router)
+api_router.include_router(agent_workspaces.router)
 api_router.include_router(automation.router)
 api_router.include_router(attack_simulations.router)
 api_router.include_router(platform.router)
