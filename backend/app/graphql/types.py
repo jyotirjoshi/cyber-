@@ -313,3 +313,59 @@ class AssessmentNode:
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
+
+
+@strawberry.type(name="Report")
+class ReportNode:
+    id: strawberry.ID
+    assessment_id: strawberry.ID
+    title: str
+    format: str
+    audience: str
+    status: str
+    size_bytes: int | None
+    generated_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=strawberry.ID(encode_global_id("Report", row.id)),
+            assessment_id=strawberry.ID(encode_global_id("Assessment", row.assessment_id)),
+            title=row.title,
+            format=row.format,
+            audience=row.audience,
+            status=row.status,
+            size_bytes=row.size_bytes,
+            generated_at=row.generated_at,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+
+@strawberry.type(name="AutomationRule")
+class AutomationRuleNode:
+    id: strawberry.ID
+    name: str
+    trigger: str
+    is_enabled: bool
+    dry_run: bool
+    timezone: str
+    action_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=strawberry.ID(encode_global_id("AutomationRule", row.id)),
+            name=row.name,
+            trigger=row.trigger,
+            is_enabled=row.is_enabled,
+            dry_run=row.dry_run,
+            timezone=row.timezone,
+            action_count=len(row.actions or []),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )

@@ -13,8 +13,9 @@ from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition
 from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset
-from app.db.models.canonical import CanonicalFinding
+from app.db.models.canonical import AutomationRule, CanonicalFinding
 from app.db.models.knowledge import KnowledgeCollection
+from app.db.models.report import Report
 from app.graphql.schema import schema
 from app.services.context import Principal
 
@@ -27,7 +28,15 @@ async def query_context():
     # Same column types, but without PostgreSQL-only DDL/foreign-key targets. This
     # checks the real resolver's predicates and keyset traversal, not migrations.
     metadata = MetaData()
-    for model in (AgentDefinition, KnowledgeCollection, Asset, CanonicalFinding, Assessment):
+    for model in (
+        AgentDefinition,
+        KnowledgeCollection,
+        Asset,
+        CanonicalFinding,
+        Assessment,
+        Report,
+        AutomationRule,
+    ):
         Table(
             model.__tablename__,
             metadata,
@@ -57,6 +66,8 @@ async def query_context():
                 Permission.ASSET_READ,
                 Permission.FINDING_READ,
                 Permission.ASSESSMENT_READ,
+                Permission.REPORT_READ,
+                Permission.ORG_READ,
             }
         ),
         request_id="query-test",
@@ -148,6 +159,32 @@ async def query_context():
                 plan=[],
                 request_interpretation={},
                 extra_data={},
+            )
+        )
+        session.add(
+            Report(
+                id=uuid.UUID(int=14),
+                organization_id=principal.organization_id,
+                assessment_id=uuid.UUID(int=12),
+                title="Quarterly exposure report",
+                format="pdf",
+                audience="executive",
+                status="ready",
+                content_digest={},
+                degradations=[],
+            )
+        )
+        session.add(
+            AutomationRule(
+                id=uuid.UUID(int=15),
+                organization_id=principal.organization_id,
+                name="Escalate production criticals",
+                trigger="finding.created",
+                conditions={"severity": ["critical"]},
+                actions=[{"type": "notify"}],
+                timezone="UTC",
+                is_enabled=True,
+                dry_run=False,
             )
         )
         session.add(
@@ -299,3 +336,29 @@ async def test_core_platform_connections_are_tenant_scoped_and_source_safe(query
         "status": "created",
         "progressPercent": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_report_and_automation_connections_expose_safe_metadata(query_context):
+    result = await schema.execute(
+        """{
+          reports { nodes { id assessmentId title format audience status sizeBytes generatedAt } }
+          automationRules { nodes { id name trigger isEnabled dryRun timezone actionCount } }
+        }""",
+        context_value=query_context,
+    )
+
+    assert result.errors is None
+    assert result.data["reports"]["nodes"][0]["title"] == "Quarterly exposure report"
+    assert result.data["reports"]["nodes"][0]["status"] == "ready"
+    assert result.data["automationRules"]["nodes"] == [
+        {
+            "id": result.data["automationRules"]["nodes"][0]["id"],
+            "name": "Escalate production criticals",
+            "trigger": "finding.created",
+            "isEnabled": True,
+            "dryRun": False,
+            "timezone": "UTC",
+            "actionCount": 1,
+        }
+    ]

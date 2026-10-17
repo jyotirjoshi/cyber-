@@ -13,8 +13,9 @@ from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition, AgentDefinitionVersion
 from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset
-from app.db.models.canonical import CanonicalFinding
+from app.db.models.canonical import AutomationRule, CanonicalFinding
 from app.db.models.knowledge import KnowledgeCollection, KnowledgeSource
+from app.db.models.report import Report
 from app.db.repository import tenant_select
 from app.graphql.context import require_context
 from app.graphql.errors import PublicGraphQLError
@@ -26,12 +27,14 @@ from app.graphql.types import (
     AgentToolNode,
     AssessmentNode,
     AssetNode,
+    AutomationRuleNode,
     CanonicalFindingNode,
     Connection,
     KnowledgeCollectionNode,
     KnowledgeSearchHitNode,
     KnowledgeSourceNode,
     PageInfo,
+    ReportNode,
 )
 from app.schemas.knowledge import KnowledgeSearchIn
 from app.services.knowledge_retrieval import InternalKnowledgeRetriever, RetrievalPolicy
@@ -146,6 +149,34 @@ class AgentKnowledgeQueries:
             first,
             after,
             sort_column=Assessment.title,
+        )
+
+    @strawberry.field
+    async def reports(
+        self, info: Info, first: int = 25, after: str | None = None
+    ) -> Connection[ReportNode]:
+        return await _connection(
+            _authorize_permission(info, Permission.REPORT_READ),
+            Report,
+            ReportNode,
+            "reports",
+            first,
+            after,
+            sort_column=Report.title,
+        )
+
+    @strawberry.field
+    async def automation_rules(
+        self, info: Info, first: int = 25, after: str | None = None
+    ) -> Connection[AutomationRuleNode]:
+        return await _connection(
+            _authorize_permission(info, Permission.ORG_READ),
+            AutomationRule,
+            AutomationRuleNode,
+            "automationRules",
+            first,
+            after,
+            sort_column=AutomationRule.name,
         )
 
     @strawberry.field

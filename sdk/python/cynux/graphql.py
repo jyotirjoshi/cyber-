@@ -36,6 +36,18 @@ ASSESSMENTS = """query Assessments($first: Int!, $after: String) {
     pageInfo { hasNextPage endCursor }
   }
 }"""
+REPORTS = """query Reports($first: Int!, $after: String) {
+  reports(first: $first, after: $after) {
+    nodes { id assessmentId title format audience status sizeBytes generatedAt createdAt updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+AUTOMATION_RULES = """query AutomationRules($first: Int!, $after: String) {
+  automationRules(first: $first, after: $after) {
+    nodes { id name trigger isEnabled dryRun timezone actionCount createdAt updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
 COLLECTIONS = """query KnowledgeCollections($first: Int!, $after: String) {
   knowledgeCollections(first: $first, after: $after) {
     nodes { id name description isEnabled retrievalProvider revision createdAt updatedAt }

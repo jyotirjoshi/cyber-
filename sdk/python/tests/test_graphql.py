@@ -186,6 +186,8 @@ def test_nested_agent_versions_and_knowledge_sources_use_global_parent_ids():
         ("iter_assets", "assets"),
         ("iter_canonical_findings", "canonicalFindings"),
         ("iter_assessments", "assessments"),
+        ("iter_reports", "reports"),
+        ("iter_automation_rules", "automationRules"),
     ],
 )
 def test_core_platform_iterators_use_typed_graphql_connections(method, field):
@@ -213,7 +215,7 @@ def test_core_platform_iterators_use_typed_graphql_connections(method, field):
 
 @pytest.mark.asyncio
 async def test_async_core_platform_iterators_match_sync_contract():
-    fields = iter(("assets", "canonicalFindings", "assessments"))
+    fields = iter(("assets", "canonicalFindings", "assessments", "reports", "automationRules"))
 
     async def handler(request):
         field = next(fields)
@@ -239,6 +241,10 @@ async def test_async_core_platform_iterators_match_sync_contract():
             {"id": "canonicalFindings"}
         ]
         assert [row async for row in client.iter_assessments()] == [{"id": "assessments"}]
+        assert [row async for row in client.iter_reports()] == [{"id": "reports"}]
+        assert [row async for row in client.iter_automation_rules()] == [
+            {"id": "automationRules"}
+        ]
 
 
 @pytest.mark.asyncio

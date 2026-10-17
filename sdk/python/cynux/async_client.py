@@ -12,6 +12,7 @@ from .graphql import (
     AGENTS,
     ASSESSMENTS,
     ASSETS,
+    AUTOMATION_RULES,
     CANONICAL_FINDINGS,
     COLLECTIONS,
     CREATE_AGENT,
@@ -20,6 +21,7 @@ from .graphql import (
     DELETE_KNOWLEDGE_SOURCE,
     DISABLE_AGENT,
     RESTORE_KNOWLEDGE_SOURCE,
+    REPORTS,
     SEARCH_KNOWLEDGE,
     SOURCES,
     VERSIONS,
@@ -141,6 +143,14 @@ class AsyncCynuxClient:
         self, *, page_size: int = 25
     ) -> AsyncIterator[dict[str, Any]]:
         return self._iter_graphql(ASSESSMENTS, "assessments", page_size)
+
+    def iter_reports(self, *, page_size: int = 25) -> AsyncIterator[dict[str, Any]]:
+        return self._iter_graphql(REPORTS, "reports", page_size)
+
+    def iter_automation_rules(
+        self, *, page_size: int = 25
+    ) -> AsyncIterator[dict[str, Any]]:
+        return self._iter_graphql(AUTOMATION_RULES, "automationRules", page_size)
 
     def iter_knowledge_collections(
         self, *, page_size: int = 25

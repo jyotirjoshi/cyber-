@@ -61,8 +61,8 @@
 - Produces: cursor-paginated asset/finding/assessment/report/automation queries and idempotent core mutations.
 
 - [ ] Add failing authorization, pagination, filtering, bulk-mutation, and idempotency tests (core asset/finding/assessment query coverage complete; mutation coverage remains).
-- [ ] Implement tenant-scoped query nodes and service-backed mutations (core read connections complete; reports, automations, and mutations remain).
-- [x] Add typed sync/async SDK methods and pagination helpers for core asset, canonical-finding, and assessment connections.
+- [ ] Implement tenant-scoped query nodes and service-backed mutations (asset, finding, assessment, report, and automation read connections complete; write mutations remain).
+- [x] Add typed sync/async SDK methods and pagination helpers for asset, canonical-finding, assessment, report, and automation connections.
 - [x] Run the complete GraphQL and Python SDK suites for the completed query slice.
 
 ### Task 3: PTaaS engagement aggregate and portals
