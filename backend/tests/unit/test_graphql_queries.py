@@ -1,4 +1,5 @@
 """Exercise resolver SQL against a local database, without cloud/provider calls."""
+import datetime as dt
 import uuid
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.config import Settings
 from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition
+from app.db.models.assessment import Assessment
+from app.db.models.asset import Asset
+from app.db.models.canonical import CanonicalFinding
 from app.db.models.knowledge import KnowledgeCollection
 from app.graphql.schema import schema
 from app.services.context import Principal
@@ -23,7 +27,7 @@ async def query_context():
     # Same column types, but without PostgreSQL-only DDL/foreign-key targets. This
     # checks the real resolver's predicates and keyset traversal, not migrations.
     metadata = MetaData()
-    for model in (AgentDefinition, KnowledgeCollection):
+    for model in (AgentDefinition, KnowledgeCollection, Asset, CanonicalFinding, Assessment):
         Table(
             model.__tablename__,
             metadata,
@@ -47,7 +51,14 @@ async def query_context():
     factory = async_sessionmaker(engine, expire_on_commit=False)
     principal = Principal.for_api_key(
         organization_id=uuid.uuid4(),
-        scopes=frozenset({Permission.AGENT_CHAT}),
+        scopes=frozenset(
+            {
+                Permission.AGENT_CHAT,
+                Permission.ASSET_READ,
+                Permission.FINDING_READ,
+                Permission.ASSESSMENT_READ,
+            }
+        ),
         request_id="query-test",
     )
     context = GraphQLContext(
@@ -82,6 +93,78 @@ async def query_context():
                 retrieval_policy={},
                 is_enabled=True,
                 revision=1,
+            )
+        )
+        asset = Asset(
+            id=uuid.UUID(int=10),
+            organization_id=principal.organization_id,
+            name="api.example.com",
+            asset_type="domain",
+            status="active",
+            criticality="high",
+            criticality_source="operator_tag",
+            environment="production",
+            internet_exposed=True,
+            technology=["nginx"],
+            groups=["payments"],
+            custom_fields={},
+            evidence={},
+            seen_in_assessments=[],
+        )
+        session.add(asset)
+        now = dt.datetime(2026, 10, 17, tzinfo=dt.UTC)
+        session.add(
+            CanonicalFinding(
+                id=uuid.UUID(int=11),
+                organization_id=principal.organization_id,
+                asset_id=asset.id,
+                fingerprint="f" * 64,
+                title="Public administration endpoint",
+                severity="critical",
+                status="open",
+                cve_ids=["CVE-2026-12345"],
+                risk_score=94.0,
+                risk_factors={},
+                intel_evidence={},
+                first_seen_at=now,
+                last_seen_at=now,
+                custom_fields={},
+            )
+        )
+        session.add(
+            Assessment(
+                id=uuid.UUID(int=12),
+                organization_id=principal.organization_id,
+                reference=1001,
+                title="Production API validation",
+                scope="external",
+                depth="standard",
+                engagement_type="api_security",
+                execution_mode="supervised",
+                status="created",
+                current_stage="queued",
+                progress_percent=0,
+                degradations=[],
+                plan=[],
+                request_interpretation={},
+                extra_data={},
+            )
+        )
+        session.add(
+            Asset(
+                id=uuid.UUID(int=13),
+                organization_id=uuid.uuid4(),
+                name="other-tenant.example",
+                asset_type="domain",
+                status="active",
+                criticality="unknown",
+                criticality_source="default",
+                environment="unknown",
+                technology=[],
+                groups=[],
+                custom_fields={},
+                evidence={},
+                seen_in_assessments=[],
             )
         )
         await session.commit()
@@ -181,3 +264,38 @@ async def test_missing_context_and_oversized_pages_are_rejected(query_context):
         "{ agentDefinitions(first: 101) { nodes { name } } }", context_value=query_context
     )
     assert result.errors[0].extensions["code"] == "INVALID_PAGE_SIZE"
+
+
+@pytest.mark.asyncio
+async def test_core_platform_connections_are_tenant_scoped_and_source_safe(query_context):
+    result = await schema.execute(
+        """{
+          assets { nodes { id name assetType criticality environment internetExposed groups } pageInfo { hasNextPage } }
+          canonicalFindings { nodes { id assetId title severity status cveIds riskScore } pageInfo { hasNextPage } }
+          assessments { nodes { id reference title engagementType executionMode status progressPercent } pageInfo { hasNextPage } }
+        }""",
+        context_value=query_context,
+    )
+
+    assert result.errors is None
+    assert [item["name"] for item in result.data["assets"]["nodes"]] == ["api.example.com"]
+    assert result.data["canonicalFindings"]["nodes"] == [
+        {
+            "id": result.data["canonicalFindings"]["nodes"][0]["id"],
+            "assetId": result.data["assets"]["nodes"][0]["id"],
+            "title": "Public administration endpoint",
+            "severity": "critical",
+            "status": "open",
+            "cveIds": ["CVE-2026-12345"],
+            "riskScore": 94.0,
+        }
+    ]
+    assert result.data["assessments"]["nodes"][0] == {
+        "id": result.data["assessments"]["nodes"][0]["id"],
+        "reference": 1001,
+        "title": "Production API validation",
+        "engagementType": "api_security",
+        "executionMode": "supervised",
+        "status": "created",
+        "progressPercent": 0,
+    }

@@ -18,6 +18,24 @@ AGENTS = """query Agents($first: Int!, $after: String) {
     pageInfo { hasNextPage endCursor }
   }
 }"""
+ASSETS = """query Assets($first: Int!, $after: String) {
+  assets(first: $first, after: $after) {
+    nodes { id name assetType status criticality environment internetExposed groups ownerTeam riskScore createdAt updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+CANONICAL_FINDINGS = """query CanonicalFindings($first: Int!, $after: String) {
+  canonicalFindings(first: $first, after: $after) {
+    nodes { id assetId title severity status cveIds riskScore firstSeenAt lastSeenAt dueAt remediationGroup }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
+ASSESSMENTS = """query Assessments($first: Int!, $after: String) {
+  assessments(first: $first, after: $after) {
+    nodes { id reference title scope depth engagementType executionMode status currentStage progressPercent findingsTotal assetsDiscovered createdAt updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}"""
 COLLECTIONS = """query KnowledgeCollections($first: Int!, $after: String) {
   knowledgeCollections(first: $first, after: $after) {
     nodes { id name description isEnabled retrievalProvider revision createdAt updatedAt }

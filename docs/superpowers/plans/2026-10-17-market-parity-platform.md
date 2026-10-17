@@ -44,7 +44,7 @@
 - [x] Run the focused tests and confirm feature-missing failures.
 - [x] Implement the smallest runtime using the hardened HTTP transport and canonical ingestion services.
 - [x] Run focused, migration, worker, canonical-ingest, and external-alert suites; focused checks pass, while the broader compatibility run records 18 unrelated baseline failures.
-- [ ] Commit the independently deployable connector runtime.
+- [x] Commit the independently deployable connector runtime (`6718592`).
 
 ### Task 2: Full-platform GraphQL and Python SDK
 
@@ -60,10 +60,10 @@
 **Interfaces:**
 - Produces: cursor-paginated asset/finding/assessment/report/automation queries and idempotent core mutations.
 
-- [ ] Add failing authorization, pagination, filtering, bulk-mutation, and idempotency tests.
-- [ ] Implement tenant-scoped query nodes and service-backed mutations.
-- [ ] Add typed sync/async SDK methods and pagination helpers.
-- [ ] Run GraphQL, SDK, and backend suites.
+- [ ] Add failing authorization, pagination, filtering, bulk-mutation, and idempotency tests (core asset/finding/assessment query coverage complete; mutation coverage remains).
+- [ ] Implement tenant-scoped query nodes and service-backed mutations (core read connections complete; reports, automations, and mutations remain).
+- [x] Add typed sync/async SDK methods and pagination helpers for core asset, canonical-finding, and assessment connections.
+- [x] Run the complete GraphQL and Python SDK suites for the completed query slice.
 
 ### Task 3: PTaaS engagement aggregate and portals
 

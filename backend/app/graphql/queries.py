@@ -11,6 +11,9 @@ from app.api.deps import require_custom_agents, require_internal_knowledge
 from app.core.errors import ResourceNotFoundError
 from app.db.enums import Permission
 from app.db.models.agent_definition import AgentDefinition, AgentDefinitionVersion
+from app.db.models.assessment import Assessment
+from app.db.models.asset import Asset
+from app.db.models.canonical import CanonicalFinding
 from app.db.models.knowledge import KnowledgeCollection, KnowledgeSource
 from app.db.repository import tenant_select
 from app.graphql.context import require_context
@@ -21,6 +24,9 @@ from app.graphql.types import (
     AgentDefinitionNode,
     AgentDefinitionVersionNode,
     AgentToolNode,
+    AssessmentNode,
+    AssetNode,
+    CanonicalFindingNode,
     Connection,
     KnowledgeCollectionNode,
     KnowledgeSearchHitNode,
@@ -38,7 +44,23 @@ def _authorize(info, guard):
     return context
 
 
-async def _connection(context, model, projection, connection, first, after):
+def _authorize_permission(info, permission: Permission):
+    context = require_context(info)
+    context.principal.require(permission)
+    return context
+
+
+async def _connection(
+    context,
+    model,
+    projection,
+    connection,
+    first,
+    after,
+    *,
+    sort_column=None,
+):
+    sort_column = sort_column or model.name
     size = page_size(first)
     codec = CursorCodec(
         context.settings.security.jwt_secret.get_secret_value(),
@@ -47,11 +69,16 @@ async def _connection(context, model, projection, connection, first, after):
     )
     query = tenant_select(model, context.principal.organization_id)
     if after is not None:
-        name, identifier = codec.decode(after)
-        if not isinstance(name, str):
+        sort_value, identifier = codec.decode(after)
+        if not isinstance(sort_value, str):
             raise PublicGraphQLError("INVALID_CURSOR", "Invalid cursor; restart pagination.")
-        query = query.where(or_(model.name > name, and_(model.name == name, model.id > identifier)))
-    query = query.order_by(model.name, model.id).limit(size + 1)
+        query = query.where(
+            or_(
+                sort_column > sort_value,
+                and_(sort_column == sort_value, model.id > identifier),
+            )
+        )
+    query = query.order_by(sort_column, model.id).limit(size + 1)
     async with context.session_factory() as session:
         rows = list((await session.scalars(query)).all())
     page = rows[:size]
@@ -59,7 +86,11 @@ async def _connection(context, model, projection, connection, first, after):
         nodes=[projection.from_row(row) for row in page],
         page_info=PageInfo(
             has_next_page=len(rows) > size,
-            end_cursor=codec.encode(page[-1].name, page[-1].id) if page else None,
+            end_cursor=(
+                codec.encode(str(getattr(page[-1], sort_column.key)), page[-1].id)
+                if page
+                else None
+            ),
         ),
     )
 
@@ -75,6 +106,48 @@ async def _node(context, model, projection, type_name, identifier):
 
 @strawberry.type
 class AgentKnowledgeQueries:
+    @strawberry.field
+    async def assets(
+        self, info: Info, first: int = 25, after: str | None = None
+    ) -> Connection[AssetNode]:
+        return await _connection(
+            _authorize_permission(info, Permission.ASSET_READ),
+            Asset,
+            AssetNode,
+            "assets",
+            first,
+            after,
+            sort_column=Asset.name,
+        )
+
+    @strawberry.field
+    async def canonical_findings(
+        self, info: Info, first: int = 25, after: str | None = None
+    ) -> Connection[CanonicalFindingNode]:
+        return await _connection(
+            _authorize_permission(info, Permission.FINDING_READ),
+            CanonicalFinding,
+            CanonicalFindingNode,
+            "canonicalFindings",
+            first,
+            after,
+            sort_column=CanonicalFinding.title,
+        )
+
+    @strawberry.field
+    async def assessments(
+        self, info: Info, first: int = 25, after: str | None = None
+    ) -> Connection[AssessmentNode]:
+        return await _connection(
+            _authorize_permission(info, Permission.ASSESSMENT_READ),
+            Assessment,
+            AssessmentNode,
+            "assessments",
+            first,
+            after,
+            sort_column=Assessment.title,
+        )
+
     @strawberry.field
     async def knowledge_search(
         self,

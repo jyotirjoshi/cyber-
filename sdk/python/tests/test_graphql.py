@@ -180,6 +180,67 @@ def test_nested_agent_versions_and_knowledge_sources_use_global_parent_ids():
     assert seen[1]["variables"]["id"] == "collection-global-id"
 
 
+@pytest.mark.parametrize(
+    ("method", "field"),
+    [
+        ("iter_assets", "assets"),
+        ("iter_canonical_findings", "canonicalFindings"),
+        ("iter_assessments", "assessments"),
+    ],
+)
+def test_core_platform_iterators_use_typed_graphql_connections(method, field):
+    def handler(request):
+        body = json.loads(request.content)
+        assert field in body["query"]
+        assert body["variables"] == {"first": 7, "after": None}
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    field: {
+                        "nodes": [{"id": "global-id"}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
+
+    with CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert list(getattr(client, method)(page_size=7)) == [{"id": "global-id"}]
+
+
+@pytest.mark.asyncio
+async def test_async_core_platform_iterators_match_sync_contract():
+    fields = iter(("assets", "canonicalFindings", "assessments"))
+
+    async def handler(request):
+        field = next(fields)
+        body = json.loads(request.content)
+        assert field in body["query"]
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    field: {
+                        "nodes": [{"id": field}],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
+
+    async with AsyncCynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert [row async for row in client.iter_assets()] == [{"id": "assets"}]
+        assert [row async for row in client.iter_canonical_findings()] == [
+            {"id": "canonicalFindings"}
+        ]
+        assert [row async for row in client.iter_assessments()] == [{"id": "assessments"}]
+
+
 @pytest.mark.asyncio
 async def test_async_nested_iterators_match_sync_contract():
     async def handler(request):

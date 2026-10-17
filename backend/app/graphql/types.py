@@ -212,3 +212,104 @@ class AgentToolNode:
     approval: str
     timeout_seconds: int
     permitted: bool
+
+
+@strawberry.type(name="Asset")
+class AssetNode:
+    id: strawberry.ID
+    name: str
+    asset_type: str
+    status: str
+    criticality: str
+    environment: str
+    internet_exposed: bool
+    groups: list[str]
+    owner_team: str | None
+    risk_score: float
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=strawberry.ID(encode_global_id("Asset", row.id)),
+            name=row.name,
+            asset_type=row.asset_type,
+            status=row.status,
+            criticality=row.criticality,
+            environment=row.environment,
+            internet_exposed=row.internet_exposed,
+            groups=list(row.groups or []),
+            owner_team=row.owner_team,
+            risk_score=float(row.risk_score or 0),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+
+@strawberry.type(name="CanonicalFinding")
+class CanonicalFindingNode:
+    id: strawberry.ID
+    asset_id: strawberry.ID
+    title: str
+    severity: str
+    status: str
+    cve_ids: list[str]
+    risk_score: float
+    first_seen_at: datetime
+    last_seen_at: datetime
+    due_at: datetime | None
+    remediation_group: str | None
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=strawberry.ID(encode_global_id("CanonicalFinding", row.id)),
+            asset_id=strawberry.ID(encode_global_id("Asset", row.asset_id)),
+            title=row.title,
+            severity=row.severity,
+            status=row.status,
+            cve_ids=list(row.cve_ids or []),
+            risk_score=float(row.risk_score or 0),
+            first_seen_at=row.first_seen_at,
+            last_seen_at=row.last_seen_at,
+            due_at=row.due_at,
+            remediation_group=row.remediation_group,
+        )
+
+
+@strawberry.type(name="Assessment")
+class AssessmentNode:
+    id: strawberry.ID
+    reference: int
+    title: str
+    scope: str
+    depth: str
+    engagement_type: str
+    execution_mode: str
+    status: str
+    current_stage: str
+    progress_percent: int
+    findings_total: int
+    assets_discovered: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=strawberry.ID(encode_global_id("Assessment", row.id)),
+            reference=row.reference,
+            title=row.title,
+            scope=row.scope,
+            depth=row.depth,
+            engagement_type=row.engagement_type,
+            execution_mode=row.execution_mode,
+            status=row.status,
+            current_stage=row.current_stage,
+            progress_percent=row.progress_percent,
+            findings_total=row.findings_total,
+            assets_discovered=row.assets_discovered,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )

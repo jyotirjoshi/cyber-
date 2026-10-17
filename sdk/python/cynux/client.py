@@ -11,6 +11,9 @@ from .errors import CynuxError
 from .knowledge import search_results, search_variables, upload_request, upload_result
 from .graphql import (
     AGENTS,
+    ASSESSMENTS,
+    ASSETS,
+    CANONICAL_FINDINGS,
     COLLECTIONS,
     CREATE_AGENT,
     CREATE_AGENT_VERSION,
@@ -222,6 +225,19 @@ class CynuxClient:
 
     def iter_agents(self, *, page_size: int = 25) -> Iterator[dict[str, Any]]:
         return self._iter_graphql(AGENTS, "agentDefinitions", page_size)
+
+    def iter_assets(self, *, page_size: int = 25) -> Iterator[dict[str, Any]]:
+        return self._iter_graphql(ASSETS, "assets", page_size)
+
+    def iter_canonical_findings(
+        self, *, page_size: int = 25
+    ) -> Iterator[dict[str, Any]]:
+        return self._iter_graphql(
+            CANONICAL_FINDINGS, "canonicalFindings", page_size
+        )
+
+    def iter_assessments(self, *, page_size: int = 25) -> Iterator[dict[str, Any]]:
+        return self._iter_graphql(ASSESSMENTS, "assessments", page_size)
 
     def iter_knowledge_collections(
         self, *, page_size: int = 25
