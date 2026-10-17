@@ -46,4 +46,14 @@ class CustomConnectorRunOut(BaseModel):
     completed_at: dt.datetime | None
 
 
-__all__ = ["CustomConnectorIn", "CustomConnectorOut", "CustomConnectorRunOut"]
+class CustomConnectorRunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+__all__ = [
+    "CustomConnectorIn",
+    "CustomConnectorOut",
+    "CustomConnectorRunIn",
+    "CustomConnectorRunOut",
+]

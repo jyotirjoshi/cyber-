@@ -87,6 +87,7 @@ from app.services.automation import execute_pending_automations, queue_due_autom
 from app.services.canonical_intel_refresh import refresh_stale_intel_batch
 from app.services.canonical_risk_refresh import refresh_stale_risk_batch
 from app.services.context import Principal
+from app.services.custom_connector import run_pending_connector_runs
 from app.services.integration_sync import run_due_integration_syncs
 from app.services.job import cancel_jobs_for_assessment, reclaim_orphans
 from app.services.knowledge_indexer import run_due_knowledge_indexing
@@ -1306,6 +1307,14 @@ class AgentWorker:
                 ),
                 "worker.integration_syncs_completed",
                 "worker.integration_sync_failed",
+            ),
+            (
+                "custom-connectors",
+                lambda session: run_pending_connector_runs(
+                    session, settings=self._settings, redis=self._redis
+                ),
+                "worker.custom_connector_runs_completed",
+                "worker.custom_connector_run_failed",
             ),
             (
                 "tickets",

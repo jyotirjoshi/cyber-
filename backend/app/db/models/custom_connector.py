@@ -6,8 +6,18 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TenantMixin, TimestampMixin, uuid_pk
@@ -47,6 +57,8 @@ class CustomConnectorRun(Base, TenantMixin, TimestampMixin):
         PgUUID(as_uuid=True), ForeignKey("custom_connectors.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    idempotency_key: Mapped[str | None] = mapped_column(String(160))
+    request_digest: Mapped[str | None] = mapped_column(String(64))
     checkpoint: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     result: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     records_read: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -55,7 +67,13 @@ class CustomConnectorRun(Base, TenantMixin, TimestampMixin):
     started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
-        CheckConstraint("status IN ('running','completed','failed')", name="valid_custom_connector_run_status"),
+        CheckConstraint("status IN ('pending','running','completed','failed')", name="valid_custom_connector_run_status"),
+        UniqueConstraint(
+            "organization_id",
+            "connector_id",
+            "idempotency_key",
+            name="unique_custom_connector_run_idempotency",
+        ),
         Index("ix_custom_connector_runs_org_connector_time", "organization_id", "connector_id", "created_at"),
     )
 

@@ -179,6 +179,7 @@ class ResilientClient:
         headers: dict[str, str] | None = None,
         timeout: float = 30.0,
         verify: bool = True,
+        follow_redirects: bool = True,
         retry: RetryPolicy | None = None,
         rate_limiter: TokenBucket | None = None,
         breaker: CircuitBreaker | None = None,
@@ -202,7 +203,7 @@ class ResilientClient:
             #: DefectDojo and the CISA feed both redirect; following them here keeps that
             #: out of every call site. Redirects are followed within the same client, so
             #: auth headers travel only to hosts the provider itself named.
-            follow_redirects=True,
+            follow_redirects=follow_redirects,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
 
@@ -569,6 +570,7 @@ def build_client(
     headers: dict[str, str] | None = None,
     timeout: float = 30.0,
     verify: bool = True,
+    follow_redirects: bool = True,
     retry: RetryPolicy | None = None,
     rate_limiter: TokenBucket | None = None,
     breaker_config: BreakerConfig | None = None,
@@ -600,6 +602,7 @@ def build_client(
         headers=headers,
         timeout=timeout,
         verify=verify,
+        follow_redirects=follow_redirects,
         retry=retry,
         rate_limiter=rate_limiter,
         breaker=breaker,
