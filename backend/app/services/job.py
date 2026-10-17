@@ -662,6 +662,7 @@ async def execute_job(
     if result is None:
         assert fatal is not None  # noqa: S101 - narrowing; both branches above set one
         await _finalize_failure(session, job, fatal)
+        await _queue_scan_failure_event(session, job)
         await _purge(workdir)
         await session.commit()
         raise fatal
@@ -683,6 +684,8 @@ async def execute_job(
         adapter_success_codes=adapter.success_exit_codes,
         requires_output=adapter.requires_output,
     )
+    if job.status in {JobStatus.FAILED.value, JobStatus.TIMEOUT.value}:
+        await _queue_scan_failure_event(session, job)
     if job.status == JobStatus.COMPLETED.value:
         from app.services.usage_metering import MeterEvent, increment
 
@@ -1262,6 +1265,25 @@ async def _finalize_failure(session: AsyncSession, job: ScannerJob, error: Cynux
         job_id=str(job.id),
         scanner=job.scanner,
         failure_code=error.code,
+    )
+
+
+async def _queue_scan_failure_event(session: AsyncSession, job: ScannerJob) -> None:
+    """Expose terminal scanner failures to tenant automation without provider details."""
+    from app.services.automation import queue_rule_event
+
+    await queue_rule_event(
+        session,
+        organization_id=job.organization_id,
+        trigger="scan.failed",
+        event_key=f"scan.failed:{job.id}",
+        context={
+            "scanner_job_id": str(job.id),
+            "assessment_id": str(job.assessment_id),
+            "source": job.scanner,
+            "status": job.status,
+            "error_code": job.failure_code,
+        },
     )
 
 

@@ -326,13 +326,15 @@ class AutomationRule(Base, TenantMixin, TimestampMixin):
     next_run_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     is_enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
     dry_run: Mapped[bool] = mapped_column(nullable=False, default=False)
+    inbound_secret_ciphertext: Mapped[str | None] = mapped_column(Text)
+    inbound_secret_rotated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
 
     __table_args__ = (
         CheckConstraint(
-            "trigger IN ('finding.created','finding.updated','ticket.closed','retest.confirmed','retest.cleared','sla.breached')",
+            "trigger IN ('finding.created','finding.updated','ticket.closed','retest.confirmed','retest.cleared','sla.breached','asset.created','asset.updated','assessment.started','assessment.completed','engagement.created','engagement.status_changed','scan.failed','integration.error','webhook.received','manual')",
             name="valid_automation_rule_trigger",
         ),
         UniqueConstraint("organization_id", "name", name="unique_automation_rule_name"),

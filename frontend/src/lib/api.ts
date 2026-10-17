@@ -59,6 +59,7 @@ import type {
   AttackSimulationTechniqueCatalogOut,
   AuditEventOut,
   AuditFilter,
+  AutomationCatalogOut,
   AutomationExecutionOut,
   AutomationRuleCreateIn,
   AutomationRuleOut,
@@ -962,6 +963,7 @@ export const api = {
   },
 
   automation: {
+    catalog: () => request<AutomationCatalogOut>("GET", "/automation/catalog"),
     listRules: (params?: { limit?: number; offset?: number }) =>
       request<Page<AutomationRuleOut>>("GET", "/automation/rules", { query: params }),
     createRule: (body: AutomationRuleCreateIn) =>
@@ -972,6 +974,10 @@ export const api = {
     deleteRule: (id: string) => request<void>("DELETE", `/automation/rules/${id}`),
     executions: (ruleId: string, params?: { limit?: number; offset?: number }) =>
       request<Page<AutomationExecutionOut>>("GET", `/automation/rules/${ruleId}/executions`, { query: params }),
+    run: (ruleId: string, body: { idempotency_key: string; context?: Record<string, unknown> }) =>
+      request<AutomationExecutionOut>("POST", `/automation/rules/${ruleId}/run`, { body }),
+    rotateInboundSecret: (ruleId: string) =>
+      request<{ rule_id: string; secret: string; rotated_at: string }>("POST", `/automation/rules/${ruleId}/inbound-secret/rotate`),
   },
 
   workflows: {

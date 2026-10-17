@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import re
 import uuid
 from typing import Any
 
@@ -82,4 +84,42 @@ class AutomationExecutionOut(BaseModel):
     created_at: dt.datetime
 
 
-__all__ = ["AutomationExecutionOut", "AutomationRuleIn", "AutomationRuleOut"]
+class AutomationManualRunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def clean_idempotency_key(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,159}", cleaned):
+            raise ValueError("idempotency_key contains unsupported characters")
+        return cleaned
+
+    @field_validator("context")
+    @classmethod
+    def bound_context(cls, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("automation context must be JSON serializable") from exc
+        if len(encoded.encode("utf-8")) > 32_768:
+            raise ValueError("automation context exceeds 32 KiB")
+        return value
+
+
+class AutomationInboundSecretOut(BaseModel):
+    rule_id: uuid.UUID
+    secret: str
+    rotated_at: dt.datetime
+
+
+__all__ = [
+    "AutomationExecutionOut",
+    "AutomationInboundSecretOut",
+    "AutomationManualRunIn",
+    "AutomationRuleIn",
+    "AutomationRuleOut",
+]

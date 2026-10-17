@@ -135,6 +135,23 @@ async def run_due_integration_syncs(
                     "attempt": failures,
                 },
             )
+            from app.services.automation import queue_rule_event
+
+            await queue_rule_event(
+                session,
+                organization_id=integration.organization_id,
+                trigger="integration.error",
+                event_key=f"integration.error:{integration.id}:{failures}",
+                context={
+                    "integration_id": str(integration.id),
+                    "source": kind.value,
+                    "status": "failed",
+                    "attempt": failures,
+                    "error_code": (
+                        exc.code if isinstance(exc, CynuxError) else "unexpected_error"
+                    ),
+                },
+            )
             continue
 
         # Provider-specific sync functions record detailed ingestion counts. This

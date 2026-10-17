@@ -140,6 +140,20 @@ async def create_engagement(
         resource_id=row.id,
         detail={"assessment_id": str(row.assessment_id) if row.assessment_id else None},
     )
+    from app.services.automation import queue_rule_event
+
+    await queue_rule_event(
+        session,
+        organization_id=principal.organization_id,
+        trigger="engagement.created",
+        event_key=f"engagement.created:{row.id}",
+        context={
+            "engagement_id": str(row.id),
+            "assessment_id": str(row.assessment_id) if row.assessment_id else None,
+            "status": row.status,
+            "source": "ptaas",
+        },
+    )
     return row
 
 
@@ -170,6 +184,20 @@ async def update_status(
             resource_type="engagement",
             resource_id=row.id,
             detail={"from": previous, "to": status},
+        )
+        from app.services.automation import queue_rule_event
+
+        await queue_rule_event(
+            session,
+            organization_id=principal.organization_id,
+            trigger="engagement.status_changed",
+            event_key=f"engagement.status_changed:{row.id}:{row.version}",
+            context={
+                "engagement_id": str(row.id),
+                "status": status,
+                "previous_status": previous,
+                "source": "ptaas",
+            },
         )
     return row
 

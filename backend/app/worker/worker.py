@@ -949,6 +949,46 @@ class AgentWorker:
             )
         return len(candidates)
 
+    async def _render_one_automation_report(self, session: AsyncSession) -> int:
+        """Claim and render one report staged by the automation action executor."""
+        report = (
+            await session.execute(
+                select(Report)
+                .where(
+                    Report.status == ReportStatus.PENDING.value,
+                    Report.title.like("Automation · %"),
+                )
+                .order_by(Report.created_at, Report.id)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalar_one_or_none()
+        if report is None:
+            return 0
+        assessment = (
+            await session.execute(
+                tenant_select(Assessment, report.organization_id).where(
+                    Assessment.id == report.assessment_id
+                )
+            )
+        ).scalar_one_or_none()
+        if assessment is None:
+            report.status = ReportStatus.FAILED.value
+            report.failure_reason = "The source assessment is no longer available."
+            return 1
+        await generate_report(
+            session,
+            assessment,
+            fmt=ReportFormat(report.format),
+            audience=report.audience,
+            storage=ObjectStorage(self._settings),
+            settings=self._settings,
+            principal=Principal.for_system(organization_id=report.organization_id),
+            title=report.title,
+            report=report,
+        )
+        return 1
+
     async def _record_terminal_action_receipt(
         self,
         ctx: _RunContext,
@@ -1261,6 +1301,12 @@ class AgentWorker:
                 ),
                 "worker.report_schedules_completed",
                 "worker.report_schedule_failed",
+            ),
+            (
+                "automation-reports",
+                self._render_one_automation_report,
+                "worker.automation_report_rendered",
+                "worker.automation_report_failed",
             ),
             (
                 "report-distributions",

@@ -17,7 +17,13 @@ from app.services.engagement import create_engagement, get_engagement, update_st
 
 
 @pytest.fixture
-async def engagement_store():
+async def engagement_store(monkeypatch):
+    from app.services import automation
+
+    async def ignore_automation_events(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(automation, "queue_rule_event", ignore_automation_events)
     engine = create_async_engine("sqlite+aiosqlite://")
     metadata = MetaData()
     for model in (Engagement, AuditEvent):

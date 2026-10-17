@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
+import json
+import secrets
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -11,10 +15,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import CynuxError
+from app.core.crypto import get_cipher
+from app.core.errors import AuthenticationError, ConflictError, CynuxError, ResourceNotFoundError
 from app.core.targets import TargetType, classify
 from app.db.base import utcnow
 from app.db.enums import (
+    AgentRunStatus,
     AssetEnvironment,
     AuditOutcome,
     NotificationChannel,
@@ -22,25 +28,31 @@ from app.db.enums import (
     Permission,
     Severity,
 )
+from app.db.models.agent import AgentRun, AgentSession
+from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset
 from app.db.models.canonical import AutomationExecution, AutomationRule, CanonicalFinding
 from app.db.models.identity import Membership, Organization
+from app.db.models.report import Report
 from app.db.repository import tenant_select
 from app.schemas.assessment import AssessmentCreateIn, AuthorizationIn
+from app.schemas.asset import AssetTagIn
 from app.schemas.canonical import CanonicalWorkIn
 from app.schemas.organization import OrgPolicy
 from app.services import audit as audit_service
 from app.services import canonical_work as canonical_work_service
 from app.services import remediation_governance
+from app.services.automation_expression import evaluate_expression, validate_expression
 from app.services.codeowners import owners_for_path
 from app.services.context import Principal
 from app.services.notification import NotificationContent, dispatch
 from app.services.scheduling import next_cron_time
-from app.worker.dispatch import stage_assessment_run
+from app.worker.dispatch import stage_assessment_run, stage_run_dispatch
+from app.worker.protocol import RunAction
 
 if TYPE_CHECKING:
     from app.db.models.asset import Asset
-    from app.schemas.automation import AutomationRuleIn
+    from app.schemas.automation import AutomationManualRunIn, AutomationRuleIn
 
 
 _TRIGGERS = frozenset(
@@ -51,6 +63,16 @@ _TRIGGERS = frozenset(
         "retest.confirmed",
         "retest.cleared",
         "sla.breached",
+        "asset.created",
+        "asset.updated",
+        "assessment.started",
+        "assessment.completed",
+        "engagement.created",
+        "engagement.status_changed",
+        "scan.failed",
+        "integration.error",
+        "webhook.received",
+        "manual",
     }
 )
 _CONDITIONS = frozenset(
@@ -62,6 +84,7 @@ _CONDITIONS = frozenset(
         "asset_group",
         "risk_score_at_least",
         "internet_exposed",
+        "expression",
     }
 )
 _ACTIONS = frozenset(
@@ -74,6 +97,11 @@ _ACTIONS = frozenset(
         "assign_codeowner",
         "set_remediation_group",
         "refresh_intelligence",
+        "send_webhook",
+        "add_asset_tag",
+        "set_finding_field",
+        "generate_report",
+        "run_agent",
     }
 )
 _TICKET_PROVIDERS = frozenset({"jira", "github", "gitlab", "servicenow", "azure_devops", "linear"})
@@ -97,6 +125,118 @@ _RETEST_ASSET_TARGET_TYPES = {
 _MAX_AUTOMATION_ATTEMPTS = 5
 _AUTOMATION_RETRY_BASE_SECONDS = 30
 _AUTOMATION_RETRY_MAX_SECONDS = 60 * 60
+
+AUTOMATION_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "critical-production-response",
+        "name": "Critical production response",
+        "description": "Route critical production findings, notify responders and open a ticket.",
+        "definition": {
+            "trigger": "finding.created",
+            "conditions": {
+                "severity_at_least": "critical",
+                "asset_environment": "production",
+                "internet_exposed": True,
+            },
+            "actions": [
+                {"type": "create_ticket", "provider": "jira"},
+                {"type": "notify"},
+            ],
+        },
+    },
+    {
+        "id": "closed-ticket-retest",
+        "name": "Verify closed tickets",
+        "description": "Schedule an evidence-producing retest when remediation closes.",
+        "definition": {
+            "trigger": "ticket.closed",
+            "conditions": {},
+            "actions": [
+                {
+                    "type": "schedule_retest",
+                    "authorization_reference": "Replace with the approved scope reference",
+                }
+            ],
+        },
+    },
+    {
+        "id": "integration-failure-response",
+        "name": "Integration failure response",
+        "description": "Notify the operations team when a connector reports an error.",
+        "definition": {
+            "trigger": "integration.error",
+            "conditions": {},
+            "actions": [{"type": "notify"}],
+        },
+    },
+)
+_SENSITIVE_CONTEXT_MARKERS = (
+    "api_key",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+)
+
+
+def automation_catalog() -> dict[str, Any]:
+    """Return the closed rule vocabulary used by both API clients and the builder."""
+    return {
+        "triggers": sorted(_TRIGGERS),
+        "conditions": sorted(_CONDITIONS),
+        "actions": sorted(_ACTIONS),
+        "templates": list(AUTOMATION_TEMPLATES),
+    }
+
+
+def _bounded_event_context(context: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        raise ValueError("automation event context must be an object")
+    try:
+        encoded = json.dumps(context, ensure_ascii=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("automation event context must be JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > 32_768:
+        raise ValueError("automation event context exceeds 32 KiB")
+
+    def sanitize(value: Any, *, key: str = "") -> Any:
+        normalized = key.lower().replace("-", "_")
+        if any(marker in normalized for marker in _SENSITIVE_CONTEXT_MARKERS):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {str(child_key): sanitize(child, key=str(child_key)) for child_key, child in value.items()}
+        if isinstance(value, list):
+            return [sanitize(child) for child in value]
+        return value
+
+    return sanitize(context)
+
+
+def automation_webhook_signature(secret: str, timestamp: int, body: bytes) -> str:
+    signed = str(timestamp).encode("ascii") + b"." + body
+    return hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+
+
+def verify_automation_webhook(
+    *,
+    secret: str,
+    timestamp: int,
+    signature: str,
+    body: bytes,
+    now: int | None = None,
+) -> bool:
+    """Verify a five-minute, exact-body HMAC envelope in constant time."""
+    current = int(dt.datetime.now(dt.UTC).timestamp()) if now is None else now
+    if abs(current - timestamp) > 300:
+        return False
+    supplied = signature.removeprefix("sha256=")
+    if len(supplied) != 64:
+        return False
+    expected = automation_webhook_signature(secret, timestamp, body)
+    return hmac.compare_digest(expected, supplied)
 
 
 def validate_rule_definition(
@@ -137,6 +277,11 @@ def validate_rule_definition(
         not isinstance(conditions["asset_group"], str) or not conditions["asset_group"].strip()
     ):
         raise ValueError("asset_group must be a non-empty string")
+    expression = conditions.get("expression")
+    if expression is not None:
+        if not isinstance(expression, str):
+            raise ValueError("automation expression must be a string")
+        conditions = {**conditions, "expression": validate_expression(expression)}
     if len(actions) < 1 or len(actions) > 10:
         raise ValueError("automation rules need one to ten actions")
     clean_actions: list[dict[str, Any]] = []
@@ -192,8 +337,59 @@ def validate_rule_definition(
                 or len(set(raw_channels)) != len(raw_channels)
             ):
                 raise ValueError("notify channels must be unique supported notification channels")
-        elif kind == "assign_codeowner" or kind == "refresh_intelligence":
+        elif kind in {"assign_codeowner", "refresh_intelligence", "send_webhook"}:
             allowed_fields = {"type"}
+        elif kind == "add_asset_tag":
+            allowed_fields = {"type", "key", "value"}
+            key = action.get("key")
+            value = action.get("value")
+            if (
+                not isinstance(key, str)
+                or not key.strip()
+                or len(key.strip()) > 60
+                or any(ord(character) < 32 or ord(character) == 127 for character in key)
+            ):
+                raise ValueError("add_asset_tag requires a valid key")
+            if value is not None and (not isinstance(value, str) or len(value) > 200):
+                raise ValueError("add_asset_tag value must be a string of at most 200 characters")
+        elif kind == "set_finding_field":
+            allowed_fields = {"type", "field", "value"}
+            field = action.get("field")
+            value = action.get("value")
+            if field not in {"remediation_plan", "remediation_group", "due_in_days"}:
+                raise ValueError("set_finding_field field is not mutable by automation")
+            if field == "due_in_days":
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3650:
+                    raise ValueError("due_in_days must be an integer between 0 and 3650")
+            elif value is not None and (
+                not isinstance(value, str)
+                or len(value.strip()) > (4000 if field == "remediation_plan" else 160)
+            ):
+                raise ValueError("set_finding_field value is invalid")
+        elif kind == "generate_report":
+            allowed_fields = {"type", "assessment_id", "format", "audience", "title"}
+            try:
+                uuid.UUID(str(action.get("assessment_id")))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("generate_report requires an assessment UUID") from exc
+            if action.get("format", "pdf") not in {"html", "pdf", "json"}:
+                raise ValueError("generate_report format is unsupported")
+            if action.get("audience", "executive") not in {"executive", "technical"}:
+                raise ValueError("generate_report audience is unsupported")
+            title = action.get("title")
+            if title is not None and (
+                not isinstance(title, str) or not title.strip() or len(title.strip()) > 300
+            ):
+                raise ValueError("generate_report title is invalid")
+        elif kind == "run_agent":
+            allowed_fields = {"type", "session_id", "objective"}
+            try:
+                uuid.UUID(str(action.get("session_id")))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("run_agent requires an agent session UUID") from exc
+            objective = action.get("objective")
+            if not isinstance(objective, str) or not objective.strip() or len(objective) > 4000:
+                raise ValueError("run_agent requires an objective of at most 4,000 characters")
         if set(action) - allowed_fields:
             raise ValueError("automation action has unsupported fields")
         if kind == "create_ticket" and provider not in _TICKET_PROVIDERS:
@@ -211,6 +407,26 @@ def validate_rule_definition(
             clean_action["authorization_reference"] = str(action["authorization_reference"]).strip()
         elif kind == "notify" and action.get("channels") is not None:
             clean_action["channels"] = list(action["channels"])
+        elif kind == "add_asset_tag":
+            clean_action["key"] = str(action["key"]).strip().lower()
+            if action.get("value") is not None:
+                clean_action["value"] = str(action["value"])
+        elif kind == "set_finding_field":
+            clean_action["field"] = str(action["field"])
+            clean_action["value"] = action.get("value")
+        elif kind == "generate_report":
+            clean_action.update(
+                {
+                    "assessment_id": str(uuid.UUID(str(action["assessment_id"]))),
+                    "format": str(action.get("format", "pdf")),
+                    "audience": str(action.get("audience", "executive")),
+                }
+            )
+            if action.get("title") is not None:
+                clean_action["title"] = str(action["title"]).strip()
+        elif kind == "run_agent":
+            clean_action["session_id"] = str(uuid.UUID(str(action["session_id"])))
+            clean_action["objective"] = str(action["objective"]).strip()
         clean_actions.append(clean_action)
     return {"trigger": trigger, "conditions": dict(conditions), "actions": clean_actions}
 
@@ -411,6 +627,9 @@ def conditions_match(
     risk_score: float = 0.0,
     internet_exposed: bool = False,
     asset_criticality: str | None = None,
+    trigger: str | None = None,
+    source: str | None = None,
+    status: str | None = None,
 ) -> bool:
     """Return whether the immutable finding context satisfies every declared condition.
 
@@ -441,7 +660,29 @@ def conditions_match(
         return False
     if "internet_exposed" in conditions and internet_exposed is not conditions["internet_exposed"]:
         return False
-    return "asset_group" not in conditions or conditions["asset_group"] in asset_groups
+    if "asset_group" in conditions and conditions["asset_group"] not in asset_groups:
+        return False
+    expression = conditions.get("expression")
+    if expression is not None:
+        try:
+            return evaluate_expression(
+                str(expression),
+                {
+                    "severity": severity,
+                    "risk_score": risk_score,
+                    "in_kev": in_kev,
+                    "internet_exposed": internet_exposed,
+                    "asset_environment": asset_environment,
+                    "asset_criticality": asset_criticality,
+                    "asset_groups": sorted(asset_groups),
+                    "trigger": trigger,
+                    "source": source,
+                    "status": status,
+                },
+            )
+        except ValueError:
+            return False
+    return True
 
 
 def _canonical_kev_state(finding: CanonicalFinding) -> bool | None:
@@ -541,6 +782,9 @@ async def update_rule(
     )
     rule.name = payload.name
     rule.trigger = definition["trigger"]
+    if rule.trigger != "webhook.received":
+        rule.inbound_secret_ciphertext = None
+        rule.inbound_secret_rotated_at = None
     rule.conditions = definition["conditions"]
     rule.actions = definition["actions"]
     rule.cron_expression = payload.cron_expression
@@ -762,6 +1006,9 @@ async def queue_finding_event(
             asset_groups=set(asset.groups or []),
             risk_score=float(getattr(finding, "risk_score", 0.0) or 0.0),
             internet_exposed=bool(getattr(asset, "internet_exposed", False)),
+            trigger=trigger,
+            source=str(getattr(finding, "primary_source", "canonical")),
+            status=str(getattr(finding, "status", "open")),
         ):
             continue
         inserted = await session.execute(
@@ -790,6 +1037,351 @@ async def queue_finding_event(
             event_key_suffix=event_key_suffix,
         )
     return queued
+
+
+async def queue_rule_event(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    trigger: str,
+    event_key: str,
+    context: dict[str, Any],
+    rule_id: uuid.UUID | None = None,
+) -> list[uuid.UUID]:
+    """Queue a bounded non-finding event with durable replay protection."""
+    if trigger not in _TRIGGERS:
+        raise ValueError("unsupported automation trigger")
+    clean_context = _bounded_event_context(context)
+    query = tenant_select(AutomationRule, organization_id).where(
+        AutomationRule.trigger == trigger,
+        AutomationRule.is_enabled.is_(True),
+    )
+    if rule_id is not None:
+        query = query.where(AutomationRule.id == rule_id)
+    rules = list((await session.execute(query)).scalars().all())
+    inserted_ids: list[uuid.UUID] = []
+    for rule in rules:
+        groups = clean_context.get("asset_groups", [])
+        if not isinstance(groups, list) or any(not isinstance(item, str) for item in groups):
+            groups = []
+        if not conditions_match(
+            rule.conditions,
+            severity=str(clean_context.get("severity", "info")),
+            asset_environment=(
+                str(clean_context["asset_environment"])
+                if clean_context.get("asset_environment") is not None
+                else None
+            ),
+            asset_criticality=(
+                str(clean_context["asset_criticality"])
+                if clean_context.get("asset_criticality") is not None
+                else None
+            ),
+            in_kev=(clean_context.get("in_kev") if isinstance(clean_context.get("in_kev"), bool) else None),
+            asset_groups=set(groups),
+            risk_score=(
+                float(clean_context.get("risk_score", 0.0))
+                if isinstance(clean_context.get("risk_score", 0.0), int | float)
+                and not isinstance(clean_context.get("risk_score", 0.0), bool)
+                else 0.0
+            ),
+            internet_exposed=bool(clean_context.get("internet_exposed", False)),
+            trigger=trigger,
+            source=(str(clean_context["source"]) if clean_context.get("source") else None),
+            status=(str(clean_context["status"]) if clean_context.get("status") else None),
+        ):
+            continue
+        execution_id = uuid.uuid4()
+        inserted = await session.execute(
+            pg_insert(AutomationExecution)
+            .values(
+                id=execution_id,
+                organization_id=organization_id,
+                rule_id=rule.id,
+                canonical_finding_id=None,
+                event_key=event_key,
+                status="dry_run" if rule.dry_run else "pending",
+                dry_run=rule.dry_run,
+                result={"trigger": trigger, "context": clean_context},
+            )
+            .on_conflict_do_nothing(constraint="unique_automation_execution_event")
+        )
+        if int(inserted.rowcount or 0):
+            inserted_ids.append(execution_id)
+    return inserted_ids
+
+
+async def queue_manual_run(
+    session: AsyncSession,
+    principal: Principal,
+    rule_id: uuid.UUID,
+    payload: AutomationManualRunIn,
+) -> AutomationExecution:
+    """Start a manual rule once for a caller-supplied idempotency key."""
+    principal.require(Permission.ORG_MANAGE)
+    rule = await get_rule(session, principal, rule_id)
+    if rule.trigger != "manual" or not rule.is_enabled:
+        raise ConflictError("Only enabled manual rules can be started manually")
+    event_key = f"manual:{payload.idempotency_key}"
+    ids = await queue_rule_event(
+        session,
+        organization_id=principal.organization_id,
+        trigger="manual",
+        event_key=event_key,
+        context=payload.context,
+        rule_id=rule.id,
+    )
+    if not ids:
+        existing = (
+            await session.execute(
+                tenant_select(AutomationExecution, principal.organization_id).where(
+                    AutomationExecution.rule_id == rule.id,
+                    AutomationExecution.event_key == event_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+        raise ConflictError("Manual event did not satisfy this rule's conditions")
+    execution = await session.get(AutomationExecution, ids[0])
+    if execution is None:  # pragma: no cover - defensive against a broken unit of work
+        raise ResourceNotFoundError("Automation execution was not persisted")
+    return execution
+
+
+async def rotate_inbound_secret(
+    session: AsyncSession,
+    principal: Principal,
+    rule_id: uuid.UUID,
+    settings: Settings,
+) -> tuple[str, dt.datetime]:
+    """Rotate a webhook rule's encrypted signing secret and reveal it exactly once."""
+    principal.require(Permission.ORG_MANAGE)
+    rule = await get_rule(session, principal, rule_id)
+    if rule.trigger != "webhook.received":
+        raise ConflictError("Inbound secrets are available only for webhook rules")
+    secret = secrets.token_urlsafe(32)
+    rule.inbound_secret_ciphertext = get_cipher(settings).encrypt(secret)
+    rule.inbound_secret_rotated_at = utcnow()
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.AUTOMATION_RULE_UPDATE,
+        principal=principal,
+        resource_type="automation_rule",
+        resource_id=rule.id,
+        detail={"inbound_secret_rotated": True},
+    )
+    return secret, rule.inbound_secret_rotated_at
+
+
+async def queue_inbound_webhook(
+    session: AsyncSession,
+    *,
+    rule_id: uuid.UUID,
+    settings: Settings,
+    timestamp: int,
+    signature: str,
+    event_id: str,
+    body: bytes,
+) -> list[uuid.UUID]:
+    """Authenticate an exact request body and enqueue it without disclosing tenant data."""
+    clean_event_id = event_id.strip()
+    if (
+        len(body) > 32_768
+        or not clean_event_id
+        or len(clean_event_id) > 160
+        or not clean_event_id[0].isascii()
+        or not clean_event_id[0].isalnum()
+        or any(
+            not character.isascii()
+            or (not character.isalnum() and character not in "._:-")
+            for character in clean_event_id
+        )
+    ):
+        raise AuthenticationError("Invalid automation webhook")
+    rule = (
+        await session.execute(
+            select(AutomationRule).where(
+                AutomationRule.id == rule_id,
+                AutomationRule.trigger == "webhook.received",
+                AutomationRule.is_enabled.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if rule is None or not rule.inbound_secret_ciphertext:
+        raise AuthenticationError("Invalid automation webhook")
+    secret = get_cipher(settings).decrypt(rule.inbound_secret_ciphertext).reveal()
+    if not verify_automation_webhook(
+        secret=secret,
+        timestamp=timestamp,
+        signature=signature,
+        body=body,
+    ):
+        raise AuthenticationError("Invalid automation webhook")
+    try:
+        context = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AuthenticationError("Invalid automation webhook") from exc
+    if not isinstance(context, dict):
+        raise AuthenticationError("Invalid automation webhook")
+    return await queue_rule_event(
+        session,
+        organization_id=rule.organization_id,
+        trigger="webhook.received",
+        event_key=f"webhook:{clean_event_id}",
+        context=context,
+        rule_id=rule.id,
+    )
+
+
+async def _execute_platform_action(
+    session: AsyncSession,
+    *,
+    principal: Principal,
+    rule: AutomationRule,
+    execution: AutomationExecution,
+    action: dict[str, Any],
+    finding: CanonicalFinding | None,
+    settings: Settings,
+    redis: Any | None,
+) -> dict[str, Any] | None:
+    """Execute cross-entity actions through existing tenant-scoped service layers."""
+    kind = str(action.get("type") or "")
+    raw_context = execution.result.get("context", {}) if isinstance(execution.result, dict) else {}
+    context = raw_context if isinstance(raw_context, dict) else {}
+    if kind == "send_webhook":
+        await dispatch(
+            session,
+            principal,
+            event=NotificationEvent.AUTOMATION_NOTIFICATION,
+            content=NotificationContent(
+                subject=f"Automation webhook: {rule.name}",
+                body="An automation rule emitted a signed outbound webhook event.",
+                link=(f"/findings/{finding.id}" if finding is not None else "/automation-rules"),
+            ),
+            settings=settings,
+            redis=redis,
+            resource_type=("canonical_finding" if finding is not None else "automation_rule"),
+            resource_id=str(finding.id if finding is not None else rule.id),
+            channels=(NotificationChannel.WEBHOOK,),
+        )
+        return {"type": kind, "outcome": "dispatched"}
+    if kind == "add_asset_tag":
+        from app.services import asset as asset_service
+
+        raw_asset_id = finding.asset_id if finding is not None else context.get("asset_id")
+        if raw_asset_id is None:
+            raise ValueError("add_asset_tag requires finding or asset context")
+        tag = await asset_service.tag_asset(
+            session,
+            principal,
+            uuid.UUID(str(raw_asset_id)),
+            AssetTagIn(key=str(action["key"]), value=action.get("value")),
+        )
+        return {"type": kind, "asset_id": str(raw_asset_id), "tag_id": str(tag.id)}
+    if kind == "set_finding_field":
+        if finding is None:
+            raise ValueError("set_finding_field requires finding context")
+        field = str(action["field"])
+        value = action.get("value")
+        changes: dict[str, Any] = {"expected_version": finding.status_version}
+        if field == "due_in_days":
+            changes["due_at"] = utcnow() + dt.timedelta(days=int(value))
+        else:
+            changes[field] = value
+        updated = await canonical_work_service.update_work(
+            session, principal, finding.id, CanonicalWorkIn(**changes)
+        )
+        return {"type": kind, "field": field, "status_version": updated.status_version}
+    if kind == "generate_report":
+        assessment_id = uuid.UUID(str(action["assessment_id"]))
+        assessment = (
+            await session.execute(
+                tenant_select(Assessment, principal.organization_id).where(
+                    Assessment.id == assessment_id
+                )
+            )
+        ).scalar_one_or_none()
+        if assessment is None:
+            raise ResourceNotFoundError("Assessment not found for automated report")
+        requested_title = str(action.get("title") or f"Security assessment {assessment.reference}")
+        report = Report(
+            id=uuid.uuid4(),
+            organization_id=principal.organization_id,
+            assessment_id=assessment.id,
+            requested_by_id=rule.created_by_id,
+            title=f"Automation · {requested_title}"[:300],
+            format=str(action.get("format", "pdf")),
+            audience=str(action.get("audience", "executive")),
+            status="pending",
+        )
+        session.add(report)
+        return {"type": kind, "report_id": str(report.id), "outcome": "queued"}
+    if kind == "run_agent":
+        session_id = uuid.UUID(str(action["session_id"]))
+        conversation = (
+            await session.execute(
+                tenant_select(AgentSession, principal.organization_id).where(
+                    AgentSession.id == session_id,
+                    AgentSession.is_archived.is_(False),
+                )
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            raise ResourceNotFoundError("Agent session not found for automation")
+        run_id = uuid.uuid4()
+        run = AgentRun(
+            id=run_id,
+            organization_id=principal.organization_id,
+            session_id=conversation.id,
+            triggered_by_id=rule.created_by_id or conversation.user_id,
+            thread_id=str(run_id),
+            graph="multi_agent",
+            objective=str(action["objective"]),
+            status=AgentRunStatus.QUEUED.value,
+        )
+        session.add(run)
+        staged = stage_run_dispatch(
+            session,
+            organization_id=principal.organization_id,
+            run_id=run_id,
+            action=RunAction.SUPERVISE,
+            principal=principal,
+        )
+        staged.run = run
+        return {"type": kind, "run_id": str(run_id), "outcome": "queued"}
+    return None
+
+
+def _settle_execution_failure(execution: AutomationExecution, exc: Exception) -> tuple[str, bool]:
+    trace = dict(execution.result) if isinstance(execution.result, dict) else {}
+    execution.attempts += 1
+    retryable = isinstance(exc, CynuxError) and exc.retryable
+    error_code = exc.code if isinstance(exc, CynuxError) else "unexpected_error"
+    if retryable and execution.attempts < _MAX_AUTOMATION_ATTEMPTS:
+        delay_seconds = min(
+            _AUTOMATION_RETRY_MAX_SECONDS,
+            _AUTOMATION_RETRY_BASE_SECONDS * (2 ** (execution.attempts - 1)),
+        )
+        execution.next_retry_at = utcnow() + dt.timedelta(seconds=delay_seconds)
+        execution.result = {
+            **trace,
+            "error_code": error_code,
+            "retry_scheduled": True,
+            "next_retry_at": execution.next_retry_at.isoformat(),
+        }
+        return error_code, True
+    execution.status = "failed"
+    execution.next_retry_at = None
+    execution.result = {**trace, "error_code": error_code, "attempts": execution.attempts}
+    return error_code, False
+
+
+def _execution_trace(execution: AutomationExecution) -> dict[str, Any]:
+    trace = dict(execution.result) if isinstance(execution.result, dict) else {}
+    for key in ("actions", "attempts", "error_code", "next_retry_at", "reason", "retry_scheduled"):
+        trace.pop(key, None)
+    return trace
 
 
 async def execute_pending_automations(
@@ -838,48 +1430,73 @@ async def execute_pending_automations(
         if execution.canonical_finding_id is None:
             if execution.dry_run or rule.dry_run:
                 execution.status = "dry_run"
-                execution.result = {"actions": rule.actions, "reason": "dry_run"}
-                continue
-            if any(action.get("type") != "notify" for action in rule.actions):
-                execution.status = "skipped"
-                execution.result = {"reason": "scheduled_actions_require_finding_context"}
+                execution.result = {
+                    **_execution_trace(execution),
+                    "actions": rule.actions,
+                    "reason": "dry_run",
+                }
                 continue
             principal = Principal.for_system(organization_id=execution.organization_id)
-            channels = (
-                tuple(
-                    dict.fromkeys(
-                        channel
-                        for action in rule.actions
-                        for channel in (_notification_channels(action) or ())
+            outcomes: list[dict[str, Any]] = []
+            try:
+                for action in rule.actions:
+                    if action.get("type") == "notify":
+                        await dispatch(
+                            session,
+                            principal,
+                            event=NotificationEvent.AUTOMATION_NOTIFICATION,
+                            content=NotificationContent(
+                                subject=f"Automation: {rule.name}",
+                                body="A durable automation event requires your attention.",
+                                link="/automation-rules",
+                            ),
+                            settings=settings,
+                            redis=redis,
+                            resource_type="automation_rule",
+                            resource_id=str(rule.id),
+                            channels=_notification_channels(action),
+                        )
+                        outcomes.append({"type": "notify"})
+                        continue
+                    outcome = await _execute_platform_action(
+                        session,
+                        principal=principal,
+                        rule=rule,
+                        execution=execution,
+                        action=action,
+                        finding=None,
+                        settings=settings,
+                        redis=redis,
                     )
+                    if outcome is None:
+                        raise ValueError("automation action requires finding context")
+                    outcomes.append(outcome)
+                execution.status = "executed"
+                execution.result = {**_execution_trace(execution), "actions": outcomes}
+                await audit_service.record(
+                    session,
+                    action=audit_service.AuditAction.AUTOMATION_EXECUTION,
+                    principal=principal,
+                    resource_type="automation_execution",
+                    resource_id=execution.id,
+                    detail={"rule_id": str(rule.id), "action_count": len(outcomes)},
                 )
-                or None
-            )
-            await dispatch(
-                session,
-                principal,
-                event=NotificationEvent.AUTOMATION_NOTIFICATION,
-                content=NotificationContent(
-                    subject=f"Scheduled automation: {rule.name}",
-                    body="A scheduled automation rule is due for review.",
-                    link="/automation-rules",
-                ),
-                settings=settings,
-                redis=redis,
-                resource_type="automation_rule",
-                resource_id=str(rule.id),
-                channels=channels,
-            )
-            execution.status = "executed"
-            execution.result = {"actions": [{"type": "notify"}]}
-            await audit_service.record(
-                session,
-                action=audit_service.AuditAction.AUTOMATION_EXECUTION,
-                principal=principal,
-                resource_type="automation_execution",
-                resource_id=execution.id,
-                detail={"rule_id": str(rule.id), "action_count": 1, "scheduled": True},
-            )
+            except Exception as exc:
+                error_code, retry_scheduled = _settle_execution_failure(execution, exc)
+                await audit_service.record(
+                    session,
+                    action=audit_service.AuditAction.AUTOMATION_EXECUTION,
+                    principal=principal,
+                    resource_type="automation_execution",
+                    resource_id=execution.id,
+                    outcome=AuditOutcome.FAILURE,
+                    detail={
+                        "rule_id": str(rule.id),
+                        "error_code": error_code,
+                        "attempt": execution.attempts,
+                        "retry_scheduled": retry_scheduled,
+                    },
+                )
             continue
         finding = (
             (
@@ -898,10 +1515,14 @@ async def execute_pending_automations(
             continue
         if execution.dry_run or rule.dry_run:
             execution.status = "dry_run"
-            execution.result = {"actions": rule.actions, "reason": "dry_run"}
+            execution.result = {
+                **_execution_trace(execution),
+                "actions": rule.actions,
+                "reason": "dry_run",
+            }
             continue
         principal = Principal.for_system(organization_id=execution.organization_id)
-        outcomes: list[dict[str, str]] = []
+        outcomes: list[dict[str, Any]] = []
         try:
             for action in rule.actions:
                 if action.get("type") == "create_ticket":
@@ -1031,10 +1652,22 @@ async def execute_pending_automations(
                             {"type": "refresh_intelligence", "outcome": "skipped_no_cves"}
                         )
                 else:
-                    raise ValueError("automation action is not implemented")
+                    outcome = await _execute_platform_action(
+                        session,
+                        principal=principal,
+                        rule=rule,
+                        execution=execution,
+                        action=action,
+                        finding=finding,
+                        settings=settings,
+                        redis=redis,
+                    )
+                    if outcome is None:
+                        raise ValueError("automation action is not implemented")
+                    outcomes.append(outcome)
             execution.status = "executed"
             execution.next_retry_at = None
-            execution.result = {"actions": outcomes}
+            execution.result = {**_execution_trace(execution), "actions": outcomes}
             await audit_service.record(
                 session,
                 action=audit_service.AuditAction.AUTOMATION_EXECUTION,
@@ -1044,27 +1677,7 @@ async def execute_pending_automations(
                 detail={"rule_id": str(rule.id), "action_count": len(outcomes)},
             )
         except Exception as exc:
-            execution.attempts += 1
-            retryable = isinstance(exc, CynuxError) and exc.retryable
-            error_code = exc.code if isinstance(exc, CynuxError) else "unexpected_error"
-            if retryable and execution.attempts < _MAX_AUTOMATION_ATTEMPTS:
-                delay_seconds = min(
-                    _AUTOMATION_RETRY_MAX_SECONDS,
-                    _AUTOMATION_RETRY_BASE_SECONDS * (2 ** (execution.attempts - 1)),
-                )
-                execution.next_retry_at = utcnow() + dt.timedelta(seconds=delay_seconds)
-                execution.result = {
-                    "error_code": error_code,
-                    "retry_scheduled": True,
-                    "next_retry_at": execution.next_retry_at.isoformat(),
-                }
-            else:
-                execution.status = "failed"
-                execution.next_retry_at = None
-                execution.result = {
-                    "error_code": error_code,
-                    "attempts": execution.attempts,
-                }
+            error_code, retry_scheduled = _settle_execution_failure(execution, exc)
             await audit_service.record(
                 session,
                 action=audit_service.AuditAction.AUTOMATION_EXECUTION,
@@ -1076,7 +1689,7 @@ async def execute_pending_automations(
                     "rule_id": str(rule.id),
                     "error_code": error_code,
                     "attempt": execution.attempts,
-                    "retry_scheduled": retryable and execution.status == "pending",
+                    "retry_scheduled": retry_scheduled,
                 },
             )
     return len(pending)
@@ -1233,6 +1846,8 @@ async def execute_declarative_action(
 
 
 __all__ = [
+    "automation_catalog",
+    "automation_webhook_signature",
     "conditions_match",
     "create_rule",
     "delete_rule",
@@ -1245,7 +1860,12 @@ __all__ = [
     "list_rules",
     "list_rules_paged",
     "queue_finding_event",
+    "queue_inbound_webhook",
+    "queue_manual_run",
+    "queue_rule_event",
+    "rotate_inbound_secret",
     "schedule_ticket_close_retest",
     "update_rule",
     "validate_rule_definition",
+    "verify_automation_webhook",
 ]

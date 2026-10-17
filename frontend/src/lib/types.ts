@@ -2182,7 +2182,17 @@ export type AutomationTrigger =
   | "ticket.closed"
   | "retest.confirmed"
   | "retest.cleared"
-  | "sla.breached";
+  | "sla.breached"
+  | "asset.created"
+  | "asset.updated"
+  | "assessment.started"
+  | "assessment.completed"
+  | "engagement.created"
+  | "engagement.status_changed"
+  | "scan.failed"
+  | "integration.error"
+  | "webhook.received"
+  | "manual";
 
 export interface AutomationCondition {
   field: string;
@@ -2197,6 +2207,29 @@ export interface AutomationAction {
   assignee_user_id?: Uuid;
   remediation_group?: string;
   authorization_reference?: string;
+  key?: string;
+  value?: unknown;
+  field?: string;
+  assessment_id?: Uuid;
+  format?: "html" | "pdf" | "json";
+  audience?: "executive" | "technical";
+  title?: string;
+  session_id?: Uuid;
+  objective?: string;
+}
+
+export interface AutomationTemplateOut {
+  id: string;
+  name: string;
+  description: string;
+  definition: Pick<AutomationRuleCreateIn, "trigger" | "conditions" | "actions">;
+}
+
+export interface AutomationCatalogOut {
+  triggers: AutomationTrigger[];
+  conditions: string[];
+  actions: string[];
+  templates: AutomationTemplateOut[];
 }
 
 export interface AutomationRuleOut {

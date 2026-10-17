@@ -463,6 +463,27 @@ async def transition(
         to_status=to.value,
         stage=assessment.current_stage,
     )
+    trigger = (
+        "assessment.completed"
+        if to is AssessmentStatus.COMPLETED
+        else "assessment.started"
+        if current is AssessmentStatus.DRAFT and to is AssessmentStatus.PLANNING
+        else None
+    )
+    if trigger is not None:
+        from app.services.automation import queue_rule_event
+
+        await queue_rule_event(
+            session,
+            organization_id=assessment.organization_id,
+            trigger=trigger,
+            event_key=f"{trigger}:{assessment.id}",
+            context={
+                "assessment_id": str(assessment.id),
+                "status": to.value,
+                "source": "assessment",
+            },
+        )
 
 
 async def record_degradation(

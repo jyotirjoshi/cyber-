@@ -233,6 +233,30 @@ async def upsert_assets(
     # from these ids, and a pending row has none.
     await session.flush()
 
+    if changes:
+        from app.services.automation import queue_rule_event
+
+        assets_by_id = {asset.id: asset for asset in touched}
+        for change in changes:
+            changed_asset = assets_by_id[change.asset_id]
+            trigger = "asset.created" if change.change_type == "discovered" else "asset.updated"
+            await queue_rule_event(
+                session,
+                organization_id=assessment.organization_id,
+                trigger=trigger,
+                event_key=f"{trigger}:{assessment.id}:{changed_asset.id}",
+                context={
+                    "asset_id": str(changed_asset.id),
+                    "assessment_id": str(assessment.id),
+                    "asset_environment": changed_asset.environment,
+                    "asset_criticality": changed_asset.criticality,
+                    "asset_groups": list(changed_asset.groups or []),
+                    "internet_exposed": bool(changed_asset.internet_exposed),
+                    "source": "asset_inventory",
+                    "status": changed_asset.status,
+                },
+            )
+
     assessment.assets_discovered = await _count_assets(session, assessment.id)
     log.info(
         "assets.upserted",

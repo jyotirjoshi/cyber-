@@ -4,14 +4,28 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Header, Request, Response
 
-from app.api.deps import DbSession, PaginationDep, PrincipalDep
-from app.schemas.automation import AutomationExecutionOut, AutomationRuleIn, AutomationRuleOut
+from app.api.deps import DbSession, PaginationDep, PrincipalDep, SettingsDep
+from app.core.errors import AuthenticationError
+from app.db.enums import Permission
+from app.schemas.automation import (
+    AutomationExecutionOut,
+    AutomationInboundSecretOut,
+    AutomationManualRunIn,
+    AutomationRuleIn,
+    AutomationRuleOut,
+)
 from app.schemas.common import Page
 from app.services import automation as automation_service
 
 router = APIRouter(prefix="/automation", tags=["automation"])
+
+
+@router.get("/catalog")
+async def get_automation_catalog(principal: PrincipalDep) -> dict[str, object]:
+    principal.require(Permission.ORG_READ)
+    return automation_service.automation_catalog()
 
 
 @router.get("/rules", response_model=Page[AutomationRuleOut])
@@ -75,6 +89,67 @@ async def delete_automation_rule(
     await automation_service.delete_rule(session, principal, rule_id)
     await session.commit()
     return Response(status_code=204)
+
+
+@router.post("/rules/{rule_id}/run", response_model=AutomationExecutionOut, status_code=202)
+async def run_automation_rule(
+    rule_id: uuid.UUID,
+    body: AutomationManualRunIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AutomationExecutionOut:
+    execution = await automation_service.queue_manual_run(session, principal, rule_id, body)
+    await session.commit()
+    await session.refresh(execution)
+    return AutomationExecutionOut.model_validate(execution)
+
+
+@router.post(
+    "/rules/{rule_id}/inbound-secret/rotate",
+    response_model=AutomationInboundSecretOut,
+)
+async def rotate_automation_inbound_secret(
+    rule_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+) -> AutomationInboundSecretOut:
+    secret, rotated_at = await automation_service.rotate_inbound_secret(
+        session, principal, rule_id, settings
+    )
+    await session.commit()
+    return AutomationInboundSecretOut(rule_id=rule_id, secret=secret, rotated_at=rotated_at)
+
+
+@router.post("/inbound/{rule_id}", status_code=202)
+async def receive_automation_webhook(
+    rule_id: uuid.UUID,
+    request: Request,
+    session: DbSession,
+    settings: SettingsDep,
+    x_cynux_timestamp: int = Header(alias="X-Cynux-Timestamp"),
+    x_cynux_signature: str = Header(alias="X-Cynux-Signature"),
+    x_cynux_event_id: str = Header(alias="X-Cynux-Event-Id"),
+) -> dict[str, object]:
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > 32_768:
+            raise AuthenticationError("Invalid automation webhook")
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    queued = await automation_service.queue_inbound_webhook(
+        session,
+        rule_id=rule_id,
+        settings=settings,
+        timestamp=x_cynux_timestamp,
+        signature=x_cynux_signature,
+        event_id=x_cynux_event_id,
+        body=body,
+    )
+    await session.commit()
+    return {"accepted": True, "queued": len(queued)}
 
 
 @router.get("/rules/{rule_id}/executions", response_model=Page[AutomationExecutionOut])

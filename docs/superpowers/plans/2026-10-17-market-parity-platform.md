@@ -111,17 +111,18 @@
 - Modify: `backend/app/schemas/automation.py`
 - Modify: `backend/app/api/v1/automation.py`
 - Create: `backend/app/services/automation_expression.py`
+- Create: `backend/alembic/versions/0097_automation_platform.py`
 - Modify: `frontend/src/app/(app)/automation/page.tsx`
 - Test: `backend/tests/unit/test_automation_rules.py`
 
 **Interfaces:**
 - Produces: entity triggers, manual/signed-webhook starts, bounded expressions, agent-run action, templates, and execution trace.
 
-- [ ] Add failing parser, trigger, template, signature, replay, and agent-action tests.
-- [ ] Implement the expression evaluator without `eval` or arbitrary code.
-- [ ] Add asset, assessment, engagement, scan-log, integration, webhook, and manual triggers.
-- [ ] Add enrichment, field mutation, tag, webhook, report, and agent actions.
-- [ ] Run automation and frontend suites.
+- [x] Add failing parser, trigger, template, signature, replay, and agent-action tests.
+- [x] Implement the expression evaluator without `eval` or arbitrary code.
+- [x] Add asset, assessment, engagement, scan-log, integration, webhook, and manual triggers.
+- [x] Add enrichment, field mutation, tag, webhook, report, and agent actions.
+- [x] Run automation and frontend suites.
 
 ### Task 6: Asset inventory operations
 
@@ -130,7 +131,7 @@
 - Modify: `backend/app/services/asset.py`
 - Modify: `backend/app/api/v1/assets.py`
 - Create: `backend/app/services/asset_merge.py`
-- Create: `backend/alembic/versions/0097_asset_inventory_operations.py`
+- Create: `backend/alembic/versions/0098_asset_inventory_operations.py`
 - Modify: `frontend/src/app/(app)/assets/page.tsx`
 - Test: `backend/tests/unit/test_asset_inventory_operations.py`
 
@@ -164,7 +165,7 @@
 - Create: `backend/app/db/models/exploit_intelligence.py`
 - Create: `backend/app/services/exploit_intelligence.py`
 - Modify: `backend/app/services/canonical_risk.py`
-- Create: `backend/alembic/versions/0098_exploit_intelligence.py`
+- Create: `backend/alembic/versions/0099_exploit_intelligence.py`
 - Modify: `frontend/src/app/(app)/threat-intelligence/page.tsx`
 - Test: `backend/tests/unit/test_exploit_intelligence.py`
 
@@ -183,7 +184,7 @@
 - Create: `backend/app/services/mfa.py`
 - Create: `backend/app/services/retention.py`
 - Create: `backend/app/db/models/workbook.py`
-- Create: `backend/alembic/versions/0099_enterprise_controls.py`
+- Create: `backend/alembic/versions/0100_enterprise_controls.py`
 - Modify: `backend/app/api/v1/organization.py`
 - Create: `backend/app/api/v1/workbooks.py`
 - Create: `frontend/src/app/(app)/reports/workbooks/page.tsx`

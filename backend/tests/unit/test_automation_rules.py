@@ -8,6 +8,40 @@ from uuid import UUID, uuid4
 import pytest
 
 
+def test_bounded_automation_expression_supports_data_only_logic() -> None:
+    from app.services.automation_expression import evaluate_expression
+
+    context = {
+        "severity": "critical",
+        "risk_score": 91.5,
+        "in_kev": True,
+        "asset_environment": "production",
+        "asset_groups": ["payments", "internet-facing"],
+    }
+    assert evaluate_expression(
+        'severity == "critical" and risk_score >= 90 and "payments" in asset_groups',
+        context,
+    )
+    assert not evaluate_expression('in_kev == false or risk_score < 10', context)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        '__import__("os").system("whoami")',
+        "asset.__class__",
+        "unknown_field == 1",
+        "risk_score + 10 > 90",
+        "[value for value in asset_groups]",
+    ],
+)
+def test_bounded_automation_expression_rejects_code_and_unknown_data(expression: str) -> None:
+    from app.services.automation_expression import validate_expression
+
+    with pytest.raises(ValueError):
+        validate_expression(expression)
+
+
 def test_automation_rule_payload_allows_only_declared_trigger_condition_and_action() -> None:
     from app.services.automation import validate_rule_definition
 
@@ -135,6 +169,256 @@ def test_automation_conditions_only_match_the_intended_finding_context() -> None
         in_kev=True,
         asset_groups={"payments"},
     )
+
+
+def test_automation_rule_expression_is_validated_and_combined_with_conditions() -> None:
+    from app.services.automation import conditions_match, validate_rule_definition
+
+    definition = validate_rule_definition(
+        trigger="finding.updated",
+        conditions={"expression": 'risk_score >= 80 and "payments" in asset_groups'},
+        actions=[{"type": "notify"}],
+    )
+    assert definition["conditions"]["expression"].startswith("risk_score")
+    assert conditions_match(
+        definition["conditions"],
+        severity="high",
+        asset_environment="production",
+        in_kev=False,
+        asset_groups={"payments"},
+        risk_score=84,
+    )
+    assert not conditions_match(
+        definition["conditions"],
+        severity="high",
+        asset_environment="production",
+        in_kev=False,
+        asset_groups={"payments"},
+        risk_score=40,
+    )
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "asset.created",
+        "asset.updated",
+        "assessment.started",
+        "assessment.completed",
+        "engagement.created",
+        "engagement.status_changed",
+        "scan.failed",
+        "integration.error",
+        "webhook.received",
+        "manual",
+    ],
+)
+def test_automation_platform_accepts_entity_and_operator_triggers(trigger: str) -> None:
+    from app.services.automation import validate_rule_definition
+
+    definition = validate_rule_definition(
+        trigger=trigger, conditions={}, actions=[{"type": "notify"}]
+    )
+    assert definition["trigger"] == trigger
+
+
+def test_automation_platform_validates_extended_actions() -> None:
+    from app.services.automation import validate_rule_definition
+
+    definition = validate_rule_definition(
+        trigger="manual",
+        conditions={},
+        actions=[
+            {"type": "send_webhook"},
+            {"type": "add_asset_tag", "key": "reviewed", "value": "automation"},
+            {
+                "type": "set_finding_field",
+                "field": "remediation_group",
+                "value": "platform-upgrade",
+            },
+            {
+                "type": "generate_report",
+                "assessment_id": str(uuid4()),
+                "format": "pdf",
+                "audience": "executive",
+            },
+            {
+                "type": "run_agent",
+                "session_id": str(uuid4()),
+                "objective": "Review new critical exposures and propose a bounded response.",
+            },
+        ],
+    )
+    assert [action["type"] for action in definition["actions"]] == [
+        "send_webhook",
+        "add_asset_tag",
+        "set_finding_field",
+        "generate_report",
+        "run_agent",
+    ]
+
+
+def test_signed_automation_webhook_checks_exact_body_timestamp_and_secret() -> None:
+    from app.services.automation import automation_webhook_signature, verify_automation_webhook
+
+    body = b'{"source":"ci","status":"failed"}'
+    signature = automation_webhook_signature("top-secret", 1_800_000_000, body)
+    assert verify_automation_webhook(
+        secret="top-secret",
+        timestamp=1_800_000_000,
+        signature=f"sha256={signature}",
+        body=body,
+        now=1_800_000_120,
+    )
+    assert not verify_automation_webhook(
+        secret="top-secret",
+        timestamp=1_800_000_000,
+        signature=f"sha256={signature}",
+        body=body + b" ",
+        now=1_800_000_120,
+    )
+    assert not verify_automation_webhook(
+        secret="top-secret",
+        timestamp=1_800_000_000,
+        signature=f"sha256={signature}",
+        body=body,
+        now=1_800_000_301,
+    )
+
+
+def test_automation_catalog_templates_are_validated_definitions() -> None:
+    from app.services.automation import automation_catalog, validate_rule_definition
+
+    catalog = automation_catalog()
+    assert {"manual", "webhook.received", "assessment.completed"} <= set(catalog["triggers"])
+    assert {"run_agent", "generate_report", "send_webhook"} <= set(catalog["actions"])
+    for template in catalog["templates"]:
+        definition = template["definition"]
+        validate_rule_definition(**definition)
+
+
+def test_automation_event_context_redacts_credentials_before_persistence() -> None:
+    from app.services.automation import _bounded_event_context
+
+    clean = _bounded_event_context(
+        {
+            "source": "ci",
+            "authorization": "Bearer leaked",
+            "nested": {"api-key": "leaked", "status": "failed"},
+        }
+    )
+    assert clean == {
+        "source": "ci",
+        "authorization": "[REDACTED]",
+        "nested": {"api-key": "[REDACTED]", "status": "failed"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_generic_rule_event_uses_expression_and_durable_replay_key() -> None:
+    from app.services.automation import queue_rule_event
+
+    organization_id = uuid4()
+    rule = SimpleNamespace(
+        id=uuid4(),
+        organization_id=organization_id,
+        trigger="integration.error",
+        is_enabled=True,
+        dry_run=False,
+        conditions={"expression": 'source == "wazuh" and status == "failed"'},
+    )
+    statements: list[object] = []
+
+    class Session:
+        async def execute(self, statement):
+            statements.append(statement)
+            if len(statements) == 1:
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [rule]))
+            return SimpleNamespace(rowcount=1)
+
+    ids = await queue_rule_event(
+        Session(),
+        organization_id=organization_id,
+        trigger="integration.error",
+        event_key="integration:wazuh:attempt-7",
+        context={"source": "wazuh", "status": "failed"},
+    )
+    assert len(ids) == 1
+    assert len(statements) == 2
+
+
+@pytest.mark.asyncio
+async def test_manual_run_reuses_existing_execution_on_replay(monkeypatch) -> None:
+    from app.db.enums import Role
+    from app.schemas.automation import AutomationManualRunIn
+    from app.services import automation
+    from app.services.context import Principal
+
+    principal = Principal(user_id=uuid4(), organization_id=uuid4(), role=Role.OWNER)
+    rule = SimpleNamespace(id=uuid4(), trigger="manual", is_enabled=True)
+    existing = SimpleNamespace(id=uuid4())
+
+    async def fake_get_rule(*args):
+        return rule
+
+    async def fake_queue(*args, **kwargs):
+        return []
+
+    class Session:
+        async def execute(self, statement):
+            return SimpleNamespace(scalar_one_or_none=lambda: existing)
+
+    monkeypatch.setattr(automation, "get_rule", fake_get_rule)
+    monkeypatch.setattr(automation, "queue_rule_event", fake_queue)
+    actual = await automation.queue_manual_run(
+        Session(),
+        principal,
+        rule.id,
+        AutomationManualRunIn(idempotency_key="operator-123", context={"status": "ready"}),
+    )
+    assert actual is existing
+
+
+def test_manual_run_rejects_unbounded_or_log_unsafe_idempotency_keys() -> None:
+    from app.schemas.automation import AutomationManualRunIn
+
+    with pytest.raises(ValueError, match="unsupported characters"):
+        AutomationManualRunIn(idempotency_key="unsafe\nkey", context={})
+
+
+@pytest.mark.asyncio
+async def test_rotate_inbound_secret_encrypts_and_returns_plaintext_once(monkeypatch) -> None:
+    from app.db.enums import Role
+    from app.services import automation
+    from app.services.context import Principal
+
+    principal = Principal(user_id=uuid4(), organization_id=uuid4(), role=Role.OWNER)
+    rule = SimpleNamespace(
+        id=uuid4(),
+        trigger="webhook.received",
+        inbound_secret_ciphertext=None,
+        inbound_secret_rotated_at=None,
+    )
+
+    async def fake_get_rule(*args):
+        return rule
+
+    class Cipher:
+        def encrypt(self, value: str) -> str:
+            return f"encrypted:{len(value)}"
+
+    monkeypatch.setattr(automation, "get_rule", fake_get_rule)
+    monkeypatch.setattr(automation, "get_cipher", lambda settings: Cipher())
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(automation.audit_service, "record", fake_audit)
+    secret, rotated_at = await automation.rotate_inbound_secret(
+        object(), principal, rule.id, object()
+    )
+    assert len(secret) >= 32
+    assert rule.inbound_secret_ciphertext == f"encrypted:{len(secret)}"
+    assert rotated_at is rule.inbound_secret_rotated_at
 
 
 def test_automation_rule_schema_rejects_unsafe_action_fields() -> None:
