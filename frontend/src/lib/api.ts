@@ -77,6 +77,14 @@ import type {
   DashboardOut,
   DashboardLayoutIn,
   DashboardLayoutOut,
+  EngagementCreateIn,
+  EngagementDocumentOut,
+  EngagementMilestoneOut,
+  EngagementOut,
+  EngagementParticipantOut,
+  EngagementRetestRoundOut,
+  EngagementStatus,
+  EngagementTimeEntryOut,
   AssetGroupRiskOut,
   TeamDashboardOut,
   ExternalAlertFilter,
@@ -583,6 +591,58 @@ export const api = {
     reports: (id: string) => request<ReportOut[]>("GET", `/assessments/${id}/reports`),
     generateReport: (id: string, body: ReportGenerateIn = {}) =>
       request<ReportDetailOut>("POST", `/assessments/${id}/reports`, { body }),
+  },
+
+  engagements: {
+    list: (params?: { limit?: number; offset?: number }) =>
+      request<Page<EngagementOut>>("GET", "/engagements", { query: params }),
+    create: (body: EngagementCreateIn) =>
+      request<EngagementOut>("POST", "/engagements", { body }),
+    get: (id: string) => request<EngagementOut>("GET", `/engagements/${id}`),
+    updateStatus: (id: string, status: EngagementStatus, expectedVersion: number) =>
+      request<EngagementOut>("PATCH", `/engagements/${id}/status`, {
+        body: { status, expected_version: expectedVersion },
+      }),
+    participants: (id: string) =>
+      request<EngagementParticipantOut[]>("GET", `/engagements/${id}/participants`),
+    addParticipant: (
+      id: string,
+      body: {
+        user_id?: string | null;
+        email: string;
+        display_name?: string | null;
+        role: EngagementParticipantOut["role"];
+      },
+    ) => request<EngagementParticipantOut>("POST", `/engagements/${id}/participants`, { body }),
+    milestones: (id: string) =>
+      request<EngagementMilestoneOut[]>("GET", `/engagements/${id}/milestones`),
+    addMilestone: (
+      id: string,
+      body: { title: string; description?: string | null; due_at?: string | null; sort_order?: number },
+    ) => request<EngagementMilestoneOut>("POST", `/engagements/${id}/milestones`, { body }),
+    retestRounds: (id: string) =>
+      request<EngagementRetestRoundOut[]>("GET", `/engagements/${id}/retest-rounds`),
+    createRetestRound: (id: string, body: { assessment_id?: string | null; note?: string | null }) =>
+      request<EngagementRetestRoundOut>("POST", `/engagements/${id}/retest-rounds`, { body }),
+    timeEntries: (id: string) =>
+      request<EngagementTimeEntryOut[]>("GET", `/engagements/${id}/time-entries`),
+    addTimeEntry: (
+      id: string,
+      body: { minutes: number; work_date: string; note?: string | null; billable?: boolean },
+    ) => request<EngagementTimeEntryOut>("POST", `/engagements/${id}/time-entries`, { body }),
+    documents: (id: string) =>
+      request<EngagementDocumentOut[]>("GET", `/engagements/${id}/documents`),
+    uploadDocument: (
+      id: string,
+      input: { file: File; title: string; kind: EngagementDocumentOut["kind"]; clientVisible: boolean },
+    ) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("title", input.title);
+      form.append("kind", input.kind);
+      form.append("client_visible", String(input.clientVisible));
+      return request<EngagementDocumentOut>("POST", `/engagements/${id}/documents/upload`, { body: form });
+    },
   },
 
   approvals: {

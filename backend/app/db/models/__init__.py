@@ -61,6 +61,14 @@ from app.db.models.canonical import (
 )
 from app.db.models.compliance import ComplianceControl, ComplianceFindingMapping
 from app.db.models.custom_connector import CustomConnector, CustomConnectorRun
+from app.db.models.engagement import (
+    Engagement,
+    EngagementDocument,
+    EngagementMilestone,
+    EngagementParticipant,
+    EngagementRetestRound,
+    EngagementTimeEntry,
+)
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding, FindingEnrichment, Remediation, TicketLink
 from app.db.models.graphql import GraphQLMutationReceipt
@@ -153,6 +161,12 @@ __all__ = [
     "AutomationRule",
     "AuditEvent",
     "ExternalSecurityAlert",
+    "Engagement",
+    "EngagementDocument",
+    "EngagementMilestone",
+    "EngagementParticipant",
+    "EngagementRetestRound",
+    "EngagementTimeEntry",
     "AuthorizationRecord",
     "RecurringScan",
     "ScanProfile",

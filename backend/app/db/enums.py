@@ -281,6 +281,54 @@ class EngagementType(StrEnum):
     SUPPLY_CHAIN = "supply_chain"
 
 
+class PtaasEngagementStatus(StrEnum):
+    DRAFT = "draft"
+    SCOPING = "scoping"
+    ACTIVE = "active"
+    RETESTING = "retesting"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class EngagementParticipantRole(StrEnum):
+    LEAD_TESTER = "lead_tester"
+    TESTER = "tester"
+    CLIENT_MANAGER = "client_manager"
+    CLIENT_OBSERVER = "client_observer"
+
+
+class EngagementParticipantStatus(StrEnum):
+    INVITED = "invited"
+    ACTIVE = "active"
+    REMOVED = "removed"
+
+
+class EngagementMilestoneStatus(StrEnum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+
+class EngagementDocumentKind(StrEnum):
+    SCOPE = "scope"
+    AUTHORIZATION = "authorization"
+    EVIDENCE = "evidence"
+    REPORT = "report"
+    DELIVERABLE = "deliverable"
+    OTHER = "other"
+
+
+class EngagementRetestStatus(StrEnum):
+    REQUESTED = "requested"
+    SCHEDULED = "scheduled"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
 class ExecutionMode(StrEnum):
     """How an approved engagement is allowed to execute."""
 
@@ -864,6 +912,11 @@ __all__ = [
     "Criticality",
     "CriticalitySource",
     "EnrichmentStatus",
+    "EngagementDocumentKind",
+    "EngagementMilestoneStatus",
+    "EngagementParticipantRole",
+    "EngagementParticipantStatus",
+    "EngagementRetestStatus",
     "EngagementType",
     "ExecutionMode",
     "ExternalAlertTriageStatus",
@@ -881,6 +934,7 @@ __all__ = [
     "NotificationStatus",
     "Permission",
     "Priority",
+    "PtaasEngagementStatus",
     "ReportFormat",
     "ReportStatus",
     "RiskLevel",

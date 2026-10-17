@@ -139,6 +139,21 @@ def report_key(
     return key[:MAX_KEY_LENGTH]
 
 
+def engagement_document_key(
+    organization_id: UUID | str,
+    engagement_id: UUID | str,
+    document_id: UUID | str,
+    filename: str,
+) -> str:
+    """Build a tenant-contained immutable key for one PTaaS document."""
+    key = (
+        f"{tenant_prefix(organization_id)}"
+        f"engagements/{engagement_id}/documents/{document_id}/"
+        f"{sanitize_segment(filename)}"
+    )
+    return key[:MAX_KEY_LENGTH]
+
+
 @dataclass(frozen=True, slots=True)
 class StoredObject:
     """What :meth:`ObjectStorage.put_bytes` records.

@@ -72,7 +72,7 @@
 - Create: `backend/app/schemas/engagement.py`
 - Create: `backend/app/services/engagement.py`
 - Create: `backend/app/api/v1/engagements.py`
-- Create: `backend/alembic/versions/0094_ptaas_engagements.py`
+- Create: `backend/alembic/versions/0095_ptaas_engagements.py`
 - Create: `frontend/src/app/(app)/engagements/page.tsx`
 - Create: `frontend/src/app/(app)/engagements/[id]/page.tsx`
 - Test: `backend/tests/unit/test_engagements.py`
@@ -80,10 +80,10 @@
 **Interfaces:**
 - Produces: engagement, participant, scope, milestone, time-entry, document, and retest-round operations.
 
-- [ ] Add failing lifecycle, role-boundary, time-entry, document, and retest tests.
-- [ ] Implement models, migration, contracts, service, routes, and navigation.
-- [ ] Implement client/tester projections without parallel finding storage.
-- [ ] Run migration, API, and frontend suites.
+- [x] Add failing lifecycle, role-boundary, time-entry, document, and retest tests.
+- [x] Implement models, migration, contracts, service, routes, and navigation.
+- [x] Implement client/tester projections without parallel finding storage.
+- [x] Run migration, API, ORM, OpenAPI, frontend unit, typecheck, and production-build suites.
 
 ### Task 4: Durable agentic pentest workspaces
 

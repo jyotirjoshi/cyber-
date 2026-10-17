@@ -24,7 +24,9 @@ from app.api.v1 import (
     automation,
     canonical,
     compliance,
+    custom_connectors,
     dashboard,
+    engagements,
     exposures,
     external_alerts,
     findings,
@@ -43,13 +45,13 @@ from app.api.v1 import (
     threat_intelligence,
     webhooks,
     workflows,
-    custom_connectors,
 )
 
 api_router = APIRouter()
 
 api_router.include_router(auth.router)
 api_router.include_router(dashboard.router)
+api_router.include_router(engagements.router)
 api_router.include_router(assessments.router)
 api_router.include_router(assets.router)
 api_router.include_router(asm.router)

@@ -30,6 +30,7 @@ const NAV: NavItem[] = [
   { href: "/agent/learning", label: "Learning review", icon: <IconAgent />, permission: "org:manage" },
   { href: "/agent/knowledge", label: "Knowledge", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/assessments", label: "Assessments", icon: <IconAssessments />, permission: "assessment:read" },
+  { href: "/engagements", label: "PTaaS", icon: <IconAssessments />, permission: "assessment:read" },
   { href: "/findings", label: "Findings", icon: <IconFindings />, permission: "finding:read" },
   { href: "/remediation", label: "Remediation", icon: <IconRemediation />, permission: "finding:read" },
   { href: "/assets", label: "Assets", icon: <IconAssets />, permission: "asset:read" },

@@ -2552,3 +2552,101 @@ export interface ThreatWatchlistMatchOut {
   match_key: string;
   matched_at: IsoDateTime;
 }
+
+// ---------------------------------------------------------------------------
+// PTaaS engagements.
+// ---------------------------------------------------------------------------
+
+export type EngagementStatus =
+  | "draft"
+  | "scoping"
+  | "active"
+  | "retesting"
+  | "completed"
+  | "cancelled";
+
+export interface EngagementCreateIn {
+  title: string;
+  description?: string | null;
+  assessment_id?: Uuid | null;
+  scope?: Record<string, unknown>;
+  starts_at?: IsoDateTime | null;
+  ends_at?: IsoDateTime | null;
+  client_visible?: boolean;
+}
+
+export interface EngagementOut {
+  id: Uuid;
+  assessment_id: Uuid | null;
+  title: string;
+  description: string | null;
+  status: EngagementStatus;
+  scope: Record<string, unknown>;
+  starts_at: IsoDateTime | null;
+  ends_at: IsoDateTime | null;
+  client_visible: boolean;
+  created_by_id: Uuid | null;
+  version: number;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface EngagementParticipantOut {
+  id: Uuid;
+  engagement_id: Uuid;
+  user_id: Uuid | null;
+  email: string;
+  display_name: string | null;
+  role: "lead_tester" | "tester" | "client_manager" | "client_observer";
+  status: "invited" | "active" | "removed";
+  created_at: IsoDateTime;
+}
+
+export interface EngagementMilestoneOut {
+  id: Uuid;
+  engagement_id: Uuid;
+  title: string;
+  description: string | null;
+  status: "pending" | "in_progress" | "completed" | "blocked" | "cancelled";
+  due_at: IsoDateTime | null;
+  completed_at: IsoDateTime | null;
+  sort_order: number;
+  created_at: IsoDateTime;
+}
+
+export interface EngagementRetestRoundOut {
+  id: Uuid;
+  engagement_id: Uuid;
+  assessment_id: Uuid | null;
+  ordinal: number;
+  status: "requested" | "scheduled" | "running" | "completed" | "cancelled" | "failed";
+  requested_by_id: Uuid | null;
+  note: string | null;
+  requested_at: IsoDateTime;
+  completed_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface EngagementTimeEntryOut {
+  id: Uuid;
+  engagement_id: Uuid;
+  user_id: Uuid | null;
+  minutes: number;
+  work_date: string;
+  note: string | null;
+  billable: boolean;
+  created_at: IsoDateTime;
+}
+
+export interface EngagementDocumentOut {
+  id: Uuid;
+  engagement_id: Uuid;
+  uploaded_by_id: Uuid | null;
+  title: string;
+  kind: "scope" | "authorization" | "evidence" | "report" | "deliverable" | "other";
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  client_visible: boolean;
+  created_at: IsoDateTime;
+}
