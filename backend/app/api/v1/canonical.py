@@ -162,6 +162,7 @@ async def get_canonical_finding(
             TicketLinkOut.model_validate(item)
             for item in await ticket_service.list_canonical_tickets(session, principal, finding_id)
         ],
+        field_provenance=canonical_query.build_field_provenance(finding, observations),
     )
 
 

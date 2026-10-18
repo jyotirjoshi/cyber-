@@ -65,6 +65,10 @@ class IntegrationOut(BaseModel):
     last_sync_status: str | None = None
     last_sync_error: str | None = None
     sync_failure_count: int = 0
+    freshness_seconds: int | None = Field(default=None, ge=0)
+    coverage_state: str = "not_scheduled"
+    sync_confidence: float = Field(default=0, ge=0, le=1)
+    coverage_reason: str = ""
     created_at: dt.datetime
 
 
@@ -142,10 +146,23 @@ class IntegrationHealthOut(BaseModel):
     circuit_open: bool = False
 
 
+class SourceCoverageOut(BaseModel):
+    provider: str
+    observations_total: int = Field(ge=0)
+    canonical_findings: int = Field(ge=0)
+    active_observations: int = Field(ge=0)
+    missing_observations: int = Field(ge=0)
+    last_observed_at: dt.datetime | None = None
+    coverage_state: str
+    sync_confidence: float = Field(ge=0, le=1)
+    coverage_reason: str
+
+
 __all__ = [
     "CredentialOut",
     "IntegrationHealthOut",
     "IntegrationOut",
+    "SourceCoverageOut",
     "IntegrationSyncOut",
     "IntegrationTestOut",
     "IntegrationUpsertIn",

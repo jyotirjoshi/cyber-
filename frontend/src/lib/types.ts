@@ -1042,6 +1042,15 @@ export interface CanonicalHistoryOut {
   occurred_at: IsoDateTime;
 }
 
+export interface FieldProvenanceOut {
+  field: string;
+  value: unknown;
+  sources: string[];
+  observation_ids: Uuid[];
+  confidence: number;
+  conflicts: boolean;
+}
+
 export interface FindingCollaborationCommentOut {
   id: Uuid;
   canonical_finding_id: Uuid;
@@ -1065,6 +1074,7 @@ export interface CanonicalFindingDetailOut extends CanonicalFindingOut {
   observations: CanonicalObservationOut[];
   history: CanonicalHistoryOut[];
   tickets: TicketLinkOut[];
+  field_provenance: FieldProvenanceOut[];
 }
 
 export interface RiskAcceptanceOut {
@@ -1661,7 +1671,23 @@ export interface IntegrationHealthOut {
   last_sync_at: IsoDateTime | null;
   last_sync_status: "succeeded" | "failed" | null;
   sync_failure_count: number;
+  freshness_seconds: number | null;
+  coverage_state: string;
+  sync_confidence: number;
+  coverage_reason: string;
   circuit_open: boolean;
+}
+
+export interface SourceCoverageOut {
+  provider: string;
+  observations_total: number;
+  canonical_findings: number;
+  active_observations: number;
+  missing_observations: number;
+  last_observed_at: IsoDateTime | null;
+  coverage_state: string;
+  sync_confidence: number;
+  coverage_reason: string;
 }
 
 // ---------------------------------------------------------------------------

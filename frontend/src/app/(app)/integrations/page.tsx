@@ -762,6 +762,11 @@ export default function IntegrationsPage() {
     [],
     { enabled: canRead },
   );
+  const coverage = useApiResource(
+    () => api.integrations.coverage(),
+    [],
+    { enabled: canRead && can("finding:read") },
+  );
 
   if (!canRead) {
     return (
@@ -810,6 +815,19 @@ export default function IntegrationsPage() {
       {canManage && !hasByok && <ByokSetupCard onChanged={refetch} />}
       {canManage && data && <AddIntegrationCard existing={data} onChanged={refetch} />}
       {can("assessment:create") && <ScanImportCard />}
+      <Card>
+        <CardHeader><div><CardTitle>Source coverage and sync confidence</CardTitle><p className="mt-0.5 text-xs text-muted">Confidence combines connector health, schedule freshness, failed pulls, circuit state, and the source observations actually contributing to canonical findings.</p></div></CardHeader>
+        <CardBody>
+          {coverage.loading && !coverage.data ? <LoadingState label="Loading source coverage…" /> : coverage.error ? <ErrorState message={coverage.error} onRetry={coverage.refetch} /> : coverage.data?.length ? (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{coverage.data.map((source) => <div key={source.provider} className="rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between gap-2"><span className="font-medium text-fg">{humanize(source.provider)}</span><Badge tone={source.sync_confidence >= 0.8 ? "ok" : source.sync_confidence >= 0.4 ? "warn" : "danger"}>{Math.round(source.sync_confidence * 100)}%</Badge></div>
+              <p className="mt-2 text-xs text-muted">{source.canonical_findings} unified findings · {source.active_observations} active observations</p>
+              <p className="mt-1 text-xs text-faint">{humanize(source.coverage_state)} · {source.missing_observations} missing/stale source records</p>
+              <p className="mt-2 text-xs text-muted">{source.coverage_reason}</p>
+            </div>)}</div>
+          ) : <p className="text-sm text-muted">No connector coverage has been recorded yet.</p>}
+        </CardBody>
+      </Card>
       {body}
     </div>
   );

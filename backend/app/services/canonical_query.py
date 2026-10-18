@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,8 +23,116 @@ from app.db.models.canonical import (
 )
 from app.db.models.finding import TicketLink
 from app.db.repository import TenantRepository, tenant_select
+from app.schemas.canonical import FieldProvenanceOut
 from app.schemas.common import PaginationParams
 from app.services.context import Principal
+
+
+def _intel_sources(value: Any) -> set[str]:
+    sources: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"source", "provider"} and isinstance(item, str) and item.strip():
+                sources.add(item.strip()[:80])
+            else:
+                sources.update(_intel_sources(item))
+    elif isinstance(value, list):
+        for item in value:
+            sources.update(_intel_sources(item))
+    return sources
+
+
+def build_field_provenance(
+    finding: CanonicalFinding,
+    observations: list[FindingObservation],
+) -> list[FieldProvenanceOut]:
+    """Explain each canonical field using only persisted source observations."""
+    active = [
+        observation
+        for observation in observations
+        if observation.source_status not in {"absent", "superseded"}
+    ]
+    total = max(1, len(active))
+
+    def observed_field(field: str, value: Any) -> FieldProvenanceOut:
+        normalized_value = str(value or "").strip().casefold()
+        supporting = [
+            observation
+            for observation in active
+            if str(getattr(observation, field, "") or "").strip().casefold()
+            == normalized_value
+        ]
+        distinct = {
+            str(getattr(observation, field, "") or "").strip().casefold()
+            for observation in active
+            if str(getattr(observation, field, "") or "").strip()
+        }
+        return FieldProvenanceOut(
+            field=field,
+            value=value,
+            sources=sorted({observation.provider for observation in supporting}),
+            observation_ids=sorted((observation.id for observation in supporting), key=str),
+            confidence=round(len(supporting) / total, 4),
+            conflicts=len(distinct) > 1,
+        )
+
+    cve_set = {str(cve).upper() for cve in (finding.cve_ids or [])}
+    cve_support = [
+        observation
+        for observation in active
+        if str(observation.cve_id or "").upper() in cve_set
+    ]
+    sources = sorted({"cynux:risk_engine", *_intel_sources(finding.intel_evidence or {})})
+    all_sources = sorted({observation.provider for observation in active})
+    all_ids = sorted((observation.id for observation in active), key=str)
+    return [
+        observed_field("title", finding.title),
+        observed_field("severity", finding.severity),
+        FieldProvenanceOut(
+            field="cve_ids",
+            value=list(finding.cve_ids or []),
+            sources=sorted({observation.provider for observation in cve_support}),
+            observation_ids=sorted((observation.id for observation in cve_support), key=str),
+            confidence=round(len(cve_support) / total, 4) if cve_set else 1.0,
+            conflicts=bool(
+                cve_set
+                and {
+                    str(observation.cve_id).upper()
+                    for observation in active
+                    if observation.cve_id
+                }
+                - cve_set
+            ),
+        ),
+        FieldProvenanceOut(
+            field="status",
+            value=finding.status,
+            sources=["cynux:lifecycle"],
+            observation_ids=[],
+            confidence=1.0,
+        ),
+        FieldProvenanceOut(
+            field="risk_score",
+            value=finding.risk_score,
+            sources=sources,
+            observation_ids=all_ids,
+            confidence=1.0 if finding.risk_score is not None else 0.0,
+        ),
+        FieldProvenanceOut(
+            field="first_seen_at",
+            value=finding.first_seen_at,
+            sources=all_sources,
+            observation_ids=all_ids,
+            confidence=1.0 if active else 0.0,
+        ),
+        FieldProvenanceOut(
+            field="last_seen_at",
+            value=finding.last_seen_at,
+            sources=all_sources,
+            observation_ids=all_ids,
+            confidence=1.0 if active else 0.0,
+        ),
+    ]
 
 
 async def list_canonical_findings(
@@ -178,7 +287,7 @@ async def list_remediation_operations(
     if overdue:
         conditions.extend((CanonicalFinding.due_at < utcnow(), CanonicalFinding.status.not_in(inactive)))
     if attention_only:
-        conditions.append(CanonicalFinding.status.not_in(inactive + ("accepted_risk",)))
+        conditions.append(CanonicalFinding.status.not_in((*inactive, "accepted_risk")))
 
     normalized_group = asset_group.strip() if asset_group is not None else None
     if asset_group is not None and not normalized_group:

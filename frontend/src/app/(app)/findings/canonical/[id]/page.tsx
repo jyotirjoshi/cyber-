@@ -103,6 +103,14 @@ export default function CanonicalFindingPage() {
     (ticketId: string) => api.findings.refreshTicket(ticketId),
     { onSuccess: (ticket) => { void refetch(); toast({ title: `${humanize(ticket.provider)} ticket refreshed`, description: ticket.external_status ?? "Status unavailable", tone: "ok" }); } },
   );
+  const ticketStateMutation = useMutation(
+    (ticketId: string, closed: boolean) => api.findings.setTicketState(
+      ticketId,
+      closed,
+      closed ? "Cynux marked the remediation ticket complete." : "Cynux reopened the remediation ticket.",
+    ),
+    { onSuccess: (ticket) => { void refetch(); toast({ title: `${humanize(ticket.provider)} ticket updated`, description: ticket.external_status ?? "Status unavailable", tone: "ok" }); } },
+  );
   const customFieldsMutation = useMutation(
     () => api.canonicalFindings.updateWork(id, {
       expected_version: data!.status_version,
@@ -176,6 +184,21 @@ export default function CanonicalFindingPage() {
         </CardBody>
       </Card>
       <Card>
+        <CardHeader><CardTitle>Field provenance</CardTitle></CardHeader>
+        <CardBody className="space-y-3 text-sm">
+          <p className="text-muted">Each canonical value shows the providers that support it. Conflicts remain visible instead of being discarded during normalization.</p>
+          <Table>
+            <THead><TR><TH>Field</TH><TH>Selected value</TH><TH>Sources</TH><TH>Confidence</TH></TR></THead>
+            <TBody>{data.field_provenance.map((field) => <TR key={field.field}>
+              <TD className="font-medium">{humanize(field.field)}</TD>
+              <TD className="max-w-[320px] truncate" title={typeof field.value === "string" ? field.value : JSON.stringify(field.value)}>{typeof field.value === "string" ? field.value : JSON.stringify(field.value)}</TD>
+              <TD>{field.sources.join(", ") || "No active source"}{field.conflicts ? <span className="ml-2 text-warn">Conflict</span> : null}</TD>
+              <TD>{Math.round(field.confidence * 100)}%</TD>
+            </TR>)}</TBody>
+          </Table>
+        </CardBody>
+      </Card>
+      <Card>
         <CardHeader><CardTitle>Remediation ownership</CardTitle></CardHeader>
         <CardBody className="space-y-4 text-sm">
           {!canRemediate || data.status === "closed" || data.status === "false_positive" ? (
@@ -224,7 +247,7 @@ export default function CanonicalFindingPage() {
               return <li key={ticket.id} className="rounded-lg border border-line p-3">
                 {url ? <a href={url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{ticket.external_key} ↗</a> : ticket.external_key}
                 <span className="ml-2 text-muted">{humanize(ticket.external_status || "linked")}</span>
-                <div className="mt-2"><Button size="sm" variant="outline" loading={refreshTicketMutation.loading} onClick={() => void refreshTicketMutation.run(ticket.id)}>Refresh tracker status</Button></div>
+                <div className="mt-2 flex flex-wrap gap-2"><Button size="sm" variant="outline" loading={refreshTicketMutation.loading} onClick={() => void refreshTicketMutation.run(ticket.id)}>Refresh tracker status</Button>{canRemediate && ticket.provider !== "linear" && <Button size="sm" variant="outline" loading={ticketStateMutation.loading} onClick={() => void ticketStateMutation.run(ticket.id, !["closed", "done", "resolved", "completed"].includes((ticket.external_status ?? "").toLowerCase()))}>{["closed", "done", "resolved", "completed"].includes((ticket.external_status ?? "").toLowerCase()) ? "Reopen provider ticket" : "Close provider ticket"}</Button>}</div>
               </li>;
             })}</ul>
           )}

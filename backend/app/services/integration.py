@@ -58,7 +58,7 @@ from typing import Any
 import structlog
 from pydantic import SecretStr
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -73,6 +73,7 @@ from app.core.errors import (
 )
 from app.db.base import utcnow
 from app.db.enums import AuditOutcome, IntegrationKind, IntegrationStatus, Permission, ScannerName
+from app.db.models.canonical import FindingObservation
 from app.db.models.identity import Organization
 from app.db.models.integration import Integration, IntegrationCredential
 from app.db.repository import tenant_select
@@ -119,6 +120,7 @@ from app.schemas.integration import (
     IntegrationOut,
     IntegrationTestOut,
     IntegrationUpsertIn,
+    SourceCoverageOut,
 )
 from app.services import audit as audit_service
 from app.services.audit import AuditAction
@@ -1044,6 +1046,83 @@ def mark_sync_succeeded(integration: Integration | None, *, completed_at: dt.dat
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SyncQuality:
+    freshness_seconds: int | None
+    coverage_state: str
+    confidence: float
+    reason: str
+
+
+def integration_sync_quality(
+    integration: Integration,
+    *,
+    now: dt.datetime | None = None,
+    circuit_open: bool = False,
+) -> SyncQuality:
+    """Turn schedule, freshness, and failures into an explainable coverage confidence."""
+    measured_at = now or utcnow()
+    last_sync_at = integration.last_sync_at
+    freshness = None
+    if last_sync_at is not None:
+        if last_sync_at.tzinfo is None:
+            last_sync_at = last_sync_at.replace(tzinfo=dt.UTC)
+        freshness = max(0, int((measured_at - last_sync_at).total_seconds()))
+
+    if not integration.is_enabled:
+        quality = SyncQuality(freshness, "disabled", 0.0, "Connector is disabled.")
+    elif integration.sync_interval_minutes is None:
+        quality = SyncQuality(
+            freshness,
+            "manual" if last_sync_at is not None else "not_scheduled",
+            0.75 if integration.last_sync_status == "succeeded" else 0.4,
+            "Connector is manual; confidence reflects its latest recorded result.",
+        )
+    elif last_sync_at is None:
+        quality = SyncQuality(
+            None,
+            "never_synced",
+            0.0,
+            "Scheduled connector has never completed a sync.",
+        )
+    else:
+        expected = max(300, int(integration.sync_interval_minutes) * 60)
+        ratio = (freshness or 0) / expected
+        if integration.last_sync_status == "failed":
+            confidence = max(0.05, 0.45 - (0.1 * int(integration.sync_failure_count or 0)))
+            state = "degraded"
+            reason = "The latest sync failed; absence cannot be treated as clean coverage."
+        elif ratio <= 1.5:
+            confidence = max(0.8, 1.0 - (ratio * 0.1))
+            state = "current"
+            reason = "The latest successful sync is within its expected collection window."
+        elif ratio <= 3:
+            confidence = max(0.45, 0.8 - ((ratio - 1.5) * 0.2))
+            state = "stale"
+            reason = "The connector is past its expected collection window."
+        else:
+            confidence = max(0.1, 0.45 / ratio)
+            state = "stale"
+            reason = "Connector coverage is substantially older than its schedule."
+        quality = SyncQuality(freshness, state, round(confidence, 4), reason)
+
+    if circuit_open:
+        return SyncQuality(
+            quality.freshness_seconds,
+            "blocked",
+            round(quality.confidence * 0.4, 4),
+            "Provider circuit breaker is open; new coverage is blocked.",
+        )
+    if integration.status == IntegrationStatus.ERROR.value:
+        return SyncQuality(
+            quality.freshness_seconds,
+            "degraded",
+            round(quality.confidence * 0.6, 4),
+            "Connector health is in an error state.",
+        )
+    return quality
+
+
 async def integration_health(
     session: AsyncSession,
     principal: Principal,
@@ -1065,6 +1144,7 @@ async def integration_health(
         if redis is not None:
             status = await CircuitBreaker(redis, provider=integration.kind).status()
             circuit_open = status.is_open
+        quality = integration_sync_quality(integration, circuit_open=circuit_open)
         out.append(
             IntegrationHealthOut(
                 kind=integration.kind_enum,
@@ -1077,10 +1157,112 @@ async def integration_health(
                 last_sync_at=integration.last_sync_at,
                 last_sync_status=integration.last_sync_status,
                 sync_failure_count=integration.sync_failure_count,
+                freshness_seconds=quality.freshness_seconds,
+                coverage_state=quality.coverage_state,
+                sync_confidence=quality.confidence,
+                coverage_reason=quality.reason,
                 circuit_open=circuit_open,
             )
         )
     return out
+
+
+async def source_coverage(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    redis: Redis | None = None,
+) -> list[SourceCoverageOut]:
+    """Summarize actual canonical-source coverage beside connector sync confidence."""
+    principal.require(Permission.INTEGRATION_READ, Permission.FINDING_READ)
+    health_rows = await integration_health(session, principal, redis=redis)
+    health_by_kind = {row.kind.value: row for row in health_rows}
+    rows = (
+        await session.execute(
+            select(
+                FindingObservation.provider,
+                func.count(FindingObservation.id),
+                func.count(func.distinct(FindingObservation.canonical_finding_id)),
+                func.sum(
+                    case(
+                        (
+                            FindingObservation.source_status.not_in(("absent", "superseded")),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case(
+                        (
+                            (FindingObservation.missing_sync_count > 0)
+                            | FindingObservation.source_status.in_(("absent", "superseded")),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                func.max(FindingObservation.last_seen_at),
+            )
+            .where(FindingObservation.organization_id == principal.organization_id)
+            .group_by(FindingObservation.provider)
+            .order_by(FindingObservation.provider)
+        )
+    ).all()
+
+    def health_for(provider: str) -> IntegrationHealthOut | None:
+        direct = health_by_kind.get(provider)
+        if direct is not None:
+            return direct
+        return next(
+            (
+                health
+                for kind, health in health_by_kind.items()
+                if provider.startswith(f"{kind}_") or provider.startswith(f"{kind}:")
+            ),
+            None,
+        )
+
+    output: list[SourceCoverageOut] = []
+    observed_provider_keys: set[str] = set()
+    for provider, total, canonical, active, missing, last_seen in rows:
+        provider_name = str(provider)
+        health = health_for(provider_name)
+        if health is not None:
+            observed_provider_keys.add(health.kind.value)
+        output.append(
+            SourceCoverageOut(
+                provider=provider_name,
+                observations_total=int(total or 0),
+                canonical_findings=int(canonical or 0),
+                active_observations=int(active or 0),
+                missing_observations=int(missing or 0),
+                last_observed_at=last_seen,
+                coverage_state=health.coverage_state if health else "unmanaged_import",
+                sync_confidence=health.sync_confidence if health else 0.5,
+                coverage_reason=(
+                    health.coverage_reason
+                    if health
+                    else "Source records exist without a scheduled connector health record."
+                ),
+            )
+        )
+    for health in health_rows:
+        if health.kind not in CONTINUOUS_SYNC_KINDS or health.kind.value in observed_provider_keys:
+            continue
+        output.append(
+            SourceCoverageOut(
+                provider=health.kind.value,
+                observations_total=0,
+                canonical_findings=0,
+                active_observations=0,
+                missing_observations=0,
+                coverage_state=health.coverage_state,
+                sync_confidence=health.sync_confidence,
+                coverage_reason=health.coverage_reason,
+            )
+        )
+    return sorted(output, key=lambda row: row.provider)
 
 
 # ---------------------------------------------------------------------------
@@ -2063,10 +2245,12 @@ __all__ = [
     "find_integration",
     "get_integration",
     "integration_health",
+    "integration_sync_quality",
     "integration_out",
     "list_integrations",
     "record_failure",
     "resolve_settings",
+    "source_coverage",
     "test_integration",
     "upsert_integration",
 ]

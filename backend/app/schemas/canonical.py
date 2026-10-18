@@ -61,10 +61,22 @@ class FindingHistoryOut(BaseModel):
     occurred_at: dt.datetime
 
 
+class FieldProvenanceOut(BaseModel):
+    """How a canonical field was selected and which source records support it."""
+
+    field: str
+    value: Any
+    sources: list[str] = Field(default_factory=list)
+    observation_ids: list[uuid.UUID] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    conflicts: bool = False
+
+
 class CanonicalFindingDetailOut(CanonicalFindingOut):
     observations: list[FindingObservationOut]
     history: list[FindingHistoryOut]
     tickets: list[TicketLinkOut] = Field(default_factory=list)
+    field_provenance: list[FieldProvenanceOut] = Field(default_factory=list)
 
 
 class CanonicalStatusDecisionIn(BaseModel):

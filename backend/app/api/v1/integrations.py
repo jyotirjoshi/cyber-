@@ -37,6 +37,7 @@ from app.schemas.integration import (
     IntegrationSyncOut,
     IntegrationTestOut,
     IntegrationUpsertIn,
+    SourceCoverageOut,
     TenableScanLaunchOut,
     TenableScanStatusOut,
 )
@@ -114,6 +115,16 @@ async def integration_health(
     path parameter. ``redis`` is passed so the breaker state is real rather than assumed closed.
     """
     return await integration_service.integration_health(session, principal, redis=redis)
+
+
+@router.get("/coverage", response_model=list[SourceCoverageOut])
+async def integration_source_coverage(
+    principal: PrincipalDep,
+    session: DbSession,
+    redis: RedisDep,
+) -> list[SourceCoverageOut]:
+    """Show source volume, freshness, missing records, and connector confidence."""
+    return await integration_service.source_coverage(session, principal, redis=redis)
 
 
 @router.post("", response_model=IntegrationOut)

@@ -111,6 +111,7 @@ import type {
   FindingOut,
   HealthOut,
   IntegrationHealthOut,
+  SourceCoverageOut,
   IntegrationKind,
   IntegrationOut,
   IntegrationSyncOut,
@@ -713,6 +714,10 @@ export const api = {
       request<TicketLinkOut>("POST", `/findings/${id}/tickets`, { body }),
     refreshTicket: (ticketId: string) =>
       request<TicketLinkOut>("POST", `/findings/tickets/${ticketId}/refresh`),
+    setTicketState: (ticketId: string, closed: boolean, comment?: string) =>
+      request<TicketLinkOut>("POST", `/findings/tickets/${ticketId}/state`, {
+        body: { closed, comment: comment || null },
+      }),
   },
 
   externalAlerts: {
@@ -882,6 +887,7 @@ export const api = {
   integrations: {
     list: () => request<IntegrationOut[]>("GET", "/integrations"),
     health: () => request<IntegrationHealthOut[]>("GET", "/integrations/health"),
+    coverage: () => request<SourceCoverageOut[]>("GET", "/integrations/coverage"),
     upsert: (body: IntegrationUpsertIn) =>
       request<IntegrationOut>("POST", "/integrations", { body }),
     get: (kind: IntegrationKind) => request<IntegrationOut>("GET", `/integrations/${kind}`),
