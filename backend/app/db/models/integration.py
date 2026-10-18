@@ -28,11 +28,12 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import LAZY, Base, TenantMixin, TimestampMixin, uuid_pk
-from app.db.enums import IntegrationKind, IntegrationStatus
+from app.db.enums import InboundTicketEventStatus, IntegrationKind, IntegrationStatus
 
 if TYPE_CHECKING:
     from app.db.models.identity import Organization, User
@@ -166,4 +167,55 @@ class IntegrationCredential(Base, TenantMixin, TimestampMixin):
         return f"<IntegrationCredential {self.name} [REDACTED]>"
 
 
-__all__ = ["Integration", "IntegrationCredential"]
+class InboundTicketEvent(Base, TenantMixin, TimestampMixin):
+    """Authenticated provider event receipt and replay boundary."""
+
+    __tablename__ = "inbound_ticket_events"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    integration_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("integrations.id", ondelete="CASCADE"), nullable=False
+    )
+    ticket_link_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("ticket_links.id", ondelete="SET NULL")
+    )
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    external_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(80))
+    external_status: Mapped[str] = mapped_column(String(80), nullable=False)
+    occurred_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processing_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=InboundTicketEventStatus.RECEIVED.value
+    )
+    ignore_reason: Mapped[str | None] = mapped_column(String(120))
+    normalized: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('jira','github','gitlab','servicenow','azure_devops')",
+            name="valid_inbound_ticket_provider",
+        ),
+        CheckConstraint(
+            "processing_status IN ('received','processed','ignored')",
+            name="valid_inbound_ticket_event_status",
+        ),
+        UniqueConstraint(
+            "integration_id", "delivery_id", name="unique_inbound_ticket_delivery"
+        ),
+        Index(
+            "ix_inbound_ticket_events_org_occurred",
+            "organization_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_inbound_ticket_events_org_ticket",
+            "organization_id",
+            "ticket_link_id",
+        ),
+    )
+
+
+__all__ = ["InboundTicketEvent", "Integration", "IntegrationCredential"]

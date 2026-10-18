@@ -960,6 +960,8 @@ export interface TicketLinkOut {
   project_key: string | null;
   issue_type: string | null;
   external_status: string | null;
+  external_updated_at: IsoDateTime | null;
+  closure_generation: number;
   created_by_agent: boolean;
   created_at: IsoDateTime;
 }

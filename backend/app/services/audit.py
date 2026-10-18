@@ -107,7 +107,7 @@ class AuditAction:
     DASHBOARD_LAYOUT_DELETE = "dashboard_layout.delete"
     WEBHOOK_CREATE = "webhook.create"
     WEBHOOK_DISABLE = "webhook.disable"
-    WEBHOOK_SECRET_ROTATE = "webhook.secret.rotate"
+    WEBHOOK_SECRET_ROTATE = "webhook.secret.rotate"  # noqa: S105 - audit action, not a secret
     WEBHOOK_DELIVERY_RETRY = "webhook.delivery.retry"
     NOTIFICATION_DELIVERY_RETRY = "notification.delivery.retry"
     APPROVAL_REQUESTED = "approval.requested"
@@ -161,6 +161,8 @@ class AuditAction:
 
     # -- external actions (FR-027 .. FR-029) --------------------------------
     TICKET_CREATE = "ticket.create"
+    TICKET_STATUS_PUSH = "ticket.status.push"
+    TICKET_WEBHOOK_RECEIVE = "ticket.webhook.receive"
     NOTIFICATION_QUEUE = "notification.queue"
     NOTIFICATION_SEND = "notification.send"
     INTEGRATION_CONFIGURE = "integration.configure"

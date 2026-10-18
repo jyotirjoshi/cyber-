@@ -381,6 +381,8 @@ class TicketLink(Base, TenantMixin, TimestampMixin):
     issue_type: Mapped[str | None] = mapped_column(String(60))
     #: Last known state in the tracker; refreshed on demand, not polled.
     external_status: Mapped[str | None] = mapped_column(String(80))
+    #: Provider timestamp of the last applied webhook; prevents late delivery rollback.
+    external_updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     #: Monotonic closure cycle for automation idempotency.  A ticket can legitimately
     #: be reopened and resolved again; each terminal transition deserves one fresh
     #: evidence-based retest, while repeated polling of the same closed state does not.

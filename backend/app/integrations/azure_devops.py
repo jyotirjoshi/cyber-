@@ -168,6 +168,26 @@ class AzureDevOpsClient:
             idempotency_key=f"cynux-comment-{raw_id}-{digest}",
         )
 
+    async def set_issue_state(self, key: str, *, closed: bool) -> AzureDevOpsIssue:
+        """Set the conventional work-item state with an auditable JSON Patch."""
+        raw_id = key.lstrip("#")
+        if not raw_id.isdigit() or int(raw_id) <= 0:
+            raise IntegrationError("Invalid Azure DevOps work item key", provider=PROVIDER)
+        payload = await self._require().patch_json(
+            self._path(f"workitems/{int(raw_id)}"),
+            headers=self._headers(patch=True),
+            json=[
+                {
+                    "op": "add",
+                    "path": "/fields/System.State",
+                    "value": "Closed" if closed else "Active",
+                }
+            ],
+        )
+        if not isinstance(payload, dict):
+            raise IntegrationError("Azure DevOps returned an invalid work item", provider=PROVIDER)
+        return self._issue(payload)
+
     async def ping(self) -> bool:
         await self._require().get_json(self._path("workitemtypes"), headers=self._headers())
         return True

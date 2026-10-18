@@ -32,6 +32,7 @@ from app.api.v1 import (
     external_alerts,
     findings,
     integrations,
+    inbound_ticket_webhooks,
     jobs,
     knowledge,
     metering,
@@ -68,6 +69,7 @@ api_router.include_router(knowledge.router)
 api_router.include_router(reports.router)
 api_router.include_router(organization.router)
 api_router.include_router(integrations.router)
+api_router.include_router(inbound_ticket_webhooks.router)
 api_router.include_router(audit.router)
 api_router.include_router(agent.router)
 api_router.include_router(agent_definitions.router)

@@ -154,7 +154,9 @@ class _KindSpec:
 
     section: str
     base_url_field: str | None = None
-    credentials: Mapping[str, str] = field(default_factory=dict)
+    # ``None`` marks a write-only credential consumed by a dedicated inbound path rather
+    # than projected into deployment settings (for example a webhook signing secret).
+    credentials: Mapping[str, str | None] = field(default_factory=dict)
     config: Mapping[str, str] = field(default_factory=dict)
     #: Credential slots without which the integration cannot work at all.
     required: tuple[str, ...] = ()
@@ -196,7 +198,7 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
     IntegrationKind.JIRA: _KindSpec(
         section="jira",
         base_url_field="base_url",
-        credentials={"api_token": "api_token"},
+        credentials={"api_token": "api_token", "webhook_secret": None},
         # ``user_email`` is the account the token belongs to, not a secret: Jira's API
         # needs both halves and the address is visible on every issue the bot files.
         config={
@@ -251,28 +253,28 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
     IntegrationKind.GITHUB: _KindSpec(
         section="github",
         base_url_field="base_url",
-        credentials={"api_token": "api_token"},
+        credentials={"api_token": "api_token", "webhook_secret": None},
         config={"organization": "organization", "repository": "repository"},
         required=("api_token",),
     ),
     IntegrationKind.GITLAB: _KindSpec(
         section="gitlab",
         base_url_field="base_url",
-        credentials={"api_token": "api_token"},
+        credentials={"api_token": "api_token", "webhook_secret": None},
         config={"project_ids": "project_ids", "issue_project": "issue_project"},
         required=("api_token",),
     ),
     IntegrationKind.SERVICENOW: _KindSpec(
         section="servicenow",
         base_url_field="base_url",
-        credentials={"api_token": "api_token"},
+        credentials={"api_token": "api_token", "webhook_secret": None},
         config={"table": "table", "assignment_group": "assignment_group"},
         required=("api_token",),
     ),
     IntegrationKind.AZURE_DEVOPS: _KindSpec(
         section="azure_devops",
         base_url_field="base_url",
-        credentials={"api_token": "api_token"},
+        credentials={"api_token": "api_token", "webhook_secret": None},
         config={
             "organization": "organization",
             "project": "project",
@@ -1091,7 +1093,9 @@ def _without_deployment_provider_config(base: Settings, kind: IntegrationKind) -
     spec = _spec_for(kind)
     scoped = base.model_copy(deep=True)
     section = getattr(scoped, spec.section)
-    fields = set(spec.credentials.values()) | set(spec.config.values())
+    fields = {field for field in spec.credentials.values() if field is not None} | set(
+        spec.config.values()
+    )
     if spec.base_url_field:
         fields.add(spec.base_url_field)
     for name in fields:
@@ -1119,7 +1123,7 @@ def _overlay(
 
     for name, target in spec.credentials.items():
         secret = credentials.get(name)
-        if secret is not None:
+        if secret is not None and target is not None:
             # Every credential-bearing settings field is a ``SecretStr``; wrapping here
             # keeps the plaintext inside a type that will not render itself into a log.
             setattr(section, target, SecretStr(secret.reveal()))

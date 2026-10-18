@@ -54,6 +54,7 @@ from app.schemas.finding import (
     RemediateIn,
     RemediationOut,
     TicketLinkOut,
+    TicketStateSyncIn,
     ValidateFindingIn,
 )
 from app.services import finding as finding_service
@@ -130,6 +131,29 @@ async def refresh_finding_ticket(
     """Refresh one provider ticket and emit ticket-closed automation only on transition."""
     ticket = await ticket_service.refresh_ticket_status(
         session, principal, ticket_id, settings=settings, redis=redis
+    )
+    await session.commit()
+    return TicketLinkOut.model_validate(ticket)
+
+
+@router.post("/tickets/{ticket_id}/state", response_model=TicketLinkOut)
+async def push_finding_ticket_state(
+    ticket_id: uuid.UUID,
+    body: TicketStateSyncIn,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> TicketLinkOut:
+    """Close or reopen the provider ticket and apply the same state locally."""
+    ticket = await ticket_service.push_ticket_status(
+        session,
+        principal,
+        ticket_id,
+        closed=body.closed,
+        comment=body.comment,
+        settings=settings,
+        redis=redis,
     )
     await session.commit()
     return TicketLinkOut.model_validate(ticket)

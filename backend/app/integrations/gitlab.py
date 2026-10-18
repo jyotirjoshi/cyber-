@@ -154,6 +154,21 @@ class GitLabClient:
             json={"body": text[:1_000_000]},
         )
 
+    async def set_issue_state(self, key: str, *, closed: bool) -> GitLabIssue:
+        """Close or reopen a linked issue using GitLab's explicit state event."""
+        project = self._issue_project()
+        iid = key.lstrip("#")
+        if not iid.isdigit() or int(iid) <= 0:
+            raise IntegrationError("Invalid GitLab issue key", provider=PROVIDER)
+        payload = await self._require().put_json(
+            f"/projects/{quote(project, safe='')}/issues/{int(iid)}",
+            headers=self._headers(),
+            json={"state_event": "close" if closed else "reopen"},
+        )
+        if not isinstance(payload, dict):
+            raise IntegrationError("GitLab returned an invalid issue response", provider=PROVIDER)
+        return self._issue_from_payload(payload)
+
     async def ping(self) -> bool:
         await self._require().get_json("/user", headers=self._headers())
         return True

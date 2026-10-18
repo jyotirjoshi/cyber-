@@ -883,6 +883,12 @@ class IntegrationStatus(StrEnum):
     DISABLED = "disabled"
 
 
+class InboundTicketEventStatus(StrEnum):
+    RECEIVED = "received"
+    PROCESSED = "processed"
+    IGNORED = "ignored"
+
+
 class NotificationEvent(StrEnum):
     ASSESSMENT_STARTED = "assessment_started"
     APPROVAL_REQUIRED = "approval_required"
@@ -978,6 +984,7 @@ __all__ = [
     "CanonicalFindingStatus",
     "IntegrationKind",
     "IntegrationStatus",
+    "InboundTicketEventStatus",
     "JobStatus",
     "KnowledgeEmbeddingStatus",
     "KnowledgeRetrievalProvider",

@@ -726,6 +726,137 @@ async def create_ticket(
     return link
 
 
+async def apply_ticket_status_transition(
+    session: AsyncSession,
+    principal: Principal,
+    link: TicketLink,
+    *,
+    current_status: str | None,
+    provider_updated_at: dt.datetime | None,
+    url: str | None,
+    settings: Settings,
+    redis: Redis | None = None,
+) -> TicketLink:
+    """Apply one confirmed provider state through the canonical lifecycle exactly once."""
+    previous_status = link.external_status
+    link.external_status = current_status[:80] if current_status else None
+    link.updated_at = utcnow()
+    if provider_updated_at is not None:
+        link.external_updated_at = provider_updated_at
+    if url:
+        link.url = url[:1000]
+    closed_transition = became_terminal_ticket_status(previous_status, link.external_status)
+    reopened_transition = became_reopened_ticket_status(previous_status, link.external_status)
+    if closed_transition:
+        link.closure_generation = int(getattr(link, "closure_generation", 0) or 0) + 1
+    if (closed_transition or reopened_transition) and link.canonical_finding_id:
+        finding = (
+            await session.execute(
+                tenant_select(CanonicalFinding, principal.organization_id).where(
+                    CanonicalFinding.id == link.canonical_finding_id
+                )
+            )
+        ).scalar_one_or_none()
+        if closed_transition and finding is not None:
+            asset = (
+                await session.execute(
+                    tenant_select(Asset, principal.organization_id).where(
+                        Asset.id == finding.asset_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if asset is not None:
+                await queue_finding_event(
+                    session,
+                    finding=finding,
+                    asset=asset,
+                    trigger="ticket.closed",
+                    event_key_suffix=f":{link.id}:{link.closure_generation}",
+                )
+            try:
+                from app.services.automation import schedule_ticket_close_retest
+
+                await schedule_ticket_close_retest(
+                    session,
+                    principal=Principal.for_system(
+                        organization_id=principal.organization_id
+                    ),
+                    finding=finding,
+                    authorization_reference=(
+                        f"ticket:{link.provider}:{link.id}:{link.closure_generation}"
+                    ),
+                    settings=settings,
+                )
+            except (CynuxError, ValueError) as exc:
+                log.info(
+                    "ticket.close_retest_not_scheduled",
+                    ticket_id=str(link.id),
+                    reason=type(exc).__name__,
+                )
+        elif (
+            reopened_transition
+            and finding is not None
+            and finding.status in {"closed", "mitigated"}
+        ):
+            previous_finding_status = finding.status
+            finding.status = "reopened"
+            finding.status_version += 1
+            finding.closed_at = None
+            now = utcnow()
+            session.add(
+                FindingHistory(
+                    id=uuid.uuid4(),
+                    organization_id=principal.organization_id,
+                    canonical_finding_id=finding.id,
+                    previous_status=previous_finding_status,
+                    new_status="reopened",
+                    reason=f"Linked {link.provider} ticket reopened remotely",
+                    occurred_at=now,
+                )
+            )
+            await audit_service.record(
+                session,
+                action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
+                principal=principal,
+                resource_type="canonical_finding",
+                resource_id=finding.id,
+                detail={
+                    "from": previous_finding_status,
+                    "to": "reopened",
+                    "reason": "linked_ticket_reopened",
+                    "ticket_id": str(link.id),
+                    "provider": link.provider,
+                },
+            )
+            asset = (
+                await session.execute(
+                    tenant_select(Asset, principal.organization_id).where(
+                        Asset.id == finding.asset_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if asset is not None:
+                await queue_finding_event(
+                    session,
+                    finding=finding,
+                    asset=asset,
+                    trigger="finding.updated",
+                    event_key_suffix=f":version:{finding.status_version}",
+                )
+    if closed_transition:
+        await notification_service.notify_ticket_closed(
+            session,
+            principal,
+            ticket_id=link.id,
+            closure_generation=link.closure_generation,
+            ticket_key=link.external_key,
+            ticket_url=link.url or "",
+            settings=settings,
+            redis=redis,
+        )
+    return link
+
+
 async def refresh_ticket_status(
     session: AsyncSession,
     principal: Principal,
@@ -785,126 +916,99 @@ async def refresh_ticket_status(
     finally:
         await client.aclose()
 
-    previous_status = link.external_status
-    link.external_status = issue.status[:80] if issue.status else None
-    # Record a successful check even when the status did not change, otherwise every
-    # maintenance pulse would refresh the same unchanged ticket again.
-    link.updated_at = utcnow()
-    if issue.url:
-        link.url = issue.url[:1000]
-    closed_transition = became_terminal_ticket_status(previous_status, link.external_status)
-    reopened_transition = became_reopened_ticket_status(previous_status, link.external_status)
-    if closed_transition:
-        # Increment for every remote close cycle, not just canonical links. The same
-        # generation is shared by automation and outbound webhook deduplication.
-        link.closure_generation = int(getattr(link, "closure_generation", 0) or 0) + 1
-    if (closed_transition or reopened_transition) and link.canonical_finding_id:
-        finding = (
-            await session.execute(
-                tenant_select(CanonicalFinding, principal.organization_id).where(
-                    CanonicalFinding.id == link.canonical_finding_id
-                )
-            )
-        ).scalar_one_or_none()
-        if closed_transition and finding is not None:
-            asset = (
-                await session.execute(
-                    tenant_select(Asset, principal.organization_id).where(Asset.id == finding.asset_id)
-                )
-            ).scalar_one_or_none()
-            if asset is not None:
-                await queue_finding_event(
-                    session,
-                    finding=finding,
-                    asset=asset,
-                    trigger="ticket.closed",
-                    event_key_suffix=f":{link.id}:{link.closure_generation}",
-                )
-            # A ticket closure is a remediation claim, not proof.  Always stage one
-            # verification assessment for a canonical finding, even when the tenant has not
-            # configured a no-code rule.  The scheduled assessment still pauses at the normal
-            # approval gate before an active scanner can run; the ticket identity is retained
-            # as the authorization/evidence reference.  The helper's retest request is
-            # idempotent, so a tracker close replay and a matching automation rule share one
-            # assessment rather than creating duplicate verification work.
-            try:
-                from app.services.automation import schedule_ticket_close_retest
+    return await apply_ticket_status_transition(
+        session,
+        principal,
+        link,
+        current_status=issue.status,
+        provider_updated_at=None,
+        url=issue.url,
+        settings=settings,
+        redis=redis,
+    )
 
-                await schedule_ticket_close_retest(
-                    session,
-                    principal=Principal.for_system(organization_id=principal.organization_id),
-                    finding=finding,
-                    authorization_reference=(
-                        f"ticket:{link.provider}:{link.id}:{link.closure_generation}"
-                    ),
-                    settings=settings,
-                )
-            except (CynuxError, ValueError) as exc:
-                # Ticket status remains authoritative if its asset is no longer a valid scan
-                # target or the finding cannot be retested.  The reason is observable in logs
-                # without turning an otherwise-successful two-way sync into a retry loop.
-                log.info(
-                    "ticket.close_retest_not_scheduled",
-                    ticket_id=str(link.id),
-                    reason=type(exc).__name__,
-                )
-        elif reopened_transition and finding is not None and finding.status in {"closed", "mitigated"}:
-            previous_finding_status = finding.status
-            finding.status = "reopened"
-            finding.status_version += 1
-            finding.closed_at = None
-            now = utcnow()
-            session.add(
-                FindingHistory(
-                    id=uuid.uuid4(),
-                    organization_id=principal.organization_id,
-                    canonical_finding_id=finding.id,
-                    previous_status=previous_finding_status,
-                    new_status="reopened",
-                    reason=f"Linked {link.provider} ticket reopened remotely",
-                    occurred_at=now,
-                )
-            )
-            await audit_service.record(
-                session,
-                action=audit_service.AuditAction.FINDING_STATUS_CHANGE,
-                principal=principal,
-                resource_type="canonical_finding",
-                resource_id=finding.id,
-                detail={
-                    "from": previous_finding_status,
-                    "to": "reopened",
-                    "reason": "linked_ticket_reopened",
-                    "ticket_id": str(link.id),
-                    "provider": link.provider,
-                },
-            )
-            asset = (
-                await session.execute(
-                    tenant_select(Asset, principal.organization_id).where(
-                        Asset.id == finding.asset_id
-                    )
-                )
-            ).scalar_one_or_none()
-            if asset is not None:
-                await queue_finding_event(
-                    session,
-                    finding=finding,
-                    asset=asset,
-                    trigger="finding.updated",
-                    event_key_suffix=f":version:{finding.status_version}",
-                )
-    if closed_transition:
-        await notification_service.notify_ticket_closed(
-            session,
-            principal,
-            ticket_id=link.id,
-            closure_generation=link.closure_generation,
-            ticket_key=link.external_key,
-            ticket_url=link.url or "",
-            settings=settings,
-            redis=redis,
+
+async def push_ticket_status(
+    session: AsyncSession,
+    principal: Principal,
+    ticket_id: uuid.UUID,
+    *,
+    closed: bool,
+    comment: str | None,
+    settings: Settings,
+    redis: Redis | None = None,
+) -> TicketLink:
+    """Push an explicit close/reopen command to a linked provider, then record it locally."""
+    principal.require(Permission.FINDING_REMEDIATE)
+    link = await session.scalar(
+        tenant_select(TicketLink, principal.organization_id)
+        .where(TicketLink.id == ticket_id)
+        .with_for_update()
+    )
+    if link is None:
+        raise ResourceNotFoundError("Ticket link not found")
+    if link.provider not in {
+        "jira",
+        "github",
+        "gitlab",
+        "servicenow",
+        "azure_devops",
+    }:
+        raise InvalidConfigurationError(
+            "Ticket provider does not support lifecycle writes",
+            user_message="This ticket provider does not support status updates.",
         )
+
+    scoped = await resolve_settings(
+        session,
+        principal,
+        IntegrationKind(link.provider),
+        settings=settings,
+        require=True,
+    )
+    client: JiraClient | GitHubClient | GitLabClient | ServiceNowClient | AzureDevOpsClient
+    if link.provider == "jira":
+        client = JiraClient(scoped, redis)
+    elif link.provider == "github":
+        client = GitHubClient(scoped, redis)
+    elif link.provider == "gitlab":
+        client = GitLabClient(scoped, redis)
+    elif link.provider == "servicenow":
+        client = ServiceNowClient(scoped, redis)
+    else:
+        client = AzureDevOpsClient(scoped, redis)
+
+    try:
+        await client.set_issue_state(link.external_key, closed=closed)
+        clean_comment = (comment or "").strip()
+        if clean_comment:
+            await client.add_comment(link.external_key, clean_comment[:16_000])
+    finally:
+        await client.aclose()
+
+    await apply_ticket_status_transition(
+        session,
+        principal,
+        link,
+        current_status="closed" if closed else "open",
+        provider_updated_at=utcnow(),
+        url=None,
+        settings=settings,
+        redis=redis,
+    )
+    await audit_service.record(
+        session,
+        action=audit_service.AuditAction.TICKET_STATUS_PUSH,
+        principal=principal,
+        resource_type="ticket_link",
+        resource_id=link.id,
+        detail={
+            "provider": link.provider,
+            "external_key": link.external_key,
+            "requested_status": "closed" if closed else "open",
+            "comment_added": bool((comment or "").strip()),
+        },
+    )
     return link
 
 
@@ -1094,6 +1198,7 @@ __all__ = [
     "SUPPORTED_PROVIDERS",
     "build_description",
     "build_canonical_description",
+    "apply_ticket_status_transition",
     "comment_on_ticket",
     "create_ticket",
     "create_canonical_ticket",
@@ -1104,5 +1209,6 @@ __all__ = [
     "policy_ticket_floor",
     "refresh_ticket_status",
     "refresh_due_ticket_statuses",
+    "push_ticket_status",
     "ticket_candidates",
 ]

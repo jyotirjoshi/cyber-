@@ -355,6 +355,34 @@ class JiraClient:
             f"/rest/api/3/issue/{key}/comment", json={"body": to_adf(text)}
         )
 
+    async def set_issue_state(self, key: str, *, closed: bool) -> None:
+        """Apply a workflow transition by status category, never by a guessed ID."""
+        path = f"/rest/api/3/issue/{key}/transitions"
+        payload = await self._require().get_json(path)
+        transitions = payload.get("transitions") if isinstance(payload, dict) else None
+        if not isinstance(transitions, list):
+            raise IntegrationError("Jira returned invalid workflow transitions", provider=PROVIDER)
+        candidates: list[dict[str, Any]] = []
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            target = transition.get("to")
+            category = target.get("statusCategory") if isinstance(target, dict) else None
+            category_key = str(category.get("key") or "").lower() if isinstance(category, dict) else ""
+            if (closed and category_key == "done") or (not closed and category_key != "done"):
+                candidates.append(transition)
+        if not candidates:
+            raise IntegrationError(
+                "Jira has no matching close or reopen transition", provider=PROVIDER
+            )
+        if not closed:
+            preferred = {"reopen": 0, "to do": 1, "open": 2, "in progress": 3}
+            candidates.sort(key=lambda item: preferred.get(str(item.get("name") or "").lower(), 10))
+        transition_id = str(candidates[0].get("id") or "").strip()
+        if not transition_id:
+            raise IntegrationError("Jira transition has no ID", provider=PROVIDER)
+        await self._require().post_json(path, json={"transition": {"id": transition_id}})
+
     async def ping(self) -> bool:
         """Verify credentials and that the configured project exists.
 

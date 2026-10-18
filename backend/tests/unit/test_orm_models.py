@@ -90,6 +90,7 @@ from app.db.enums import (
     FindingStatus,
     IntegrationKind,
     IntegrationStatus,
+    InboundTicketEventStatus,
     JobStatus,
     KnowledgeEmbeddingStatus,
     KnowledgeRetrievalProvider,
@@ -240,6 +241,18 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     # --- integrations -----------------------------------------------------
     EnumColumn("integrations", "kind", IntegrationKind),
     EnumColumn("integrations", "status", IntegrationStatus),
+    EnumColumn(
+        "inbound_ticket_events",
+        "provider",
+        IntegrationKind,
+        narrowed_to=frozenset(
+            {"jira", "github", "gitlab", "servicenow", "azure_devops"}
+        ),
+        reason="Only providers with authenticated issue webhooks are accepted.",
+    ),
+    EnumColumn(
+        "inbound_ticket_events", "processing_status", InboundTicketEventStatus
+    ),
     # --- notifications ----------------------------------------------------
     EnumColumn("notifications", "event", NotificationEvent),
     EnumColumn("notifications", "channel", NotificationChannel),

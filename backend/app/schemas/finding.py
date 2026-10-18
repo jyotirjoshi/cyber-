@@ -112,10 +112,17 @@ class TicketLinkOut(BaseModel):
     project_key: str | None = None
     issue_type: str | None = None
     external_status: str | None = None
+    external_updated_at: dt.datetime | None = None
+    closure_generation: int = 0
     #: True when the agent opened it rather than a human. Shown in the UI so nobody has
     #: to guess where a ticket came from.
     created_by_agent: bool = False
     created_at: dt.datetime
+
+
+class TicketStateSyncIn(BaseModel):
+    closed: bool
+    comment: str | None = Field(default=None, max_length=16_000)
 
 
 class FindingOut(BaseModel):

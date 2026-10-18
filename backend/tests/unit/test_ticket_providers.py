@@ -216,7 +216,7 @@ async def test_azure_devops_work_item_creation_uses_project_scoped_tag_lookup() 
     class Http:
         async def post_json(self, path, **kwargs):
             requests.append((path, kwargs.get("json")))
-            if path.endswith("/_apis/wit/wiql"):
+            if "/_apis/wit/wiql?" in path:
                 return {"workItems": []}
             return {
                 "id": 42,
@@ -236,11 +236,11 @@ async def test_azure_devops_work_item_creation_uses_project_scoped_tag_lookup() 
     assert issue.key == "#42"
     assert issue.status == "new"
     assert requests[0] == (
-        "/acme/Security/_apis/wit/wiql",
+        "/acme/Security/_apis/wit/wiql?api-version=7.1",
         {"query": "SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'cynux-finding-finding-123'"},
     )
     assert requests[1] == (
-        "/acme/Security/_apis/wit/workitems/$Issue",
+        "/acme/Security/_apis/wit/workitems/$Issue?api-version=7.1",
         [
             {"op": "add", "path": "/fields/System.Title", "value": "Critical finding"},
             {"op": "add", "path": "/fields/System.Description", "value": "Reproduce and remediate."},
@@ -276,3 +276,130 @@ async def test_linear_issue_creation_uses_team_scoped_description_marker() -> No
     assert requests[0]["variables"] == {"teamId": "11111111-1111-1111-1111-111111111111", "marker": "<!-- cynux-finding-finding-123 -->"}
     assert requests[1]["variables"]["input"]["teamId"] == "11111111-1111-1111-1111-111111111111"
     assert requests[1]["variables"]["input"]["description"].endswith("<!-- cynux-finding-finding-123 -->")
+
+
+@pytest.mark.asyncio
+async def test_github_issue_state_can_be_closed_and_reopened() -> None:
+    from app.integrations.github import GitHubClient
+
+    settings = SimpleNamespace(github=SimpleNamespace(
+        configured=True, base_url="https://api.github.example", api_token=SecretStr("token"),
+        organization="acme", repository="portal",
+    ))
+    client = GitHubClient(settings)
+    requests = []
+
+    class Http:
+        async def patch_json(self, path, **kwargs):
+            requests.append((path, kwargs["json"]))
+            return {"number": 42, "id": 99, "state": kwargs["json"]["state"]}
+
+    client._client = Http()
+    await client.set_issue_state("#42", closed=True)
+    await client.set_issue_state("#42", closed=False)
+    assert requests == [
+        ("/repos/acme/portal/issues/42", {"state": "closed"}),
+        ("/repos/acme/portal/issues/42", {"state": "open"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gitlab_issue_state_uses_provider_state_event() -> None:
+    from app.integrations.gitlab import GitLabClient
+
+    settings = SimpleNamespace(gitlab=SimpleNamespace(
+        configured=True, base_url="https://gitlab.example/api/v4", api_token=SecretStr("token"),
+        project_ids=[], issue_project="acme/portal",
+    ))
+    client = GitLabClient(settings)
+    requests = []
+
+    class Http:
+        async def put_json(self, path, **kwargs):
+            requests.append((path, kwargs["json"]))
+            return {"iid": 15, "id": 76, "state": "closed"}
+
+    client._client = Http()
+    await client.set_issue_state("#15", closed=True)
+    assert requests == [
+        ("/projects/acme%2Fportal/issues/15", {"state_event": "close"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_azure_devops_issue_state_uses_json_patch() -> None:
+    from app.integrations.azure_devops import AzureDevOpsClient
+
+    settings = SimpleNamespace(azure_devops=SimpleNamespace(
+        configured=True, base_url="https://dev.azure.example", api_token=SecretStr("token"),
+        organization="acme", project="Security", work_item_type="Issue",
+    ))
+    client = AzureDevOpsClient(settings)
+    requests = []
+
+    class Http:
+        async def patch_json(self, path, **kwargs):
+            requests.append((path, kwargs["json"], kwargs["headers"]["Content-Type"]))
+            return {"id": 42, "fields": {"System.State": "Closed"}}
+
+    client._client = Http()
+    await client.set_issue_state("#42", closed=True)
+    assert requests == [(
+        "/acme/Security/_apis/wit/workitems/42?api-version=7.1",
+        [{"op": "add", "path": "/fields/System.State", "value": "Closed"}],
+        "application/json-patch+json",
+    )]
+
+
+@pytest.mark.asyncio
+async def test_jira_issue_state_selects_a_matching_transition() -> None:
+    from app.integrations.jira import JiraClient
+
+    settings = SimpleNamespace(jira=SimpleNamespace(
+        configured=True, base_url="https://jira.example", api_token=SecretStr("token"),
+        user_email="security@example.com", project_key="SEC", issue_type="Task",
+    ))
+    client = JiraClient(settings)
+    requests = []
+
+    class Http:
+        async def get_json(self, path, **kwargs):
+            requests.append(("GET", path, None))
+            return {"transitions": [
+                {"id": "11", "name": "In Progress", "to": {"statusCategory": {"key": "indeterminate"}}},
+                {"id": "31", "name": "Done", "to": {"statusCategory": {"key": "done"}}},
+            ]}
+
+        async def post_json(self, path, **kwargs):
+            requests.append(("POST", path, kwargs["json"]))
+            return {}
+
+    client._client = Http()
+    await client.set_issue_state("SEC-42", closed=True)
+    assert requests[-1] == (
+        "POST", "/rest/api/3/issue/SEC-42/transitions", {"transition": {"id": "31"}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_servicenow_issue_state_updates_the_linked_incident() -> None:
+    from app.integrations.servicenow import ServiceNowClient
+
+    settings = SimpleNamespace(servicenow=SimpleNamespace(
+        configured=True, base_url="https://acme.service-now.example", api_token=SecretStr("token"),
+        table="incident", assignment_group="",
+    ))
+    client = ServiceNowClient(settings)
+    requests = []
+
+    class Http:
+        async def get_json(self, path, **kwargs):
+            return {"result": [{"sys_id": "sys-42", "number": "INC0010042", "state": "1"}]}
+
+        async def patch_json(self, path, **kwargs):
+            requests.append((path, kwargs["json"]))
+            return {"result": {"sys_id": "sys-42", "number": "INC0010042", "state": "6"}}
+
+    client._client = Http()
+    await client.set_issue_state("INC0010042", closed=True)
+    assert requests == [("/api/now/table/incident/sys-42", {"state": "6"})]

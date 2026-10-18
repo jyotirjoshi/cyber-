@@ -194,6 +194,20 @@ class ServiceNowClient:
             idempotency_key=f"cynux-comment-{issue.id}-{digest}",
         )
 
+    async def set_issue_state(self, key: str, *, closed: bool) -> ServiceNowIssue:
+        """Close or reopen the exact incident previously linked by its number."""
+        issue = await self.get_issue(key)
+        table = self._table()
+        payload = await self._require().patch_json(
+            f"/api/now/table/{table}/{issue.id}",
+            headers=self._headers(),
+            json={"state": "6" if closed else "2"},
+        )
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            raise IntegrationError("ServiceNow returned an invalid incident", provider=PROVIDER)
+        return self._issue_from_payload(table, result)
+
     async def ping(self) -> bool:
         await self._require().get_json("/api/now/table/sys_user", headers=self._headers(), params={"sysparm_limit": 1})
         return True

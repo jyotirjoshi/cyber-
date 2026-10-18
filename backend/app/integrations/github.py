@@ -179,6 +179,21 @@ class GitHubClient:
             json={"body": text[:60_000]},
         )
 
+    async def set_issue_state(self, key: str, *, closed: bool) -> GitHubIssue:
+        """Close or reopen a linked issue in the configured repository."""
+        organization, repository = self._issue_repository()
+        number = key.lstrip("#")
+        if not number.isdigit() or int(number) <= 0:
+            raise IntegrationError("Invalid GitHub issue key", provider=PROVIDER)
+        payload = await self._require().patch_json(
+            f"/repos/{organization}/{repository}/issues/{int(number)}",
+            headers=self._headers(),
+            json={"state": "closed" if closed else "open"},
+        )
+        if not isinstance(payload, dict):
+            raise IntegrationError("GitHub returned an invalid issue response", provider=PROVIDER)
+        return self._issue_from_payload(payload)
+
     async def ping(self) -> bool:
         await self._require().get_json("/user", headers=self._headers())
         return True
