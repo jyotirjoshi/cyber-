@@ -16,6 +16,9 @@ export interface AttackStep {
   description: string;
   asset_id?: string | null;
   finding_id?: string | null;
+  relationship_id?: string | null;
+  relationship_type?: string | null;
+  evidence?: Record<string, unknown>;
 }
 
 export interface AttackPathData {
@@ -28,6 +31,14 @@ export interface AttackPathData {
   chokepoints: string[];
   confidence: "low" | "medium" | "high" | string;
   confidence_reason?: string;
+  asset_ids?: string[];
+  business_services?: string[];
+  controls?: string[];
+  evidence_refs?: string[];
+  blast_radius_score?: number;
+  financial_impact?: { currency?: string; maximum?: number; source?: string };
+  risk_scenario?: string;
+  explanation?: string;
 }
 
 interface AttackPathCardProps {
@@ -149,9 +160,20 @@ export function AttackPathCard({ path, index, onFindingClick }: AttackPathCardPr
       {/* Blast radius */}
       {path.blast_radius && (
         <p className="text-xs text-muted">
-          <span className="font-medium text-fg">Blast radius:</span> {path.blast_radius}
+          <span className="font-medium text-fg">Blast radius{typeof path.blast_radius_score === "number" ? ` (${path.blast_radius_score}/100)` : ""}:</span> {path.blast_radius}
         </p>
       )}
+
+      {path.risk_scenario && <p className="text-xs text-muted"><span className="font-medium text-fg">Scenario:</span> {path.risk_scenario}</p>}
+
+      <div className="flex flex-wrap gap-1.5 text-[11px]">
+        {(path.business_services ?? []).map((service) => <span key={`service-${service}`} className="rounded-full bg-primary/10 px-2 py-0.5 text-primary">Service: {service}</span>)}
+        {(path.controls ?? []).map((control) => <span key={`control-${control}`} className="rounded-full bg-green-50 px-2 py-0.5 text-green-700">Control: {control}</span>)}
+        {typeof path.financial_impact?.maximum === "number" && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-amber-700">Impact ceiling: {new Intl.NumberFormat(undefined, { style: "currency", currency: path.financial_impact.currency ?? "USD", maximumFractionDigits: 0 }).format(path.financial_impact.maximum)}</span>}
+        {(path.evidence_refs?.length ?? 0) > 0 && <span className="rounded-full bg-surface-2 px-2 py-0.5 text-muted">{path.evidence_refs?.length} verified evidence link(s)</span>}
+      </div>
+
+      {path.explanation && <p className="rounded-lg border border-line bg-surface-2 p-2 text-xs text-muted"><span className="font-medium text-fg">AI explanation only:</span> {path.explanation}</p>}
 
       {/* Chokepoints */}
       {path.chokepoints.length > 0 && (
