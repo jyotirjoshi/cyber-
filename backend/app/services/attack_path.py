@@ -39,6 +39,7 @@ from app.core.errors import AIError
 from app.db.enums import FindingStatus, Permission
 from app.db.models.assessment import Assessment
 from app.db.models.asset import Asset, AssetRelationship
+from app.db.models.business_risk import AssetBusinessService, BusinessService
 from app.db.models.canonical import CanonicalFinding
 from app.db.models.finding import Finding
 from app.llm.base import LLMMessage
@@ -208,6 +209,8 @@ def build_deterministic_attack_paths(
     relationships: list[_RelationshipLike],
     *,
     max_paths: int = 3,
+    business_services_by_asset: dict[Any, list[str]] | None = None,
+    financial_impact_by_asset: dict[Any, dict[str, Any]] | None = None,
 ) -> list[AttackPath]:
     """Construct evidence paths from persisted topology, without model-generated edges."""
     asset_by_id = {asset.id: asset for asset in assets}
@@ -254,7 +257,10 @@ def build_deterministic_attack_paths(
             {
                 str(group).strip()[:120]
                 for asset in path_assets
-                for group in (getattr(asset, "groups", []) or [])
+                for group in [
+                    *(getattr(asset, "groups", []) or []),
+                    *((business_services_by_asset or {}).get(asset.id, [])),
+                ]
                 if str(group).strip()
             }
         )
@@ -339,7 +345,9 @@ def build_deterministic_attack_paths(
                 controls=controls,
                 evidence_refs=evidence_refs,
                 blast_radius_score=round(blast_score, 2),
-                financial_impact=_financial_impact(crown),
+                financial_impact=(financial_impact_by_asset or {}).get(
+                    crown.id, _financial_impact(crown)
+                ),
                 risk_scenario=(
                     f"Exploit {finding.title} on {path_assets[0].name}, traverse "
                     f"{len(edges)} verified relationship(s), and reach {crown.name}."
@@ -399,11 +407,18 @@ async def current_exposure_paths(
             )
         ).all()
     )
+    services_by_asset, financial_by_asset = await _load_business_context(
+        session,
+        principal.organization_id,
+        [asset.id for asset in assets],
+    )
     return build_deterministic_attack_paths(
         findings,
         assets,
         relationships,
         max_paths=max(1, min(max_paths, 100)),
+        business_services_by_asset=services_by_asset,
+        financial_impact_by_asset=financial_by_asset,
     )
 
 
@@ -424,7 +439,18 @@ async def generate_attack_paths(
 
         assets = await _load_assets(session, assessment)
         relationships = await _load_relationships(session, assessment)
-        paths = build_deterministic_attack_paths(findings, assets, relationships)
+        services_by_asset, financial_by_asset = await _load_business_context(
+            session,
+            assessment.organization_id,
+            [asset.id for asset in assets],
+        )
+        paths = build_deterministic_attack_paths(
+            findings,
+            assets,
+            relationships,
+            business_services_by_asset=services_by_asset,
+            financial_impact_by_asset=financial_by_asset,
+        )
         if not paths:
             log.info("attack_path.no_reachable_crown_jewel", assessment_id=str(assessment.id))
             return []
@@ -505,6 +531,50 @@ async def _load_relationships(
         .limit(2_000)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def _load_business_context(
+    session: AsyncSession,
+    organization_id: Any,
+    asset_ids: list[Any],
+) -> tuple[dict[Any, list[str]], dict[Any, dict[str, Any]]]:
+    if not asset_ids:
+        return {}, {}
+    rows = (
+        await session.execute(
+            select(
+                AssetBusinessService.asset_id,
+                BusinessService.name,
+                BusinessService.maximum_loss_usd,
+            )
+            .join(
+                BusinessService,
+                BusinessService.id == AssetBusinessService.business_service_id,
+            )
+            .where(
+                AssetBusinessService.organization_id == organization_id,
+                BusinessService.organization_id == organization_id,
+                BusinessService.status == "active",
+                AssetBusinessService.asset_id.in_(asset_ids),
+            )
+            .order_by(AssetBusinessService.asset_id, BusinessService.name)
+        )
+    ).all()
+    services: dict[Any, list[str]] = {}
+    maximums: dict[Any, float] = {}
+    for asset_id, service_name, maximum_loss in rows:
+        services.setdefault(asset_id, []).append(str(service_name))
+        if maximum_loss is not None:
+            maximums[asset_id] = maximums.get(asset_id, 0.0) + float(maximum_loss)
+    financial = {
+        asset_id: {
+            "currency": "USD",
+            "maximum": round(value, 2),
+            "source": "business_service",
+        }
+        for asset_id, value in maximums.items()
+    }
+    return services, financial
 
 
 def _build_context(findings: list[Finding], assets: list[Asset]) -> dict[str, Any]:

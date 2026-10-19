@@ -58,6 +58,11 @@ from app.db.models.asset import (
     AssetTag,
 )
 from app.db.models.audit import AuditEvent
+from app.db.models.business_risk import (
+    AssetBusinessService,
+    BusinessRiskScenario,
+    BusinessService,
+)
 from app.db.models.canonical import (
     AssessmentCanonicalFinding,
     AttackSimulationCampaign,
@@ -164,6 +169,7 @@ __all__ = [
     "Assessment",
     "AssessmentTarget",
     "Asset",
+    "AssetBusinessService",
     "AssetAlias",
     "AssetChange",
     "AssetMergeEvent",
@@ -172,6 +178,8 @@ __all__ = [
     "AttackSimulationCampaign",
     "AttackSimulationRun",
     "AttackSimulationTechniqueRun",
+    "BusinessRiskScenario",
+    "BusinessService",
     "CanonicalFinding",
     "FindingCollaborationComment",
     "ComplianceControl",

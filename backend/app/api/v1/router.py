@@ -23,6 +23,7 @@ from app.api.v1 import (
     audit,
     auth,
     automation,
+    business_risk,
     canonical,
     compliance,
     custom_connectors,
@@ -31,8 +32,8 @@ from app.api.v1 import (
     exposures,
     external_alerts,
     findings,
-    integrations,
     inbound_ticket_webhooks,
+    integrations,
     jobs,
     knowledge,
     metering,
@@ -76,6 +77,7 @@ api_router.include_router(agent_definitions.router)
 api_router.include_router(agent_workspaces.router)
 api_router.include_router(automation.router)
 api_router.include_router(attack_simulations.router)
+api_router.include_router(business_risk.router)
 api_router.include_router(platform.router)
 api_router.include_router(saved_views.router)
 api_router.include_router(webhooks.router)
