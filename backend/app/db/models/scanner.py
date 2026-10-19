@@ -42,6 +42,9 @@ class ScannerJob(Base, TenantMixin, TimestampMixin):
     assessment_id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("assessments.id", ondelete="CASCADE"), nullable=False
     )
+    auth_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("scan_auth_profiles.id", ondelete="SET NULL")
+    )
     scanner: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     #: Stable graph-step key; NULL for manually requested, repeatable jobs.
     idempotency_key: Mapped[str | None] = mapped_column(String(160))

@@ -23,11 +23,18 @@ from app.schemas.attack_simulation import (
     AttackSimulationRunOut,
     AttackSimulationTechniqueCatalogOut,
     AttackSimulationTechniqueRunOut,
+    ValidationExecutionPolicy,
 )
 from app.schemas.common import Page
-from app.services.attack_simulation import create_campaign, run_campaign_now
-from app.services.bas_techniques import list_techniques
+from app.services.attack_simulation import (
+    _validate_credential_profiles,
+    _validate_execution_policy,
+    _validate_scenario_targets,
+    create_campaign,
+    run_campaign_now,
+)
 from app.services.audit import AuditAction, record
+from app.services.bas_techniques import list_techniques
 
 router = APIRouter(prefix="/attack-simulations", tags=["attack-simulations"])
 
@@ -47,6 +54,8 @@ async def get_technique_catalog(
             adapter=item.adapter.value,
             risk_class=item.risk_class,
             approval_required=item.approval_required,
+            safe_action=item.safe_action,
+            estimated_cost_usd=item.estimated_cost_usd,
             timeout_seconds=item.timeout_seconds,
             expected_evidence=list(item.expected_evidence),
             cleanup=item.cleanup,
@@ -137,6 +146,25 @@ async def update_campaign(
     ).scalar_one_or_none()
     if campaign is None or campaign.organization_id != principal.organization_id:
         raise ResourceNotFoundError("Attack simulation campaign not found")
+    scenarios = list(payload.scenarios or campaign.scenarios)
+    targets = list(payload.targets or campaign.targets)
+    execution_policy = payload.execution_policy or ValidationExecutionPolicy.model_validate(
+        campaign.execution_policy or {}
+    )
+    if payload.scenarios is not None or payload.targets is not None or payload.execution_policy:
+        _validate_scenario_targets(scenarios, targets)
+        _validate_execution_policy(
+            execution_policy,
+            scenarios=scenarios,
+            targets=targets,
+        )
+        await _validate_credential_profiles(
+            session,
+            principal.organization_id,
+            execution_policy,
+            scenarios=scenarios,
+            targets=targets,
+        )
     if payload.name is not None:
         campaign.name = payload.name
     if payload.scenarios is not None:
@@ -147,6 +175,8 @@ async def update_campaign(
         campaign.cron_expression = payload.cron_expression
     if payload.status is not None:
         campaign.status = payload.status
+    if payload.execution_policy is not None:
+        campaign.execution_policy = payload.execution_policy.model_dump(mode="json")
     await record(
         session,
         action=AuditAction.ATTACK_SIMULATION_UPDATE,

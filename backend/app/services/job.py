@@ -278,6 +278,7 @@ async def enqueue_job(
     targets: Sequence[str],
     timeout_seconds: int | None = None,
     idempotency_key: str | None = None,
+    auth_profile_id: uuid.UUID | None = None,
 ) -> ScannerJob:
     """Create a QUEUED job row.
 
@@ -310,6 +311,7 @@ async def enqueue_job(
                 id=uuid.uuid4(),
                 organization_id=assessment.organization_id,
                 assessment_id=assessment.id,
+                auth_profile_id=auth_profile_id,
                 scanner=adapter.name.value,
                 idempotency_key=idempotency_key,
                 status=JobStatus.QUEUED.value,
@@ -335,6 +337,7 @@ async def enqueue_job(
                 existing.assessment_id != assessment.id
                 or existing.scanner != adapter.name.value
                 or set(existing.targets) != set(canonical)
+                or existing.auth_profile_id != auth_profile_id
             ):
                 raise ConflictError(
                     "scanner idempotency key was reused for different work",
@@ -347,6 +350,7 @@ async def enqueue_job(
         job = ScannerJob(
             organization_id=assessment.organization_id,
             assessment_id=assessment.id,
+            auth_profile_id=auth_profile_id,
             scanner=adapter.name.value,
             status=JobStatus.QUEUED.value,
             targets=canonical,
@@ -539,7 +543,9 @@ async def execute_job(
         raise UnsafeScannerInvocationError("Scanner job has no tenant-owned assessment")
     options = _options_for(job, settings, assessment)
     explicit_auth = None
-    raw_auth_profile_id = (assessment.extra_data or {}).get("scan_auth_profile_id")
+    raw_auth_profile_id = job.auth_profile_id or (assessment.extra_data or {}).get(
+        "scan_auth_profile_id"
+    )
     if raw_auth_profile_id is not None:
         from app.services.context import Principal
         from app.services.scan_auth import resolve_scanner_credentials

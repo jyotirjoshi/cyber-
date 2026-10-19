@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import ipaddress
 import uuid
 from types import SimpleNamespace
@@ -719,13 +721,23 @@ async def reconcile_absent_observations(
     provider: str,
     scope_keys: list[str],
     observed_external_ids: list[str],
+    now: dt.datetime | None = None,
+    confirmation_window_seconds: int = 300,
 ) -> int:
-    """Close only after two complete, scoped misses by a trustworthy source.
+    """Close only after repeated, time-separated scoped misses.
 
     The caller invokes this exclusively after its provider returned a complete
     result for all ``scope_keys``. GitHub/GitLab do not use this path because
     reduced provider permissions can look like a successful empty result.
+
+    Each candidate is bound to the provider's concrete scope value.  A second
+    sync of a different scan/account cannot confirm the first one's absence,
+    and rapid retries cannot satisfy the confirmation window.
     """
+    evaluated_at = now or utcnow()
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=dt.UTC)
+    confirmation_window_seconds = max(0, confirmation_window_seconds)
     # A scope is the proof that a provider returned a complete view of a bounded
     # source.  Do not make absence global: a credential with reduced visibility
     # must never close unrelated findings.
@@ -764,8 +776,34 @@ async def reconcile_absent_observations(
     affected = {observation.canonical_finding_id for observation in missing}
     newly_absent: set[uuid.UUID] = set()
     for observation in missing:
+        evidence = dict(observation.evidence or {})
+        scope_value = str(evidence.get(scope_field) or "")
+        scope_fingerprint = hashlib.sha256(
+            f"{provider}\0{scope_field}\0{scope_value}".encode()
+        ).hexdigest()
+        previous_scope = str(evidence.get("absence_candidate_scope") or "")
+        candidate_raw = evidence.get("absence_candidate_at")
+        candidate_at: dt.datetime | None = None
+        if isinstance(candidate_raw, str):
+            try:
+                candidate_at = dt.datetime.fromisoformat(candidate_raw.replace("Z", "+00:00"))
+            except ValueError:
+                candidate_at = None
+        if candidate_at is not None and candidate_at.tzinfo is None:
+            candidate_at = candidate_at.replace(tzinfo=dt.UTC)
+
+        if previous_scope and previous_scope != scope_fingerprint:
+            observation.missing_sync_count = 0
+            candidate_at = None
+        if candidate_at is None:
+            candidate_at = evaluated_at
+            evidence["absence_candidate_at"] = evaluated_at.isoformat()
+        evidence["absence_candidate_scope"] = scope_fingerprint
+        evidence["absence_confirmation_window_seconds"] = confirmation_window_seconds
+        observation.evidence = evidence
         observation.missing_sync_count += 1
-        if observation.missing_sync_count >= 2:
+        confirmation_elapsed = (evaluated_at - candidate_at).total_seconds()
+        if observation.missing_sync_count >= 2 and confirmation_elapsed >= confirmation_window_seconds:
             observation.source_status = "absent"
             newly_absent.add(observation.canonical_finding_id)
     await session.flush()
@@ -798,7 +836,6 @@ async def reconcile_absent_observations(
         .scalars()
         .all()
     )
-    now = utcnow()
     status_changed_findings: list[CanonicalFinding] = []
     for finding in findings:
         sources = by_finding.get(finding.id, [])
@@ -819,7 +856,7 @@ async def reconcile_absent_observations(
             finding.status = proposed
             finding.status_version += 1
             status_changed_findings.append(finding)
-            finding.closed_at = now if proposed == "closed" else None
+            finding.closed_at = evaluated_at if proposed == "closed" else None
             session.add(
                 FindingHistory(
                     id=uuid.uuid4(),
@@ -827,8 +864,10 @@ async def reconcile_absent_observations(
                     canonical_finding_id=finding.id,
                     previous_status=previous,
                     new_status=proposed,
-                    reason="Absent from two complete scoped scans",
-                    occurred_at=now,
+                    reason=(
+                        "Absent from repeated complete scoped scans after the confirmation window"
+                    ),
+                    occurred_at=evaluated_at,
                 )
             )
     to_rescore = [

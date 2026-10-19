@@ -385,6 +385,7 @@ class AttackSimulationCampaign(Base, TenantMixin, TimestampMixin):
     authorization_expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     scenarios: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     targets: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    execution_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     cron_expression: Mapped[str | None] = mapped_column(String(120))
     timezone: Mapped[str] = mapped_column(String(100), nullable=False, default="UTC")
     next_run_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

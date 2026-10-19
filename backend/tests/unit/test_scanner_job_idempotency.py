@@ -174,3 +174,38 @@ async def test_replay_accepts_same_target_set_in_different_order(monkeypatch) ->
         idempotency_key="agent:run-2:nmap",
     )
     assert result is existing
+
+
+@pytest.mark.asyncio
+async def test_replay_rejects_a_different_credential_reference(monkeypatch) -> None:
+    import app.services.job as service
+
+    assessment = SimpleNamespace(id=uuid.uuid4(), organization_id=uuid.uuid4())
+    existing = ScannerJob(
+        id=uuid.uuid4(),
+        organization_id=assessment.organization_id,
+        assessment_id=assessment.id,
+        auth_profile_id=uuid.uuid4(),
+        scanner=ScannerName.NMAP.value,
+        idempotency_key="agent:run-3:nmap",
+        targets=["example.com"],
+        timeout_seconds=30,
+    )
+
+    class Session:
+        async def execute(self, stmt):
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+        async def scalar(self, stmt):
+            return existing
+
+    monkeypatch.setattr(service.audit_service, "record", lambda *args, **kwargs: None)
+    with pytest.raises(ConflictError):
+        await enqueue_job(
+            Session(),
+            assessment,
+            scanner=ScannerName.NMAP,
+            targets=["example.com"],
+            idempotency_key="agent:run-3:nmap",
+            auth_profile_id=uuid.uuid4(),
+        )

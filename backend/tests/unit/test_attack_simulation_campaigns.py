@@ -51,6 +51,45 @@ def test_campaign_model_retains_expiring_attestation_evidence() -> None:
     columns = AttackSimulationCampaign.__table__.c
     assert columns.authorization_text.nullable is False
     assert columns.authorization_expires_at.nullable is False
+    assert columns.execution_policy.nullable is False
+
+
+def test_execution_policy_blocks_unapproved_actions_and_oversized_plans() -> None:
+    """A campaign cannot silently expand beyond its declared action or run budget."""
+    import pytest
+
+    from app.core.errors import InvalidConfigurationError
+    from app.schemas.attack_simulation import ValidationExecutionPolicy
+    from app.services.attack_simulation import _validate_execution_policy
+
+    with pytest.raises(InvalidConfigurationError):
+        _validate_execution_policy(
+            ValidationExecutionPolicy(
+                allowed_actions=["passive_discovery"],
+                max_technique_runs=10,
+            ),
+            scenarios=["api_authorization"],
+            targets=["https://api.example.test"],
+        )
+
+    with pytest.raises(InvalidConfigurationError):
+        _validate_execution_policy(
+            ValidationExecutionPolicy(
+                allowed_actions=["passive_discovery"],
+                max_technique_runs=1,
+            ),
+            scenarios=["external_exposure"],
+            targets=["one.example.test", "two.example.test"],
+        )
+
+
+def test_catalog_declares_safe_action_and_cost_for_every_technique() -> None:
+    from app.services.bas_techniques import list_techniques
+
+    techniques = list_techniques()
+    assert techniques
+    assert all(item.safe_action for item in techniques)
+    assert all(item.estimated_cost_usd >= 0 for item in techniques)
 
 
 async def test_due_campaign_disables_itself_when_authority_has_expired(monkeypatch) -> None:

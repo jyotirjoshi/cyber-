@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 from app.core.errors import ApprovalRequiredError, InvalidTargetError
 from app.core.targets import TargetType, classify
 from app.db.enums import ScannerName
 from app.db.models.assessment import Approval
 
-CATALOG_VERSION = "2026.10.1"
+CATALOG_VERSION = "2026.10.2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +30,8 @@ class BasTechnique:
     adapter: ScannerName
     risk_class: str
     approval_required: bool
+    safe_action: str
+    estimated_cost_usd: float
     timeout_seconds: int
     expected_evidence: tuple[str, ...]
     cleanup: str
@@ -46,6 +48,8 @@ _CATALOG: tuple[BasTechnique, ...] = (
         adapter=ScannerName.NMAP,
         risk_class="medium",
         approval_required=True,
+        safe_action="passive_discovery",
+        estimated_cost_usd=0.0,
         timeout_seconds=900,
         expected_evidence=("nmap_xml", "stdout"),
         cleanup="No target-side state is created.",
@@ -59,6 +63,8 @@ _CATALOG: tuple[BasTechnique, ...] = (
         adapter=ScannerName.NUCLEI,
         risk_class="medium",
         approval_required=True,
+        safe_action="safe_probe",
+        estimated_cost_usd=0.0,
         timeout_seconds=1200,
         expected_evidence=("nuclei_jsonl", "stdout"),
         cleanup="Templates are non-destructive and create no persistent state.",
@@ -72,6 +78,8 @@ _CATALOG: tuple[BasTechnique, ...] = (
         adapter=ScannerName.NUCLEI,
         risk_class="medium",
         approval_required=True,
+        safe_action="safe_probe",
+        estimated_cost_usd=0.0,
         timeout_seconds=1200,
         expected_evidence=("nuclei_jsonl", "stdout"),
         cleanup="Templates are non-destructive and create no persistent state.",
@@ -85,6 +93,8 @@ _CATALOG: tuple[BasTechnique, ...] = (
         adapter=ScannerName.ZAP,
         risk_class="medium",
         approval_required=True,
+        safe_action="non_destructive_validation",
+        estimated_cost_usd=0.0,
         timeout_seconds=1200,
         expected_evidence=("zap_report", "stdout"),
         cleanup="Passive and bounded active checks create no accounts or data.",
@@ -98,6 +108,8 @@ _CATALOG: tuple[BasTechnique, ...] = (
         adapter=ScannerName.GITLEAKS_REPO,
         risk_class="low",
         approval_required=True,
+        safe_action="authenticated_read",
+        estimated_cost_usd=0.0,
         timeout_seconds=900,
         expected_evidence=("gitleaks_report", "stdout"),
         cleanup="The transient checkout is deleted by the scanner worker.",
@@ -112,6 +124,8 @@ _CATALOG: tuple[BasTechnique, ...] = (
             adapter=adapter,
             risk_class="low",
             approval_required=True,
+            safe_action="authenticated_read",
+            estimated_cost_usd=0.0,
             timeout_seconds=2400,
             expected_evidence=("prowler_report", "stdout"),
             cleanup="Read-only cloud API checks create no provider-side resources.",

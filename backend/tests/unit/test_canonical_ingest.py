@@ -590,6 +590,7 @@ async def test_defectdojo_finding_without_inventory_match_uses_endpoint_host() -
 async def test_two_complete_scoped_absences_close_canonical_finding() -> None:
     from app.services.canonical_ingest import reconcile_absent_observations
 
+    dt = __import__("datetime")
     organization_id = uuid.uuid4()
     session = _Session(organization_id)
     finding_id = uuid.uuid4()
@@ -631,9 +632,12 @@ async def test_two_complete_scoped_absences_close_canonical_finding() -> None:
         provider="sonarqube",
         scope_keys=["payments"],
         observed_external_ids=[],
+        now=finding.first_seen_at,
+        confirmation_window_seconds=600,
     )
     assert finding.status == "open"
     assert observation.missing_sync_count == 1
+    candidate_at = observation.evidence["absence_candidate_at"]
 
     await reconcile_absent_observations(
         session,
@@ -641,6 +645,22 @@ async def test_two_complete_scoped_absences_close_canonical_finding() -> None:
         provider="sonarqube",
         scope_keys=["payments"],
         observed_external_ids=[],
+        now=finding.first_seen_at + dt.timedelta(seconds=30),
+        confirmation_window_seconds=600,
+    )
+    assert finding.status == "open"
+    assert observation.source_status == "open"
+    assert observation.missing_sync_count == 2
+    assert observation.evidence["absence_candidate_at"] == candidate_at
+
+    await reconcile_absent_observations(
+        session,
+        organization_id,
+        provider="sonarqube",
+        scope_keys=["payments"],
+        observed_external_ids=[],
+        now=finding.first_seen_at + dt.timedelta(seconds=601),
+        confirmation_window_seconds=600,
     )
     assert finding.status == "closed"
     assert observation.source_status == "absent"
@@ -724,6 +744,7 @@ async def test_absent_source_no_longer_inflates_surviving_finding_risk() -> None
         provider="sonarqube",
         scope_keys=["api"],
         observed_external_ids=[],
+        confirmation_window_seconds=0,
     )
 
     assert changed == 1
