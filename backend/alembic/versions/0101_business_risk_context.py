@@ -54,6 +54,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_business_services_org_status", "business_services", ["organization_id", "status"])
     op.create_index(op.f("ix_business_services_organization_id"), "business_services", ["organization_id"])
+    op.create_index(op.f("ix_business_services_created_at"), "business_services", ["created_at"])
 
     op.create_table(
         "asset_business_services",
@@ -79,6 +80,7 @@ def upgrade() -> None:
     op.create_index("ix_asset_business_services_org_service", "asset_business_services", ["organization_id", "business_service_id"])
     op.create_index("ix_asset_business_services_org_asset", "asset_business_services", ["organization_id", "asset_id"])
     op.create_index(op.f("ix_asset_business_services_organization_id"), "asset_business_services", ["organization_id"])
+    op.create_index(op.f("ix_asset_business_services_created_at"), "asset_business_services", ["created_at"])
 
     op.create_table(
         "business_risk_scenarios",
@@ -105,9 +107,20 @@ def upgrade() -> None:
     )
     op.create_index("ix_business_risk_scenarios_org_service", "business_risk_scenarios", ["organization_id", "business_service_id"])
     op.create_index(op.f("ix_business_risk_scenarios_organization_id"), "business_risk_scenarios", ["organization_id"])
+    op.create_index(op.f("ix_business_risk_scenarios_created_at"), "business_risk_scenarios", ["created_at"])
 
 
 def downgrade() -> None:
+    op.drop_index(op.f("ix_business_risk_scenarios_created_at"), table_name="business_risk_scenarios")
+    op.drop_index(op.f("ix_business_risk_scenarios_organization_id"), table_name="business_risk_scenarios")
+    op.drop_index("ix_business_risk_scenarios_org_service", table_name="business_risk_scenarios")
     op.drop_table("business_risk_scenarios")
+    op.drop_index(op.f("ix_asset_business_services_created_at"), table_name="asset_business_services")
+    op.drop_index(op.f("ix_asset_business_services_organization_id"), table_name="asset_business_services")
+    op.drop_index("ix_asset_business_services_org_asset", table_name="asset_business_services")
+    op.drop_index("ix_asset_business_services_org_service", table_name="asset_business_services")
     op.drop_table("asset_business_services")
+    op.drop_index(op.f("ix_business_services_created_at"), table_name="business_services")
+    op.drop_index(op.f("ix_business_services_organization_id"), table_name="business_services")
+    op.drop_index("ix_business_services_org_status", table_name="business_services")
     op.drop_table("business_services")

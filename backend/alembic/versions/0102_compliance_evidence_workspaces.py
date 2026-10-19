@@ -48,6 +48,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_compliance_evidence_org_control", "compliance_evidence_items", ["organization_id", "control_id"])
     op.create_index("ix_compliance_evidence_org_status", "compliance_evidence_items", ["organization_id", "collection_status"])
+    op.create_index(op.f("ix_compliance_evidence_items_organization_id"), "compliance_evidence_items", ["organization_id"])
+    op.create_index(op.f("ix_compliance_evidence_items_created_at"), "compliance_evidence_items", ["created_at"])
 
     op.create_table(
         "compliance_control_exceptions",
@@ -71,6 +73,8 @@ def upgrade() -> None:
     )
     op.create_index("uq_compliance_control_active_exception", "compliance_control_exceptions", ["organization_id", "control_id"], unique=True, postgresql_where=sa.text("status IN ('pending','approved')"))
     op.create_index("ix_compliance_exceptions_org_expiry", "compliance_control_exceptions", ["organization_id", "status", "expires_at"])
+    op.create_index(op.f("ix_compliance_control_exceptions_organization_id"), "compliance_control_exceptions", ["organization_id"])
+    op.create_index(op.f("ix_compliance_control_exceptions_created_at"), "compliance_control_exceptions", ["created_at"])
 
     op.create_table(
         "compliance_audit_workspaces",
@@ -93,9 +97,22 @@ def upgrade() -> None:
         sa.UniqueConstraint("organization_id", "name", name="unique_compliance_audit_workspace"),
     )
     op.create_index("ix_compliance_workspaces_org_status", "compliance_audit_workspaces", ["organization_id", "status"])
+    op.create_index(op.f("ix_compliance_audit_workspaces_organization_id"), "compliance_audit_workspaces", ["organization_id"])
+    op.create_index(op.f("ix_compliance_audit_workspaces_created_at"), "compliance_audit_workspaces", ["created_at"])
 
 
 def downgrade() -> None:
+    op.drop_index(op.f("ix_compliance_audit_workspaces_created_at"), table_name="compliance_audit_workspaces")
+    op.drop_index(op.f("ix_compliance_audit_workspaces_organization_id"), table_name="compliance_audit_workspaces")
+    op.drop_index("ix_compliance_workspaces_org_status", table_name="compliance_audit_workspaces")
     op.drop_table("compliance_audit_workspaces")
+    op.drop_index(op.f("ix_compliance_control_exceptions_created_at"), table_name="compliance_control_exceptions")
+    op.drop_index(op.f("ix_compliance_control_exceptions_organization_id"), table_name="compliance_control_exceptions")
+    op.drop_index("ix_compliance_exceptions_org_expiry", table_name="compliance_control_exceptions")
+    op.drop_index("uq_compliance_control_active_exception", table_name="compliance_control_exceptions")
     op.drop_table("compliance_control_exceptions")
+    op.drop_index(op.f("ix_compliance_evidence_items_created_at"), table_name="compliance_evidence_items")
+    op.drop_index(op.f("ix_compliance_evidence_items_organization_id"), table_name="compliance_evidence_items")
+    op.drop_index("ix_compliance_evidence_org_status", table_name="compliance_evidence_items")
+    op.drop_index("ix_compliance_evidence_org_control", table_name="compliance_evidence_items")
     op.drop_table("compliance_evidence_items")

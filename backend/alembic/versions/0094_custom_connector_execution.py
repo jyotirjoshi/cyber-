@@ -20,7 +20,7 @@ def upgrade() -> None:
         "custom_connector_runs", sa.Column("request_digest", sa.String(64), nullable=True)
     )
     op.drop_constraint(
-        "ck_custom_connector_runs_valid_custom_connector_run_status",
+        op.f("ck_custom_connector_runs_valid_custom_connector_run_status"),
         "custom_connector_runs",
         type_="check",
     )
@@ -43,7 +43,7 @@ def downgrade() -> None:
         type_="unique",
     )
     op.drop_constraint(
-        "ck_custom_connector_runs_valid_custom_connector_run_status",
+        op.f("ck_custom_connector_runs_valid_custom_connector_run_status"),
         "custom_connector_runs",
         type_="check",
     )
