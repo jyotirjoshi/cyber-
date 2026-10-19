@@ -5,20 +5,32 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, ResourceNotFoundError
+from app.db.base import utcnow
 from app.db.enums import Permission
 from app.db.models.canonical import CanonicalFinding
-from app.db.models.compliance import ComplianceControl, ComplianceFindingMapping
+from app.db.models.compliance import (
+    ComplianceAuditWorkspace,
+    ComplianceControl,
+    ComplianceControlException,
+    ComplianceEvidenceItem,
+    ComplianceFindingMapping,
+)
 from app.db.models.identity import User
 from app.db.repository import TenantRepository, tenant_select
 from app.schemas.compliance import (
+    ComplianceAuditWorkspaceCreateIn,
     ComplianceControlCreateIn,
     ComplianceControlOut,
     ComplianceControlUpdateIn,
+    ComplianceEvidenceCreateIn,
+    ComplianceEvidenceReviewIn,
+    ComplianceExceptionCreateIn,
+    ComplianceExceptionDecisionIn,
     ComplianceFrameworkSummaryOut,
 )
 from app.services.context import Principal
@@ -68,6 +80,220 @@ _STARTER_CONTROLS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("18", "Penetration testing", "Security testing"),
     ),
 }
+
+
+async def add_evidence(
+    session: AsyncSession,
+    principal: Principal,
+    control_id: uuid.UUID,
+    payload: ComplianceEvidenceCreateIn,
+) -> ComplianceEvidenceItem:
+    principal.require(Permission.ORG_MANAGE)
+    await TenantRepository(session, ComplianceControl, principal.organization_id).get_or_404(
+        control_id
+    )
+    now = utcnow()
+    if payload.valid_until is not None and (
+        payload.valid_until.tzinfo is None or payload.valid_until <= now
+    ):
+        raise ConflictError("Compliance evidence validity must end in the future")
+    row = ComplianceEvidenceItem(
+        organization_id=principal.organization_id,
+        control_id=control_id,
+        title=payload.title.strip(),
+        evidence_type=payload.evidence_type,
+        source_reference=payload.source_reference.strip(),
+        content_sha256=payload.content_sha256,
+        collection_status="collected",
+        collected_at=now,
+        valid_until=payload.valid_until,
+        collected_by_id=principal.user_id,
+        metadata_=payload.metadata,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_evidence(
+    session: AsyncSession, principal: Principal, control_id: uuid.UUID
+) -> list[ComplianceEvidenceItem]:
+    principal.require(Permission.FINDING_READ)
+    await TenantRepository(session, ComplianceControl, principal.organization_id).get_or_404(
+        control_id
+    )
+    rows = await session.scalars(
+        tenant_select(ComplianceEvidenceItem, principal.organization_id)
+        .where(ComplianceEvidenceItem.control_id == control_id)
+        .order_by(ComplianceEvidenceItem.created_at.desc())
+    )
+    return list(rows.all())
+
+
+async def review_evidence(
+    session: AsyncSession,
+    principal: Principal,
+    evidence_id: uuid.UUID,
+    payload: ComplianceEvidenceReviewIn,
+) -> ComplianceEvidenceItem:
+    principal.require(Permission.ORG_MANAGE)
+    row = await TenantRepository(
+        session, ComplianceEvidenceItem, principal.organization_id
+    ).get_or_404(evidence_id)
+    if row.collection_status != "collected":
+        raise ConflictError("Only collected evidence can be reviewed")
+    if row.collected_by_id == principal.user_id:
+        raise ConflictError("Evidence must be verified by a different reviewer")
+    row.collection_status = payload.decision
+    row.verified_by_id = principal.user_id
+    row.review_note = payload.note.strip()
+    await session.flush()
+    return row
+
+
+async def request_control_exception(
+    session: AsyncSession,
+    principal: Principal,
+    control_id: uuid.UUID,
+    payload: ComplianceExceptionCreateIn,
+) -> ComplianceControlException:
+    principal.require(Permission.ORG_MANAGE)
+    await TenantRepository(session, ComplianceControl, principal.organization_id).get_or_404(
+        control_id
+    )
+    now = utcnow()
+    if payload.expires_at.tzinfo is None or payload.expires_at <= now:
+        raise ConflictError("Compliance exception expiry must be in the future")
+    existing = await session.scalar(
+        tenant_select(ComplianceControlException, principal.organization_id).where(
+            ComplianceControlException.control_id == control_id,
+            ComplianceControlException.status.in_(("pending", "approved")),
+        )
+    )
+    if existing is not None:
+        raise ConflictError("This control already has an active exception")
+    row = ComplianceControlException(
+        organization_id=principal.organization_id,
+        control_id=control_id,
+        rationale=payload.rationale.strip(),
+        compensating_controls=payload.compensating_controls.strip(),
+        status="pending",
+        expires_at=payload.expires_at,
+        requested_by_id=principal.user_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def decide_control_exception(
+    session: AsyncSession,
+    principal: Principal,
+    exception_id: uuid.UUID,
+    payload: ComplianceExceptionDecisionIn,
+) -> ComplianceControlException:
+    principal.require(Permission.ORG_MANAGE)
+    row = await TenantRepository(
+        session, ComplianceControlException, principal.organization_id
+    ).get_or_404(exception_id)
+    allowed = {"pending": {"approved", "rejected"}, "approved": {"revoked"}}
+    if payload.decision not in allowed.get(row.status, set()):
+        raise ConflictError("Invalid compliance exception transition")
+    if payload.decision == "approved" and row.requested_by_id == principal.user_id:
+        raise ConflictError("A compliance exception requires an independent approver")
+    row.status = payload.decision
+    row.resolved_by_id = principal.user_id
+    row.resolved_at = utcnow()
+    row.resolution_note = payload.note.strip()
+    await session.flush()
+    return row
+
+
+async def expire_compliance_records(session: AsyncSession, *, limit: int = 500) -> int:
+    """Expire stale evidence and approved exceptions in one worker-safe batch."""
+    now = utcnow()
+    evidence = list(
+        (
+            await session.scalars(
+                select(ComplianceEvidenceItem)
+                .where(
+                    ComplianceEvidenceItem.collection_status.in_(("collected", "verified")),
+                    ComplianceEvidenceItem.valid_until <= now,
+                )
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+    )
+    remaining = max(0, limit - len(evidence))
+    exceptions = list(
+        (
+            await session.scalars(
+                select(ComplianceControlException)
+                .where(
+                    ComplianceControlException.status == "approved",
+                    ComplianceControlException.expires_at <= now,
+                )
+                .limit(remaining)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+    )
+    for row in evidence:
+        row.collection_status = "expired"
+    for row in exceptions:
+        row.status = "expired"
+        row.resolved_at = now
+    return len(evidence) + len(exceptions)
+
+
+async def create_audit_workspace(
+    session: AsyncSession,
+    principal: Principal,
+    payload: ComplianceAuditWorkspaceCreateIn,
+) -> ComplianceAuditWorkspace:
+    principal.require(Permission.ORG_MANAGE)
+    control_ids = list(dict.fromkeys(payload.control_ids))
+    if control_ids:
+        count = int(
+            await session.scalar(
+                select(func.count(ComplianceControl.id)).where(
+                    ComplianceControl.organization_id == principal.organization_id,
+                    ComplianceControl.framework == payload.framework,
+                    ComplianceControl.id.in_(control_ids),
+                )
+            )
+            or 0
+        )
+        if count != len(control_ids):
+            raise ResourceNotFoundError("An audit workspace control was not found")
+    row = ComplianceAuditWorkspace(
+        organization_id=principal.organization_id,
+        name=payload.name.strip(),
+        framework=payload.framework,
+        status="draft",
+        control_ids=[str(value) for value in control_ids],
+        auditor_emails=sorted({value.strip().casefold() for value in payload.auditor_emails}),
+        starts_at=payload.starts_at,
+        due_at=payload.due_at,
+        evidence_cutoff_at=payload.evidence_cutoff_at,
+        created_by_id=principal.user_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def list_audit_workspaces(
+    session: AsyncSession, principal: Principal
+) -> list[ComplianceAuditWorkspace]:
+    principal.require(Permission.FINDING_READ)
+    rows = await session.scalars(
+        tenant_select(ComplianceAuditWorkspace, principal.organization_id).order_by(
+            ComplianceAuditWorkspace.created_at.desc()
+        )
+    )
+    return list(rows.all())
 
 
 async def _require_tenant_user(

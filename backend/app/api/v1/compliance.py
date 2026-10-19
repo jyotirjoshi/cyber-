@@ -10,9 +10,17 @@ from fastapi import APIRouter, Query, status
 from app.api.deps import DbSession, PrincipalDep
 from app.schemas.common import OkOut
 from app.schemas.compliance import (
+    ComplianceAuditWorkspaceCreateIn,
+    ComplianceAuditWorkspaceOut,
     ComplianceControlCreateIn,
     ComplianceControlOut,
     ComplianceControlUpdateIn,
+    ComplianceEvidenceCreateIn,
+    ComplianceEvidenceOut,
+    ComplianceEvidenceReviewIn,
+    ComplianceExceptionCreateIn,
+    ComplianceExceptionDecisionIn,
+    ComplianceExceptionOut,
     ComplianceFindingMappingOut,
     ComplianceMappingCreateIn,
     ComplianceOverviewOut,
@@ -21,6 +29,141 @@ from app.services import compliance as compliance_service
 from app.services.audit import AuditAction, record
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
+
+
+@router.get("/audit-workspaces", response_model=list[ComplianceAuditWorkspaceOut])
+async def list_audit_workspaces(
+    principal: PrincipalDep, session: DbSession
+) -> list[ComplianceAuditWorkspaceOut]:
+    return [
+        ComplianceAuditWorkspaceOut.model_validate(row)
+        for row in await compliance_service.list_audit_workspaces(session, principal)
+    ]
+
+
+@router.post(
+    "/audit-workspaces",
+    response_model=ComplianceAuditWorkspaceOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_audit_workspace(
+    payload: ComplianceAuditWorkspaceCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceAuditWorkspaceOut:
+    row = await compliance_service.create_audit_workspace(session, principal, payload)
+    await record(
+        session,
+        action="compliance.audit_workspace.create",
+        principal=principal,
+        resource_type="compliance_audit_workspace",
+        resource_id=row.id,
+        detail={"framework": row.framework, "control_count": len(row.control_ids)},
+    )
+    await session.commit()
+    return ComplianceAuditWorkspaceOut.model_validate(row)
+
+
+@router.get("/controls/{control_id}/evidence", response_model=list[ComplianceEvidenceOut])
+async def list_control_evidence(
+    control_id: uuid.UUID, principal: PrincipalDep, session: DbSession
+) -> list[ComplianceEvidenceOut]:
+    return [
+        ComplianceEvidenceOut.model_validate(row)
+        for row in await compliance_service.list_evidence(session, principal, control_id)
+    ]
+
+
+@router.post(
+    "/controls/{control_id}/evidence",
+    response_model=ComplianceEvidenceOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_control_evidence(
+    control_id: uuid.UUID,
+    payload: ComplianceEvidenceCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceEvidenceOut:
+    row = await compliance_service.add_evidence(session, principal, control_id, payload)
+    await record(
+        session,
+        action="compliance.evidence.collect",
+        principal=principal,
+        resource_type="compliance_evidence",
+        resource_id=row.id,
+        detail={"control_id": str(control_id), "evidence_type": row.evidence_type},
+    )
+    await session.commit()
+    return ComplianceEvidenceOut.model_validate(row)
+
+
+@router.post("/evidence/{evidence_id}/review", response_model=ComplianceEvidenceOut)
+async def review_control_evidence(
+    evidence_id: uuid.UUID,
+    payload: ComplianceEvidenceReviewIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceEvidenceOut:
+    row = await compliance_service.review_evidence(session, principal, evidence_id, payload)
+    await record(
+        session,
+        action="compliance.evidence.review",
+        principal=principal,
+        resource_type="compliance_evidence",
+        resource_id=row.id,
+        detail={"decision": row.collection_status},
+    )
+    await session.commit()
+    return ComplianceEvidenceOut.model_validate(row)
+
+
+@router.post(
+    "/controls/{control_id}/exceptions",
+    response_model=ComplianceExceptionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def request_control_exception(
+    control_id: uuid.UUID,
+    payload: ComplianceExceptionCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceExceptionOut:
+    row = await compliance_service.request_control_exception(
+        session, principal, control_id, payload
+    )
+    await record(
+        session,
+        action="compliance.exception.request",
+        principal=principal,
+        resource_type="compliance_control_exception",
+        resource_id=row.id,
+        detail={"control_id": str(control_id), "expires_at": row.expires_at.isoformat()},
+    )
+    await session.commit()
+    return ComplianceExceptionOut.model_validate(row)
+
+
+@router.post("/exceptions/{exception_id}/decision", response_model=ComplianceExceptionOut)
+async def decide_control_exception(
+    exception_id: uuid.UUID,
+    payload: ComplianceExceptionDecisionIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceExceptionOut:
+    row = await compliance_service.decide_control_exception(
+        session, principal, exception_id, payload
+    )
+    await record(
+        session,
+        action="compliance.exception.decision",
+        principal=principal,
+        resource_type="compliance_control_exception",
+        resource_id=row.id,
+        detail={"decision": row.status},
+    )
+    await session.commit()
+    return ComplianceExceptionOut.model_validate(row)
 
 
 @router.get("/overview", response_model=ComplianceOverviewOut)

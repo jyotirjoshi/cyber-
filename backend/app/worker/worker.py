@@ -86,6 +86,7 @@ from app.services.attack_simulation import execute_pending_techniques, run_due_c
 from app.services.automation import execute_pending_automations, queue_due_automation_schedules
 from app.services.canonical_intel_refresh import refresh_stale_intel_batch
 from app.services.canonical_risk_refresh import refresh_stale_risk_batch
+from app.services.compliance import expire_compliance_records
 from app.services.context import Principal
 from app.services.custom_connector import run_pending_connector_runs
 from app.services.integration_sync import run_due_integration_syncs
@@ -1419,6 +1420,12 @@ class AgentWorker:
                 expire_risk_acceptances,
                 "worker.risk_acceptances_expired",
                 "worker.risk_acceptance_expiry_failed",
+            ),
+            (
+                "compliance-expiry",
+                expire_compliance_records,
+                "worker.compliance_records_expired",
+                "worker.compliance_record_expiry_failed",
             ),
             (
                 "risk-refresh",

@@ -78,7 +78,13 @@ from app.db.models.canonical import (
     RiskAcceptance,
     SlaEscalation,
 )
-from app.db.models.compliance import ComplianceControl, ComplianceFindingMapping
+from app.db.models.compliance import (
+    ComplianceAuditWorkspace,
+    ComplianceControl,
+    ComplianceControlException,
+    ComplianceEvidenceItem,
+    ComplianceFindingMapping,
+)
 from app.db.models.custom_connector import CustomConnector, CustomConnectorRun
 from app.db.models.engagement import (
     Engagement,
@@ -183,6 +189,9 @@ __all__ = [
     "CanonicalFinding",
     "FindingCollaborationComment",
     "ComplianceControl",
+    "ComplianceAuditWorkspace",
+    "ComplianceControlException",
+    "ComplianceEvidenceItem",
     "ComplianceFindingMapping",
     "CustomConnector",
     "CustomConnectorRun",

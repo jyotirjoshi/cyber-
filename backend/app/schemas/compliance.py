@@ -8,6 +8,103 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+
+class ComplianceEvidenceCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=300)
+    evidence_type: Literal[
+        "artifact", "report", "screenshot", "log", "ticket", "attestation", "external_link"
+    ]
+    source_reference: str = Field(min_length=1, max_length=2048)
+    content_sha256: str | None = Field(default=None, pattern="^[a-f0-9]{64}$")
+    valid_until: dt.datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ComplianceEvidenceReviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["verified", "rejected"]
+    note: str = Field(min_length=3, max_length=4000)
+
+
+class ComplianceEvidenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    control_id: uuid.UUID
+    title: str
+    evidence_type: str
+    source_reference: str
+    content_sha256: str | None
+    collection_status: str
+    collected_at: dt.datetime | None
+    valid_until: dt.datetime | None
+    collected_by_id: uuid.UUID | None
+    verified_by_id: uuid.UUID | None
+    review_note: str | None
+    created_at: dt.datetime
+
+
+class ComplianceExceptionCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rationale: str = Field(min_length=10, max_length=8000)
+    compensating_controls: str = Field(min_length=3, max_length=8000)
+    expires_at: dt.datetime
+
+
+class ComplianceExceptionDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approved", "rejected", "revoked"]
+    note: str = Field(min_length=3, max_length=4000)
+
+
+class ComplianceExceptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    control_id: uuid.UUID
+    rationale: str
+    compensating_controls: str
+    status: str
+    expires_at: dt.datetime
+    requested_by_id: uuid.UUID | None
+    resolved_by_id: uuid.UUID | None
+    resolved_at: dt.datetime | None
+    resolution_note: str | None
+    created_at: dt.datetime
+
+
+class ComplianceAuditWorkspaceCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    framework: Literal["pci_dss", "iso_27001", "soc_2", "hipaa", "nist_csf", "cis_controls"]
+    control_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
+    auditor_emails: list[str] = Field(default_factory=list, max_length=50)
+    starts_at: dt.datetime | None = None
+    due_at: dt.datetime | None = None
+    evidence_cutoff_at: dt.datetime | None = None
+
+
+class ComplianceAuditWorkspaceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    framework: str
+    status: str
+    control_ids: list[str]
+    auditor_emails: list[str]
+    starts_at: dt.datetime | None
+    due_at: dt.datetime | None
+    evidence_cutoff_at: dt.datetime | None
+    created_by_id: uuid.UUID | None
+    created_at: dt.datetime
+
 class ComplianceControlCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -118,9 +215,17 @@ class ComplianceOverviewOut(BaseModel):
 
 
 __all__ = [
+    "ComplianceAuditWorkspaceCreateIn",
+    "ComplianceAuditWorkspaceOut",
     "ComplianceControlCreateIn",
     "ComplianceControlOut",
     "ComplianceControlUpdateIn",
+    "ComplianceEvidenceCreateIn",
+    "ComplianceEvidenceOut",
+    "ComplianceEvidenceReviewIn",
+    "ComplianceExceptionCreateIn",
+    "ComplianceExceptionDecisionIn",
+    "ComplianceExceptionOut",
     "ComplianceFindingMappingOut",
     "ComplianceFrameworkSummaryOut",
     "ComplianceMappingCreateIn",
