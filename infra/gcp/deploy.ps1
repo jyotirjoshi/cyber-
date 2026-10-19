@@ -35,6 +35,15 @@ function Invoke-Checked {
     return @($output)
 }
 
+function Write-UnixTextFile {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $content = [IO.File]::ReadAllText($Source).Replace("`r`n", "`n").Replace("`r", "`n")
+    [IO.File]::WriteAllText($Destination, $content, [Text.UTF8Encoding]::new($false))
+}
+
 function Read-DeploymentConfig {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "Missing deployment config: $Path" }
@@ -246,8 +255,15 @@ function Invoke-CynuxDeploy {
                 $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo cloud-init status --wait")
                 $null = Invoke-Checked python @((Join-Path $repoRoot ".tools/gcloud/google-cloud-sdk/lib/gcloud.py"), "compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo test -f /etc/systemd/system/cynux-worker.service || sudo /usr/local/sbin/cynux-worker-bootstrap")
                 $workerRefresh = Join-Path $PSScriptRoot "scripts\refresh-worker.sh"
-                $null = Invoke-Checked $gcloud @("compute", "scp", $workerRefresh, "cynux-scanner-01:/tmp/cynux-worker-refresh.sh", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet")
-                $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo bash /tmp/cynux-worker-refresh.sh")
+                $workerRefreshUpload = Join-Path ([IO.Path]::GetTempPath()) ("cynux-worker-refresh-{0}.sh" -f [guid]::NewGuid())
+                try {
+                    Write-UnixTextFile -Source $workerRefresh -Destination $workerRefreshUpload
+                    $null = Invoke-Checked $gcloud @("compute", "scp", $workerRefreshUpload, "cynux-scanner-01:/tmp/cynux-worker-refresh.sh", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet")
+                    $null = Invoke-Checked $gcloud @("compute", "ssh", "cynux-scanner-01", "--project=$project", "--zone=$zone", "--tunnel-through-iap", "--quiet", "--command=sudo bash /tmp/cynux-worker-refresh.sh")
+                }
+                finally {
+                    Remove-Item -LiteralPath $workerRefreshUpload -Force -ErrorAction SilentlyContinue
+                }
             }
             "secret-check" {
                 foreach ($secretId in $releaseState.TerraformOutputs.secret_resource_ids.value.PSObject.Properties.Value) {

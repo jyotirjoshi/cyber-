@@ -84,6 +84,17 @@ Describe "Cynux production release orchestration" {
         $refresh | Should Match 'systemctl restart cynux-worker\.service'
     }
 
+    It "normalizes worker scripts to Unix line endings before upload" {
+        $source = Join-Path $TestDrive "worker-source.sh"
+        $destination = Join-Path $TestDrive "worker-upload.sh"
+        [IO.File]::WriteAllText($source, "#!/usr/bin/env bash`r`nset -euo pipefail`r`n")
+
+        Write-UnixTextFile -Source $source -Destination $destination
+
+        ([IO.File]::ReadAllBytes($destination) -contains 13) | Should Be $false
+        [IO.File]::ReadAllText($destination) | Should Be "#!/usr/bin/env bash`nset -euo pipefail`n"
+    }
+
     It "uses the stable account-currency budget guardrail name" {
         $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
         $verify = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "verify.ps1")
