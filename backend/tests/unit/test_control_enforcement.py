@@ -95,6 +95,21 @@ def test_zscaler_inventory_normalization_has_stable_resource_keys() -> None:
     assert item["approved"] is True
 
 
+def test_zscaler_supports_allowlisted_infrastructure_and_policy_targets() -> None:
+    from app.integrations.zscaler import build_action_path, inventory_endpoints
+
+    assert build_action_path("zpa.update_server_group", "server-group-1", "customer-1") == (
+        "PATCH",
+        "/zpa/mgmtconfig/v1/admin/customers/customer-1/serverGroup/server-group-1",
+    )
+    assert build_action_path("zpa.update_connector_group", "connector-group-1", "customer-1") == (
+        "PATCH",
+        "/zpa/mgmtconfig/v1/admin/customers/customer-1/appConnectorGroup/connector-group-1",
+    )
+    kinds = {kind for _domain, kind, _path in inventory_endpoints("customer-1")}
+    assert {"server_group", "connector_group", "private_application", "segment_group"} <= kinds
+
+
 def test_zscaler_is_a_first_class_configurable_integration() -> None:
     from app.db.enums import IntegrationKind
     from app.services.integration import _DEFAULT_NAMES, _SPECS

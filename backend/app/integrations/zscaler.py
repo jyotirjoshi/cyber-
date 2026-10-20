@@ -25,9 +25,30 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 _ACTION_PATHS: dict[str, tuple[str, str]] = {
     "zpa.update_application_access": ("PATCH", "/zpa/mgmtconfig/v1/admin/customers/{customer}/application/{target}"),
     "zpa.update_segment_group": ("PATCH", "/zpa/mgmtconfig/v1/admin/customers/{customer}/segmentGroup/{target}"),
+    "zpa.update_server_group": ("PATCH", "/zpa/mgmtconfig/v1/admin/customers/{customer}/serverGroup/{target}"),
+    "zpa.update_connector_group": ("PATCH", "/zpa/mgmtconfig/v1/admin/customers/{customer}/appConnectorGroup/{target}"),
     "zia.update_url_filter_rule": ("PUT", "/zia/api/v1/urlFilteringRules/{target}"),
     "zia.update_firewall_rule": ("PUT", "/zia/api/v1/firewallFilteringRules/{target}"),
 }
+
+
+def inventory_endpoints(customer_id: str) -> tuple[tuple[str, str, str], ...]:
+    """The bounded inventory surfaces reconciled into CAASM."""
+
+    if not _SAFE_ID.fullmatch(customer_id):
+        raise InvalidConfigurationError(
+            "invalid Zscaler customer identifier",
+            user_message="The Zscaler customer identifier is not valid.",
+        )
+    prefix = f"/zpa/mgmtconfig/v1/admin/customers/{customer_id}"
+    return (
+        ("zpa", "private_application", f"{prefix}/application"),
+        ("zpa", "segment_group", f"{prefix}/segmentGroup"),
+        ("zpa", "server_group", f"{prefix}/serverGroup"),
+        ("zpa", "connector_group", f"{prefix}/appConnectorGroup"),
+        ("zia", "url_filter_rule", "/zia/api/v1/urlFilteringRules"),
+        ("zia", "firewall_rule", "/zia/api/v1/firewallFilteringRules"),
+    )
 
 
 def build_action_path(action: str, target_external_id: str, customer_id: str) -> tuple[str, str]:
@@ -141,12 +162,7 @@ class ZscalerClient:
     async def list_inventory(self, *, limit: int = 500) -> list[dict[str, Any]]:
         bounded = min(max(limit, 1), 1000)
         headers = await self._headers()
-        endpoints = (
-            ("zpa", "private_application", f"/zpa/mgmtconfig/v1/admin/customers/{self._cfg.customer_id}/application"),
-            ("zpa", "segment_group", f"/zpa/mgmtconfig/v1/admin/customers/{self._cfg.customer_id}/segmentGroup"),
-            ("zia", "url_filter_rule", "/zia/api/v1/urlFilteringRules"),
-            ("zia", "firewall_rule", "/zia/api/v1/firewallFilteringRules"),
-        )
+        endpoints = inventory_endpoints(self._cfg.customer_id or "")
         normalized: list[dict[str, Any]] = []
         for domain, kind, path in endpoints:
             payload = await self._require().get_json(
@@ -216,4 +232,10 @@ class ZscalerClient:
         }
 
 
-__all__ = ["PROVIDER", "ZscalerClient", "build_action_path", "normalize_inventory_item"]
+__all__ = [
+    "PROVIDER",
+    "ZscalerClient",
+    "build_action_path",
+    "inventory_endpoints",
+    "normalize_inventory_item",
+]

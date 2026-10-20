@@ -301,6 +301,12 @@ class ValidationRecipeVerifyIn(StrictModel):
     ]
 
 
+class ValidationEvidenceAppendIn(StrictModel):
+    artifact_ref: str = Field(min_length=1, max_length=1000)
+    content_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    previous_chain_head: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ValidationRecipeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -395,8 +401,25 @@ class ThreatResponseActionCreateIn(StrictModel):
         "notify",
     ]
     target_ref: str = Field(min_length=1, max_length=512)
+    provider: Literal[
+        "crowdstrike", "zscaler", "jira", "servicenow", "slack", "manual"
+    ] = "manual"
+    requested_action: dict[str, Any] = Field(default_factory=dict)
     predicted_impact: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str = Field(min_length=16, max_length=128)
+
+
+class ThreatResponseActionApproveIn(StrictModel):
+    expected_scope_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ThreatResponseActionExecuteIn(StrictModel):
+    expected_scope_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ThreatResponseActionVerifyIn(StrictModel):
+    effective: bool
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class ThreatResponseActionOut(BaseModel):
@@ -405,12 +428,19 @@ class ThreatResponseActionOut(BaseModel):
     story_id: uuid.UUID
     action_type: str
     target_ref: str
+    provider: str
+    requested_action: dict[str, Any]
     status: str
     predicted_impact: dict[str, Any]
     approval_id: uuid.UUID | None
+    approval_scope_digest: str | None
+    approved_by_id: uuid.UUID | None
     idempotency_key: str
     provider_receipt: dict[str, Any]
+    rollback_receipt: dict[str, Any]
     verification: dict[str, Any]
+    failure_code: str | None
+    approved_at: dt.datetime | None
     executed_at: dt.datetime | None
     verified_at: dt.datetime | None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -27,6 +28,7 @@ _PAGE_SIZE = 1000
 _MAX_PAGES = 100
 _MAX_RECORDS = 50_000
 _MAX_SYNC_SECONDS = 300
+_DEVICE_ID = re.compile(r"^[A-Fa-f0-9]{32,64}$")
 
 
 class CrowdStrikeClient:
@@ -158,6 +160,36 @@ class CrowdStrikeClient:
                 return await self._list_vulnerabilities()
         except TimeoutError as exc:
             raise IntegrationTimeoutError("CrowdStrike sync timed out", provider=PROVIDER) from exc
+
+    async def isolate_host(
+        self, device_id: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        """Contain one exact Falcon device after the caller's approval gate."""
+
+        if not _DEVICE_ID.fullmatch(device_id):
+            raise IntegrationError("CrowdStrike device ID is invalid", provider=PROVIDER)
+        payload = await self._require().post_json(
+            "/devices/entities/devices-actions/v2",
+            params={"action_name": "contain"},
+            json={"ids": [device_id]},
+            headers={"Authorization": f"Bearer {await self._access_token()}"},
+            idempotency_key=idempotency_key,
+        )
+        resources = payload.get("resources") if isinstance(payload, dict) else None
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        if errors or not isinstance(resources, list) or not resources:
+            raise IntegrationError(
+                "CrowdStrike did not confirm endpoint containment", provider=PROVIDER
+            )
+        return {
+            "provider": "crowdstrike",
+            "action": "contain",
+            "device_id": device_id,
+            "confirmed": True,
+            "request_id": (payload.get("meta") or {}).get("trace_id")
+            if isinstance(payload.get("meta"), dict)
+            else None,
+        }
 
     async def ping(self) -> bool:
         await self._page(None, 1)

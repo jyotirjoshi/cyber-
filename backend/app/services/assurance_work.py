@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import json
+import re
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -288,6 +290,31 @@ def append_validation_evidence(
     return digest
 
 
+def append_validation_evidence_digest(
+    recipe: GovernedValidationRecipe | Any,
+    *,
+    artifact_ref: str,
+    content_digest: str,
+    previous_chain_head: str,
+) -> str:
+    """Append an object-backed artifact digest without loading evidence into the API process."""
+
+    if recipe.status not in {"approved", "executing"}:
+        raise ConflictError(f"Cannot append evidence to a {recipe.status} recipe")
+    if not re.fullmatch(r"[a-f0-9]{64}", content_digest):
+        raise ValueError("evidence content digest must be a SHA-256 hex digest")
+    expected_previous = recipe.evidence_hashes[-1] if recipe.evidence_hashes else "0" * 64
+    if not hmac.compare_digest(expected_previous, previous_chain_head):
+        raise ConflictError("Evidence chain head changed; reload the recipe before appending")
+    digest = hashlib.sha256(
+        expected_previous.encode() + b"\x00" + content_digest.encode()
+    ).hexdigest()
+    recipe.artifact_refs.append(artifact_ref)
+    recipe.evidence_hashes.append(digest)
+    recipe.status = "executing"
+    return digest
+
+
 def verify_validation_recipe(
     recipe: GovernedValidationRecipe | Any,
     *,
@@ -504,11 +531,40 @@ async def verify_persisted_validation_recipe(
     return row
 
 
+async def append_persisted_validation_evidence(
+    session: AsyncSession,
+    principal: Principal,
+    recipe_id: uuid.UUID,
+    *,
+    artifact_ref: str,
+    content_digest: str,
+    previous_chain_head: str,
+) -> ValidationRecipe:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    row = await session.scalar(
+        tenant_select(ValidationRecipe, principal.organization_id)
+        .where(ValidationRecipe.id == recipe_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Validation recipe not found")
+    append_validation_evidence_digest(
+        row,
+        artifact_ref=artifact_ref,
+        content_digest=content_digest,
+        previous_chain_head=previous_chain_head,
+    )
+    await session.flush()
+    return row
+
+
 __all__ = [
     "AgentWorkRecord",
     "GovernedValidationRecipe",
     "SAFE_VALIDATION_ACTIONS",
     "append_validation_evidence",
+    "append_validation_evidence_digest",
+    "append_persisted_validation_evidence",
     "build_validation_recipe",
     "canonical_digest",
     "confidence_from_evidence",

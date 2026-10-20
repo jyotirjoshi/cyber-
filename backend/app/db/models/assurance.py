@@ -355,14 +355,25 @@ class ThreatResponseAction(Base, TenantMixin, TimestampMixin):
     )
     action_type: Mapped[str] = mapped_column(String(40), nullable=False)
     target_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False, default="manual")
+    requested_action: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="proposed")
     predicted_impact: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     approval_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("approvals.id", ondelete="SET NULL")
     )
+    approval_scope_digest: Mapped[str | None] = mapped_column(String(64))
+    approved_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     provider_receipt: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    rollback_receipt: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     verification: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    failure_code: Mapped[str | None] = mapped_column(String(120))
+    approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     executed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 

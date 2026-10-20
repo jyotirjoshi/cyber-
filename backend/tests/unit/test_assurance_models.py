@@ -113,3 +113,16 @@ def test_risk_contract_rejects_unordered_frequency_and_loss_ranges() -> None:
                 "assumptions_version": 1,
             }
         )
+
+
+def test_response_action_persists_exact_scope_execution_evidence() -> None:
+    columns = Base.metadata.tables["threat_response_actions"].columns
+    assert {
+        "provider",
+        "requested_action",
+        "approval_scope_digest",
+        "approved_by_id",
+        "approved_at",
+        "rollback_receipt",
+        "failure_code",
+    } <= set(columns.keys())

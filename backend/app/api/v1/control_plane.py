@@ -35,8 +35,12 @@ from app.schemas.assurance import (
     OSCALExportCreateIn,
     OSCALExportOut,
     RiskSimulationTrialOut,
+    ThreatResponseActionApproveIn,
     ThreatResponseActionCreateIn,
+    ThreatResponseActionExecuteIn,
     ThreatResponseActionOut,
+    ThreatResponseActionVerifyIn,
+    ValidationEvidenceAppendIn,
     ValidationRecipeCreateIn,
     ValidationRecipeOut,
     ValidationRecipeVerifyIn,
@@ -246,6 +250,27 @@ async def create_validation_recipe(
 
 
 @router.post(
+    "/validation-recipes/{recipe_id}/evidence", response_model=ValidationRecipeOut
+)
+async def append_validation_evidence(
+    recipe_id: uuid.UUID,
+    payload: ValidationEvidenceAppendIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ValidationRecipeOut:
+    row = await assurance_work.append_persisted_validation_evidence(
+        session,
+        principal,
+        recipe_id,
+        artifact_ref=payload.artifact_ref,
+        content_digest=payload.content_digest,
+        previous_chain_head=payload.previous_chain_head,
+    )
+    await session.commit()
+    return ValidationRecipeOut.model_validate(row)
+
+
+@router.post(
     "/validation-recipes/{recipe_id}/verify", response_model=ValidationRecipeOut
 )
 async def verify_validation_recipe(
@@ -307,6 +332,71 @@ async def create_threat_response_action(
 ) -> ThreatResponseActionOut:
     row = await security_operations.create_threat_response_action(
         session, principal, payload
+    )
+    await session.commit()
+    return ThreatResponseActionOut.model_validate(row)
+
+
+@router.post(
+    "/soc/response-actions/{action_id}/approve",
+    response_model=ThreatResponseActionOut,
+)
+async def approve_threat_response_action(
+    action_id: uuid.UUID,
+    payload: ThreatResponseActionApproveIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ThreatResponseActionOut:
+    row = await security_operations.approve_persisted_response_action(
+        session,
+        principal,
+        action_id,
+        expected_scope_digest=payload.expected_scope_digest,
+    )
+    await session.commit()
+    return ThreatResponseActionOut.model_validate(row)
+
+
+@router.post(
+    "/soc/response-actions/{action_id}/execute",
+    response_model=ThreatResponseActionOut,
+)
+async def execute_threat_response_action(
+    action_id: uuid.UUID,
+    payload: ThreatResponseActionExecuteIn,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> ThreatResponseActionOut:
+    row = await security_operations.execute_persisted_response_action(
+        session,
+        principal,
+        action_id,
+        expected_scope_digest=payload.expected_scope_digest,
+        settings=settings,
+        redis=redis,
+    )
+    await session.commit()
+    return ThreatResponseActionOut.model_validate(row)
+
+
+@router.post(
+    "/soc/response-actions/{action_id}/verify",
+    response_model=ThreatResponseActionOut,
+)
+async def verify_threat_response_action(
+    action_id: uuid.UUID,
+    payload: ThreatResponseActionVerifyIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ThreatResponseActionOut:
+    row = await security_operations.verify_persisted_response_action(
+        session,
+        principal,
+        action_id,
+        effective=payload.effective,
+        evidence=payload.evidence,
     )
     await session.commit()
     return ThreatResponseActionOut.model_validate(row)

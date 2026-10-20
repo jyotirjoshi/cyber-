@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import json
+import re
+import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -21,18 +24,92 @@ from app.services.ai_security import classify_sensitive_data
 from app.services.context import Principal
 
 if TYPE_CHECKING:
+    from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from app.core.config import Settings
     from app.schemas.assurance import (
         DataSecurityAssessmentCreateIn,
         OCSFEventCreateIn,
         ThreatResponseActionCreateIn,
     )
 
+_RESPONSE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "crowdstrike": ("isolate_endpoint", frozenset()),
+    "zscaler": ("restrict_access", frozenset({"provider_action", "desired_state"})),
+    "jira": ("create_ticket", frozenset({"summary", "description", "finding_id", "labels"})),
+    "servicenow": (
+        "create_ticket",
+        frozenset({"summary", "description", "finding_id"}),
+    ),
+    "slack": ("notify", frozenset({"text", "channel"})),
+    "manual": ("manual", frozenset()),
+}
+_ZSCALER_RESPONSE_ACTIONS = frozenset(
+    {
+        "zpa.update_application_access",
+        "zpa.update_segment_group",
+        "zpa.update_server_group",
+        "zpa.update_connector_group",
+        "zia.update_url_filter_rule",
+        "zia.update_firewall_rule",
+    }
+)
+
 
 def canonical_digest(value: Any) -> str:
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(data).hexdigest()
+
+
+def normalize_response_request(
+    *, provider: str, action_type: str, requested_action: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate and bound the provider request that is covered by human approval."""
+
+    specification = _RESPONSE_ACTIONS.get(provider)
+    if specification is None:
+        raise ValueError("unsupported response provider")
+    expected_action, allowed_keys = specification
+    if provider != "manual" and action_type != expected_action:
+        raise ValueError(f"{provider} does not support {action_type}")
+    extra = set(requested_action) - allowed_keys
+    if extra:
+        raise ValueError(f"response request contains unsupported fields: {', '.join(sorted(extra))}")
+    if len(json.dumps(requested_action, default=str)) > 32_000:
+        raise ValueError("response request exceeds the maximum size")
+    safe = redact_mapping(dict(requested_action))
+    if provider == "zscaler":
+        provider_action = str(safe.get("provider_action", ""))
+        desired_state = safe.get("desired_state")
+        if provider_action not in _ZSCALER_RESPONSE_ACTIONS or not isinstance(
+            desired_state, dict
+        ):
+            raise ValueError("Zscaler response requires an allow-listed action and desired state")
+    elif provider in {"jira", "servicenow"}:
+        summary = str(safe.get("summary", "")).strip()
+        description = str(safe.get("description", "")).strip()
+        if not summary or not description:
+            raise ValueError("ticket response requires summary and description")
+        safe["summary"] = summary[:255]
+        safe["description"] = classify_sensitive_data(description[:4000]).redacted_content
+        safe["finding_id"] = str(safe.get("finding_id") or "soc-response")[:160]
+        if provider == "jira":
+            labels = safe.get("labels") or []
+            if not isinstance(labels, list) or len(labels) > 20:
+                raise ValueError("Jira labels must be a bounded list")
+            safe["labels"] = [str(value)[:80] for value in labels]
+    elif provider == "slack":
+        text = str(safe.get("text", "")).strip()
+        if not text:
+            raise ValueError("Slack response requires message text")
+        safe["text"] = classify_sensitive_data(text[:3000]).redacted_content
+        channel = safe.get("channel")
+        if channel is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", str(channel)):
+            raise ValueError("Slack channel is invalid")
+    elif provider in {"crowdstrike", "manual"} and safe:
+        raise ValueError(f"{provider} response does not accept provider arguments")
+    return safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +327,8 @@ def preview_response_action(action: Any, *, context: Mapping[str, Any]) -> dict[
         "action_type": action.action_type,
         "target_ref": action.target_ref,
         "idempotency_key": action.idempotency_key,
+        "provider": str(getattr(action, "provider", "manual")),
+        "requested_action": redact_mapping(dict(getattr(action, "requested_action", {}) or {})),
         "impact_score": impact_score,
     }
     preview = {
@@ -263,6 +342,28 @@ def preview_response_action(action: Any, *, context: Mapping[str, Any]) -> dict[
     return preview
 
 
+def approve_response_action(
+    action: Any,
+    *,
+    approved_by_id: uuid.UUID | None,
+    expected_scope_digest: str,
+    now: dt.datetime | None = None,
+) -> None:
+    """Bind a human decision to the exact provider/action preview digest."""
+
+    if approved_by_id is None:
+        raise ConflictError("Response actions require approval by an authenticated human")
+    if action.status != "proposed":
+        raise ConflictError(f"Cannot approve a {action.status} response action")
+    actual = str(action.predicted_impact.get("scope_digest", ""))
+    if not actual or not hmac.compare_digest(actual, expected_scope_digest):
+        raise ConflictError("Response approval does not match the exact action scope")
+    action.approval_scope_digest = actual
+    action.approved_by_id = approved_by_id
+    action.approved_at = now or dt.datetime.now(dt.UTC)
+    action.status = "approved"
+
+
 async def execute_response_action(
     action: Any,
     *,
@@ -270,13 +371,21 @@ async def execute_response_action(
     apply: Callable[[dict[str, object]], Awaitable[dict[str, object]]],
     now: dt.datetime | None = None,
 ) -> None:
+    expected = str(action.predicted_impact.get("scope_digest", ""))
+    if not expected or not hmac.compare_digest(approval_scope_digest, expected):
+        raise ConflictError("Response approval does not match the exact action scope")
+    approved_scope = getattr(action, "approval_scope_digest", None)
+    if getattr(action, "approved_by_id", None) and not hmac.compare_digest(
+        str(approved_scope or ""), approval_scope_digest
+    ):
+        raise ConflictError("Response action changed after human approval")
     if action.status in {"executed", "verified"} and action.provider_receipt:
         return
-    if action.status != "approved" or not action.approval_id:
+    has_human_approval = bool(
+        getattr(action, "approved_by_id", None) or getattr(action, "approval_id", None)
+    )
+    if action.status != "approved" or not has_human_approval:
         raise ConflictError("Response action requires an explicit approval")
-    expected = str(action.predicted_impact.get("scope_digest", ""))
-    if not expected or approval_scope_digest != expected:
-        raise ConflictError("Response approval does not match the exact action scope")
     action.status = "executing"
     receipt = await apply(
         {
@@ -435,11 +544,18 @@ async def create_threat_response_action(
     )
     if existing is not None:
         return existing
+    requested_action = normalize_response_request(
+        provider=payload.provider,
+        action_type=payload.action_type,
+        requested_action=payload.requested_action,
+    )
     row = ThreatResponseAction(
         organization_id=principal.organization_id,
         story_id=payload.story_id,
         action_type=payload.action_type,
         target_ref=payload.target_ref,
+        provider=payload.provider,
+        requested_action=requested_action,
         status="proposed",
         predicted_impact={},
         idempotency_key=payload.idempotency_key,
@@ -450,17 +566,198 @@ async def create_threat_response_action(
     return row
 
 
+async def approve_persisted_response_action(
+    session: AsyncSession,
+    principal: Principal,
+    action_id: uuid.UUID,
+    *,
+    expected_scope_digest: str,
+) -> ThreatResponseAction:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    row = await session.scalar(
+        tenant_select(ThreatResponseAction, principal.organization_id)
+        .where(ThreatResponseAction.id == action_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Threat response action not found")
+    approve_response_action(
+        row,
+        approved_by_id=principal.user_id,
+        expected_scope_digest=expected_scope_digest,
+    )
+    await session.flush()
+    return row
+
+
+async def _dispatch_response_action(
+    session: AsyncSession,
+    principal: Principal,
+    action: ThreatResponseAction,
+    *,
+    settings: Settings,
+    redis: Redis | None,
+) -> dict[str, object]:
+    from app.db.enums import IntegrationKind
+    from app.integrations.control_enforcement import EnforcementCommand
+    from app.integrations.crowdstrike import CrowdStrikeClient
+    from app.integrations.jira import JiraClient
+    from app.integrations.servicenow import ServiceNowClient
+    from app.integrations.slack import SlackClient
+    from app.integrations.zscaler import ZscalerClient
+    from app.services.integration import resolve_settings
+
+    kind_by_provider = {
+        "crowdstrike": IntegrationKind.CROWDSTRIKE,
+        "zscaler": IntegrationKind.ZSCALER,
+        "jira": IntegrationKind.JIRA,
+        "servicenow": IntegrationKind.SERVICENOW,
+        "slack": IntegrationKind.SLACK,
+    }
+    kind = kind_by_provider.get(action.provider)
+    if kind is None:
+        raise ConflictError("Manual response actions cannot be executed by the API")
+    scoped = await resolve_settings(session, principal, kind, settings=settings, require=True)
+    requested = dict(action.requested_action)
+    if action.provider == "crowdstrike":
+        client = CrowdStrikeClient(scoped, redis)
+        try:
+            return await client.isolate_host(
+                action.target_ref, idempotency_key=action.idempotency_key
+            )
+        finally:
+            await client.aclose()
+    if action.provider == "zscaler":
+        client = ZscalerClient(scoped, redis)
+        try:
+            receipt = await client.apply(
+                EnforcementCommand(
+                    action=str(requested["provider_action"]),
+                    target_external_id=action.target_ref,
+                    desired_state=dict(requested["desired_state"]),
+                    idempotency_key=action.idempotency_key,
+                    dry_run=False,
+                )
+            )
+            return {"provider": "zscaler", **receipt}
+        finally:
+            await client.aclose()
+    if action.provider == "jira":
+        client = JiraClient(scoped, redis)
+        try:
+            issue = await client.create_issue(
+                summary=str(requested["summary"]),
+                description=str(requested["description"]),
+                finding_id=str(requested["finding_id"]),
+                labels=list(requested.get("labels") or []),
+            )
+            return {"provider": "jira", "ticket_key": issue.key, "ticket_url": issue.url}
+        finally:
+            await client.aclose()
+    if action.provider == "servicenow":
+        client = ServiceNowClient(scoped, redis)
+        try:
+            issue = await client.create_issue(
+                summary=str(requested["summary"]),
+                description=str(requested["description"]),
+                finding_id=str(requested["finding_id"]),
+            )
+            return {
+                "provider": "servicenow",
+                "ticket_key": issue.key,
+                "ticket_url": issue.url,
+            }
+        finally:
+            await client.aclose()
+    client = SlackClient(scoped, redis)
+    try:
+        message = await client.notify(
+            str(requested["text"]), channel=str(requested["channel"]) if requested.get("channel") else None
+        )
+        return {
+            "provider": "slack",
+            "channel": message.channel,
+            "message_ts": message.ts,
+        }
+    finally:
+        await client.aclose()
+
+
+async def execute_persisted_response_action(
+    session: AsyncSession,
+    principal: Principal,
+    action_id: uuid.UUID,
+    *,
+    expected_scope_digest: str,
+    settings: Settings,
+    redis: Redis | None,
+) -> ThreatResponseAction:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    row = await session.scalar(
+        tenant_select(ThreatResponseAction, principal.organization_id)
+        .where(ThreatResponseAction.id == action_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Threat response action not found")
+
+    async def apply(_request: dict[str, object]) -> dict[str, object]:
+        return await _dispatch_response_action(
+            session, principal, row, settings=settings, redis=redis
+        )
+
+    try:
+        await execute_response_action(
+            row,
+            approval_scope_digest=expected_scope_digest,
+            apply=apply,
+        )
+    except Exception as exc:
+        row.status = "failed"
+        row.failure_code = type(exc).__name__[:120]
+        await session.commit()
+        raise
+    await session.flush()
+    return row
+
+
+async def verify_persisted_response_action(
+    session: AsyncSession,
+    principal: Principal,
+    action_id: uuid.UUID,
+    *,
+    effective: bool,
+    evidence: Mapping[str, Any],
+) -> ThreatResponseAction:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    row = await session.scalar(
+        tenant_select(ThreatResponseAction, principal.organization_id)
+        .where(ThreatResponseAction.id == action_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise ResourceNotFoundError("Threat response action not found")
+    verify_response_action(row, effective=effective, evidence=evidence)
+    await session.flush()
+    return row
+
+
 __all__ = [
     "DataStoreAssessment",
+    "approve_response_action",
     "assess_data_store",
     "canonical_digest",
     "controlled_sample_projection",
     "correlate_threat_story",
     "create_data_security_assessment",
     "create_threat_response_action",
+    "approve_persisted_response_action",
+    "execute_persisted_response_action",
     "execute_response_action",
     "ingest_ocsf_event",
     "normalize_ocsf_event",
     "preview_response_action",
     "verify_response_action",
+    "verify_persisted_response_action",
+    "normalize_response_request",
 ]

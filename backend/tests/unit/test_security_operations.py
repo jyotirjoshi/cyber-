@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -160,4 +161,67 @@ def test_response_action_requires_exact_approval_and_is_idempotent() -> None:
     )
     assert calls == 1
     assert action.status == "executed"
+    with pytest.raises(ConflictError, match="exact action scope"):
+        _run_immediate(
+            execute_response_action(action, approval_scope_digest="f" * 64, apply=apply)
+        )
+
+
+def test_response_action_approval_is_human_and_exact_scope_bound() -> None:
+    from app.services.security_operations import approve_response_action
+
+    action = SimpleNamespace(
+        status="proposed",
+        predicted_impact={"scope_digest": "a" * 64},
+        approval_scope_digest=None,
+        approved_by_id=None,
+        approved_at=None,
+    )
+    actor_id = uuid.uuid4()
+    approve_response_action(
+        action,
+        approved_by_id=actor_id,
+        expected_scope_digest="a" * 64,
+        now=dt.datetime(2026, 10, 20, tzinfo=dt.UTC),
+    )
+    assert action.status == "approved"
+    assert action.approved_by_id == actor_id
+    assert action.approval_scope_digest == "a" * 64
+
+    with pytest.raises(ConflictError, match="exact action scope"):
+        approve_response_action(
+            SimpleNamespace(
+                status="proposed",
+                predicted_impact={"scope_digest": "b" * 64},
+                approval_scope_digest=None,
+                approved_by_id=None,
+                approved_at=None,
+            ),
+            approved_by_id=actor_id,
+            expected_scope_digest="c" * 64,
+        )
+
+
+def test_response_scope_covers_provider_and_requested_action() -> None:
+    from app.services.security_operations import preview_response_action
+
+    first = SimpleNamespace(
+        action_type="restrict_access",
+        target_ref="app-1",
+        idempotency_key="idem-000000000001",
+        provider="zscaler",
+        requested_action={"provider_action": "zpa.update_application_access", "enabled": False},
+        predicted_impact={},
+    )
+    second = SimpleNamespace(
+        action_type=first.action_type,
+        target_ref=first.target_ref,
+        idempotency_key=first.idempotency_key,
+        provider=first.provider,
+        requested_action={"provider_action": "zpa.update_application_access", "enabled": True},
+        predicted_impact={},
+    )
+    assert preview_response_action(first, context={})["scope_digest"] != preview_response_action(
+        second, context={}
+    )["scope_digest"]
 

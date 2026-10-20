@@ -128,6 +128,36 @@ def test_validation_evidence_has_chain_of_custody_and_reproducibility() -> None:
     assert recipe.verification["chain_head"] == second
 
 
+def test_validation_evidence_digest_chain_rejects_stale_heads() -> None:
+    from app.services.assurance_work import (
+        append_validation_evidence_digest,
+        build_validation_recipe,
+    )
+
+    recipe = build_validation_recipe(
+        recipe_key="r-digest",
+        authorized_targets=["https://app.example.test"],
+        requested_targets=["https://app.example.test"],
+        actions=[{"kind": "http_request", "method": "GET", "path": "/health"}],
+        budgets={"max_actions": 2, "max_requests": 5, "max_seconds": 60},
+        approval_refs=["approval://7"],
+    )
+    first = append_validation_evidence_digest(
+        recipe,
+        artifact_ref="artifact://exchange-1",
+        content_digest="1" * 64,
+        previous_chain_head="0" * 64,
+    )
+    assert recipe.evidence_hashes == [first]
+    with pytest.raises(ConflictError, match="chain head"):
+        append_validation_evidence_digest(
+            recipe,
+            artifact_ref="artifact://exchange-2",
+            content_digest="2" * 64,
+            previous_chain_head="0" * 64,
+        )
+
+
 def test_verifier_requires_balanced_evidence_for_high_confidence() -> None:
     from app.services.assurance_work import confidence_from_evidence
 
