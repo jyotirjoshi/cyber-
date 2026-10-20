@@ -249,6 +249,7 @@ class AIGatewayEvaluateIn(BaseModel):
 
     direction: Literal["prompt", "output"]
     content: str = Field(min_length=1, max_length=100_000, repr=False)
+    policy_id: uuid.UUID | None = None
     application_key: str | None = Field(default=None, max_length=512)
     model_key: str | None = Field(default=None, max_length=512)
     agent_key: str | None = Field(default=None, max_length=512)
@@ -266,10 +267,27 @@ class AIGatewayEvaluateOut(BaseModel):
     approval_required: bool
 
 
+class DataClassificationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=100_000, repr=False)
+    resource_key: str | None = Field(default=None, max_length=512)
+
+
+class DataClassificationOut(BaseModel):
+    labels: list[str]
+    highest_sensitivity: Literal["public", "internal", "confidential", "restricted"]
+    redacted_content: str = Field(repr=False)
+    content_digest: str
+    match_counts: dict[str, int]
+
+
 __all__ = [
     "AIGatewayEvaluateIn",
     "AIGatewayEvaluateOut",
     "CanaryInteractionIn",
+    "DataClassificationIn",
+    "DataClassificationOut",
     "DeceptionCanaryCreateIn",
     "RiskSimulationCreateIn",
     "RiskSimulationOut",

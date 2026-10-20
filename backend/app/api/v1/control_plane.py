@@ -8,6 +8,10 @@ from fastapi import APIRouter, Query, status
 
 from app.api.deps import DbSession, PrincipalDep
 from app.schemas.control_plane import (
+    AIGatewayEvaluateIn,
+    AIGatewayEvaluateOut,
+    DataClassificationIn,
+    DataClassificationOut,
     SecurityPolicyCreateIn,
     SecurityPolicyEvaluationOut,
     SecurityPolicyOut,
@@ -17,9 +21,30 @@ from app.schemas.control_plane import (
     SecurityResourceOut,
     SecurityResourceUpsertIn,
 )
+from app.services import ai_security
 from app.services import control_plane as service
 
 router = APIRouter(prefix="/control-plane", tags=["control-plane"])
+
+
+@router.post("/ai-gateway/evaluate", response_model=AIGatewayEvaluateOut)
+async def evaluate_ai_gateway(
+    payload: AIGatewayEvaluateIn, principal: PrincipalDep, session: DbSession
+) -> AIGatewayEvaluateOut:
+    result = await ai_security.evaluate_and_record(session, principal, payload)
+    await session.commit()
+    return result
+
+
+@router.post("/data-security/classify", response_model=DataClassificationOut)
+async def classify_data(
+    payload: DataClassificationIn, principal: PrincipalDep, session: DbSession
+) -> DataClassificationOut:
+    result = await ai_security.classify_and_record(
+        session, principal, payload.content, resource_key=payload.resource_key
+    )
+    await session.commit()
+    return result
 
 
 @router.get("/resources", response_model=list[SecurityResourceOut])

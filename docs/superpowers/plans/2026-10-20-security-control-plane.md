@@ -63,7 +63,7 @@
 - [x] Run focused tests and confirm feature-missing failures.
 - [x] Implement services and REST routes using permission and audit primitives.
 - [x] Run focused, tenant-isolation, OpenAPI, and migration tests.
-- [ ] Commit the CAASM and policy slice.
+- [x] Commit the CAASM and policy slice.
 
 ### Task 3: Data security and inline AI gateway
 
@@ -75,10 +75,10 @@
 **Interfaces:**
 - Produces: bounded deterministic prompt/output evaluation, sensitive-data classification, prompt-injection detection, redaction, approval decisions, and hashed audit events.
 
-- [ ] Write failing injection, sensitive-data, redaction, no-raw-storage, and policy tests.
-- [ ] Run tests and confirm evaluator is absent.
-- [ ] Implement pure evaluator and persistence adapter.
-- [ ] Run focused security, logging-redaction, and API tests.
+- [x] Write failing injection, sensitive-data, redaction, no-raw-storage, and policy tests.
+- [x] Run tests and confirm evaluator is absent.
+- [x] Implement pure evaluator and persistence adapter.
+- [x] Run focused security, logging-redaction, and API tests.
 - [ ] Commit the data/AI protection slice.
 
 ### Task 4: Experience, threat stories, deception, and risk simulation
