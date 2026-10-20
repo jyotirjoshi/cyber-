@@ -30,10 +30,18 @@ _NEW = _OLD[:-1] + ",'run_native_ai_posture')"
 
 
 def upgrade() -> None:
-    op.drop_constraint("ck_agent_actions_valid_agent_action", "agent_actions", type_="check")
-    op.create_check_constraint("valid_agent_action", "agent_actions", _NEW)
+    op.drop_constraint(
+        op.f("ck_agent_actions_valid_agent_action"), "agent_actions", type_="check"
+    )
+    op.create_check_constraint(
+        op.f("ck_agent_actions_valid_agent_action"), "agent_actions", _NEW
+    )
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_agent_actions_valid_agent_action", "agent_actions", type_="check")
-    op.create_check_constraint("valid_agent_action", "agent_actions", _OLD)
+    op.drop_constraint(
+        op.f("ck_agent_actions_valid_agent_action"), "agent_actions", type_="check"
+    )
+    op.create_check_constraint(
+        op.f("ck_agent_actions_valid_agent_action"), "agent_actions", _OLD
+    )
