@@ -23,6 +23,7 @@ class SecurityResourceUpsertIn(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     source_kind: str = Field(min_length=1, max_length=80)
     source_key: str = Field(min_length=1, max_length=512)
+    integration_id: uuid.UUID | None = None
     observed_at: dt.datetime
     expires_at: dt.datetime | None = None
     confidence: Decimal = Field(ge=0, le=1, max_digits=4, decimal_places=3)
@@ -92,6 +93,60 @@ class SecurityPolicyOut(BaseModel):
     rules: dict[str, Any]
     integration_id: uuid.UUID | None
     created_at: dt.datetime
+
+
+class SecurityPolicyEvaluationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    policy_id: uuid.UUID
+    resource_id: uuid.UUID | None
+    event_id: uuid.UUID | None
+    decision: str
+    severity: str
+    score: Decimal
+    findings: list[dict[str, Any]]
+    evidence: dict[str, Any]
+    content_digest: str | None
+    evaluated_at: dt.datetime
+
+
+class SecurityRecommendationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    policy_id: uuid.UUID | None
+    resource_id: uuid.UUID | None
+    asset_id: uuid.UUID | None
+    integration_id: uuid.UUID | None
+    domain: str
+    title: str
+    rationale: str
+    action: str
+    severity: str
+    status: str
+    current_state: dict[str, Any]
+    desired_state: dict[str, Any]
+    idempotency_key: str
+    provider_receipt: dict[str, Any]
+    applied_by_id: uuid.UUID | None
+    applied_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class SecurityPostureOut(BaseModel):
+    total_resources: int
+    active_sources: int
+    stale_resources: int
+    unknown_owner: int
+    internet_exposed: int
+    non_compliant: int
+    at_risk: int
+    approved_ai: int
+    unapproved_ai: int
+    source_coverage: dict[str, int]
+    kind_coverage: dict[str, int]
+    average_identity_confidence: Decimal
 
 
 class SecurityRecommendationDecisionIn(BaseModel):
@@ -220,7 +275,10 @@ __all__ = [
     "RiskSimulationOut",
     "SecurityEventIn",
     "SecurityPolicyCreateIn",
+    "SecurityPolicyEvaluationOut",
     "SecurityPolicyOut",
+    "SecurityPostureOut",
+    "SecurityRecommendationOut",
     "SecurityRecommendationDecisionIn",
     "SecurityResourceOut",
     "SecurityResourceUpsertIn",

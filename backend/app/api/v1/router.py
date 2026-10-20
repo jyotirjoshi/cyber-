@@ -26,6 +26,7 @@ from app.api.v1 import (
     business_risk,
     canonical,
     compliance,
+    control_plane,
     custom_connectors,
     dashboard,
     engagements,
@@ -65,6 +66,7 @@ api_router.include_router(external_alerts.router)
 api_router.include_router(exposures.router)
 api_router.include_router(canonical.router)
 api_router.include_router(compliance.router)
+api_router.include_router(control_plane.router)
 api_router.include_router(jobs.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(reports.router)

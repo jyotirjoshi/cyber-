@@ -45,7 +45,7 @@
 - [x] Run focused tests and confirm the new domain is absent.
 - [x] Implement models, wire contracts, and the reversible migration.
 - [x] Run focused and migration/model parity tests.
-- [ ] Commit the persistence slice.
+- [x] Commit the persistence slice.
 
 ### Task 2: CAASM reconciliation, policy recommendations, and posture summaries
 
@@ -59,10 +59,10 @@
 - Consumes: Task 1 aggregates.
 - Produces: idempotent resource/source upsert, confidence scoring, stale-source/coverage summaries, policies, evaluations, and recommendation lifecycle APIs.
 
-- [ ] Write failing tenant, replay, confidence, stale-source, policy, and recommendation tests.
-- [ ] Run focused tests and confirm feature-missing failures.
-- [ ] Implement services and REST routes using permission and audit primitives.
-- [ ] Run focused, tenant-isolation, OpenAPI, and migration tests.
+- [x] Write failing tenant, replay, confidence, stale-source, policy, and recommendation tests.
+- [x] Run focused tests and confirm feature-missing failures.
+- [x] Implement services and REST routes using permission and audit primitives.
+- [x] Run focused, tenant-isolation, OpenAPI, and migration tests.
 - [ ] Commit the CAASM and policy slice.
 
 ### Task 3: Data security and inline AI gateway
