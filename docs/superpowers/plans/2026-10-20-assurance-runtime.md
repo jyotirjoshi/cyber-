@@ -46,7 +46,7 @@
 - [x] Verify failures are feature-absence failures.
 - [x] Implement models, strict Pydantic contracts, and reversible migration.
 - [x] Run model/migration parity and focused tests.
-- [ ] Commit the persistence slice.
+- [x] Commit the persistence slice.
 
 ### Task 2: Universal enforcement transaction engine
 
@@ -60,10 +60,10 @@
 - Consumes: recommendations and allow-listed enforcement adapters.
 - Produces: canonical diff/blast simulation, exact-digest approval, execute/observe/verify/rollback state transitions.
 
-- [ ] Write failing state, replay, approval-binding, verification, and rollback tests.
-- [ ] Verify the tests fail for missing transaction behavior.
-- [ ] Implement deterministic transaction services and REST routes.
-- [ ] Run focused integration and audit tests.
+- [x] Write failing state, replay, approval-binding, verification, and rollback tests.
+- [x] Verify the tests fail for missing transaction behavior.
+- [x] Implement deterministic transaction services and REST routes.
+- [x] Run focused integration and audit tests.
 - [ ] Commit the transaction slice.
 
 ### Task 3: AI runtime and access graph

@@ -52,10 +52,14 @@ class EnforcementTransaction(Base, TenantMixin, TimestampMixin):
     approval_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("approvals.id", ondelete="SET NULL")
     )
+    approved_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
     mutation_receipt: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     confirmation: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     verification: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     rollback_plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    observation_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
     observation_ends_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     executed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -73,6 +77,10 @@ class EnforcementTransaction(Base, TenantMixin, TimestampMixin):
             "status IN ('draft','simulated','pending_approval','approved','applying','observing',"
             "'verifying','succeeded','rollback_pending','rolling_back','rolled_back','failed','cancelled')",
             name="valid_enforcement_transaction_status",
+        ),
+        CheckConstraint(
+            "observation_seconds BETWEEN 0 AND 604800",
+            name="valid_enforcement_observation_seconds",
         ),
         Index("ix_enforcement_transactions_org_status", "organization_id", "status"),
         Index(

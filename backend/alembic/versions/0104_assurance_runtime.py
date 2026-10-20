@@ -61,10 +61,12 @@ def upgrade() -> None:
         sa.Column("diff_digest", sa.String(64), nullable=False),
         sa.Column("blast_radius", postgresql.JSONB(), nullable=False),
         sa.Column("approval_id", postgresql.UUID(as_uuid=True)),
+        sa.Column("approved_by_id", postgresql.UUID(as_uuid=True)),
         sa.Column("mutation_receipt", postgresql.JSONB(), nullable=False),
         sa.Column("confirmation", postgresql.JSONB(), nullable=False),
         sa.Column("verification", postgresql.JSONB(), nullable=False),
         sa.Column("rollback_plan", postgresql.JSONB(), nullable=False),
+        sa.Column("observation_seconds", sa.Integer(), nullable=False),
         sa.Column("observation_ends_at", sa.DateTime(timezone=True)),
         sa.Column("approved_at", sa.DateTime(timezone=True)),
         sa.Column("executed_at", sa.DateTime(timezone=True)),
@@ -75,11 +77,16 @@ def upgrade() -> None:
             "status IN ('draft','simulated','pending_approval','approved','applying','observing','verifying','succeeded','rollback_pending','rolling_back','rolled_back','failed','cancelled')",
             name=op.f("ck_enforcement_transactions_valid_enforcement_transaction_status"),
         ),
+        sa.CheckConstraint(
+            "observation_seconds BETWEEN 0 AND 604800",
+            name=op.f("ck_enforcement_transactions_valid_enforcement_observation_seconds"),
+        ),
         sa.ForeignKeyConstraint(
             ["recommendation_id"], ["security_recommendations.id"], ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(["integration_id"], ["integrations.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["approval_id"], ["approvals.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["approved_by_id"], ["users.id"], ondelete="SET NULL"),
         _tenant_constraint("enforcement_transactions"),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_enforcement_transactions")),
         sa.UniqueConstraint(

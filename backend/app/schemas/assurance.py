@@ -43,10 +43,12 @@ class EnforcementTransactionOut(BaseModel):
     diff_digest: str
     blast_radius: dict[str, Any]
     approval_id: uuid.UUID | None
+    approved_by_id: uuid.UUID | None
     mutation_receipt: dict[str, Any]
     confirmation: dict[str, Any]
     verification: dict[str, Any]
     rollback_plan: dict[str, Any]
+    observation_seconds: int
     observation_ends_at: dt.datetime | None
     approved_at: dt.datetime | None
     executed_at: dt.datetime | None

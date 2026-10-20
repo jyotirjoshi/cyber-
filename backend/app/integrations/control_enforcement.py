@@ -53,6 +53,10 @@ class ControlEnforcementAdapter(Protocol):
 
     async def apply(self, command: EnforcementCommand) -> dict[str, Any]: ...
 
+    async def snapshot(self, command: EnforcementCommand) -> dict[str, Any]: ...
+
+    async def confirm(self, command: EnforcementCommand) -> dict[str, Any]: ...
+
 
 async def execute_enforcement(
     adapter: ControlEnforcementAdapter,

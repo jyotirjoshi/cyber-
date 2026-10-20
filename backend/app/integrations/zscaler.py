@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -170,6 +172,21 @@ class ZscalerClient:
             "target_path": path,
             "desired_state": command.desired_state,
         }
+
+    async def snapshot(self, command: EnforcementCommand) -> dict[str, Any]:
+        _method, path = build_action_path(
+            command.action, command.target_external_id, self._cfg.customer_id or ""
+        )
+        payload = await self._require().get_json(path, headers=await self._headers())
+        return payload if isinstance(payload, dict) else {"value": payload}
+
+    async def confirm(self, command: EnforcementCommand) -> dict[str, Any]:
+        state = await self.snapshot(command)
+        matches = all(state.get(key) == value for key, value in command.desired_state.items())
+        digest = hashlib.sha256(
+            json.dumps(state, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        return {"matches": matches, "state_digest": digest}
 
     async def apply(self, command: EnforcementCommand) -> dict[str, Any]:
         method, path = build_action_path(

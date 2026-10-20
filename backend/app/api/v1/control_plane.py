@@ -8,6 +8,11 @@ from fastapi import APIRouter, Query, status
 
 from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
 from app.integrations import control_enforcement
+from app.schemas.assurance import (
+    EnforcementTransactionCreateIn,
+    EnforcementTransactionOut,
+    EnforcementTransactionTransitionIn,
+)
 from app.schemas.control_plane import (
     AIGatewayEvaluateIn,
     AIGatewayEvaluateOut,
@@ -32,10 +37,73 @@ from app.schemas.control_plane import (
     SecurityResourceUpsertIn,
     ThreatStoryOut,
 )
-from app.services import ai_security
+from app.services import ai_security, assurance_transactions
 from app.services import control_plane as service
 
 router = APIRouter(prefix="/control-plane", tags=["control-plane"])
+
+
+@router.get("/transactions", response_model=list[EnforcementTransactionOut])
+async def transactions(
+    principal: PrincipalDep,
+    session: DbSession,
+    status_filter: str | None = Query(default=None, alias="status"),
+) -> list[EnforcementTransactionOut]:
+    rows = await assurance_transactions.list_transactions(
+        session, principal, status=status_filter
+    )
+    return [EnforcementTransactionOut.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/transactions",
+    response_model=EnforcementTransactionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_transaction(
+    payload: EnforcementTransactionCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> EnforcementTransactionOut:
+    row = await assurance_transactions.prepare_transaction(
+        session,
+        principal,
+        payload.recommendation_id,
+        settings=settings,
+        redis=redis,
+        observation_seconds=payload.observation_seconds,
+    )
+    await session.commit()
+    return EnforcementTransactionOut.model_validate(row)
+
+
+@router.post(
+    "/transactions/{transaction_id}/transition",
+    response_model=EnforcementTransactionOut,
+)
+async def transition_transaction(
+    transaction_id: uuid.UUID,
+    payload: EnforcementTransactionTransitionIn,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> EnforcementTransactionOut:
+    row = await assurance_transactions.transition_transaction(
+        session,
+        principal,
+        transaction_id,
+        action=payload.action,
+        settings=settings,
+        redis=redis,
+        approval_id=payload.approval_id,
+        expected_diff_digest=payload.expected_diff_digest,
+        verification=payload.verification,
+    )
+    await session.commit()
+    return EnforcementTransactionOut.model_validate(row)
 
 
 @router.post("/ai-gateway/evaluate", response_model=AIGatewayEvaluateOut)
