@@ -194,6 +194,20 @@ import type {
   ScanAuthProfileIn,
   ScanAuthProfileOut,
 } from "./types";
+import type {
+  AIGatewayDecision,
+  DataClassification,
+  SecurityCanary,
+  SecurityExperienceSummary,
+  SecurityPolicy,
+  SecurityPolicyEvaluation,
+  SecurityPolicyKind,
+  SecurityPosture,
+  SecurityRecommendation,
+  SecurityResource,
+  SecurityRiskSimulation,
+  SecurityThreatStory,
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Configuration.
@@ -882,6 +896,73 @@ export const api = {
       request<ScimProvisioningTokenIssuedOut>("POST", "/organization/scim/tokens", { body }),
     revokeScimToken: (id: string) =>
       request<ScimProvisioningTokenOut>("POST", `/organization/scim/tokens/${id}/revoke`),
+  },
+
+  controlPlane: {
+    posture: () => request<SecurityPosture>("GET", "/control-plane/posture"),
+    resources: (params?: { kind?: string; posture_status?: string; limit?: number }) =>
+      request<SecurityResource[]>("GET", "/control-plane/resources", { query: params }),
+    policies: () => request<SecurityPolicy[]>("GET", "/control-plane/policies"),
+    createPolicy: (body: {
+      name: string;
+      kind: SecurityPolicyKind;
+      mode: "monitor" | "recommend" | "enforce";
+      rules: Record<string, unknown>;
+      integration_id?: string | null;
+    }) => request<SecurityPolicy>("POST", "/control-plane/policies", { body }),
+    evaluatePolicy: (id: string) =>
+      request<SecurityPolicyEvaluation[]>("POST", `/control-plane/policies/${id}/evaluate`),
+    recommendations: (status?: string) =>
+      request<SecurityRecommendation[]>("GET", "/control-plane/recommendations", {
+        query: status ? { status } : undefined,
+      }),
+    decideRecommendation: (id: string, decision: "approve" | "reject" | "apply", note?: string) =>
+      request<SecurityRecommendation>("POST", `/control-plane/recommendations/${id}/decision`, {
+        body: { decision, note },
+      }),
+    previewRecommendation: (id: string) =>
+      request<SecurityRecommendation>("POST", `/control-plane/recommendations/${id}/preview`),
+    syncZscaler: () =>
+      request<{ resources_reconciled: number }>("POST", "/control-plane/connectors/zscaler/sync"),
+    experience: () => request<SecurityExperienceSummary>("GET", "/control-plane/experience"),
+    threatStories: (status?: string) =>
+      request<SecurityThreatStory[]>("GET", "/control-plane/threat-stories", {
+        query: status ? { status } : undefined,
+      }),
+    canaries: () => request<SecurityCanary[]>("GET", "/control-plane/canaries"),
+    createCanary: (body: {
+      name: string;
+      kind: SecurityCanary["kind"];
+      token: string;
+      asset_id?: string | null;
+      placement?: Record<string, unknown>;
+    }) => request<SecurityCanary>("POST", "/control-plane/canaries", { body }),
+    riskSimulations: () =>
+      request<SecurityRiskSimulation[]>("GET", "/control-plane/risk-simulations"),
+    createRiskSimulation: (body: {
+      name: string;
+      annual_probability: number;
+      loss_min: number;
+      loss_likely: number;
+      loss_max: number;
+      control_effectiveness: number;
+      assumptions?: Record<string, unknown>;
+      evidence?: Record<string, unknown>;
+    }) => request<SecurityRiskSimulation>("POST", "/control-plane/risk-simulations", { body }),
+    evaluateAI: (body: {
+      direction: "prompt" | "output";
+      content: string;
+      policy_id?: string | null;
+      application_key?: string | null;
+      model_key?: string | null;
+      agent_key?: string | null;
+      tool_keys?: string[];
+      requested_action?: string | null;
+    }) => request<AIGatewayDecision>("POST", "/control-plane/ai-gateway/evaluate", { body }),
+    classifyData: (content: string, resourceKey?: string) =>
+      request<DataClassification>("POST", "/control-plane/data-security/classify", {
+        body: { content, resource_key: resourceKey },
+      }),
   },
 
   integrations: {

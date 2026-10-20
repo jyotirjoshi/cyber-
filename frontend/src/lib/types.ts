@@ -295,7 +295,8 @@ export type IntegrationKind =
   | "burp_dast"
   | "prowler_aws"
   | "prowler_azure"
-  | "prowler_gcp";
+  | "prowler_gcp"
+  | "zscaler";
 
 export type IntegrationStatus = "configured" | "unverified" | "error" | "disabled";
 
@@ -2859,4 +2860,184 @@ export interface WorkspaceEvidenceManifest {
     command_digest: string;
     result_summary: Record<string, unknown>;
   }>;
+}
+
+// ---------------------------------------------------------------------------
+// Unified security control plane.
+// ---------------------------------------------------------------------------
+
+export type SecurityResourceKind =
+  | "asset" | "data_store" | "dataset" | "saas_application" | "ai_application"
+  | "ai_model" | "ai_agent" | "mcp_server" | "ai_tool" | "identity" | "endpoint" | "browser";
+
+export interface SecurityResource {
+  id: Uuid;
+  resource_key: string;
+  kind: SecurityResourceKind;
+  name: string;
+  provider: string | null;
+  external_id: string | null;
+  asset_id: Uuid | null;
+  owner_team: string | null;
+  environment: string;
+  internet_exposed: boolean;
+  approved: boolean | null;
+  posture_status: "unknown" | "healthy" | "at_risk" | "non_compliant" | "inactive";
+  risk_score: string;
+  sensitivity: string;
+  classifications: string[];
+  permissions: Record<string, unknown>;
+  attributes: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  source_count: number;
+  identity_confidence: string;
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+}
+
+export interface SecurityPosture {
+  total_resources: number;
+  active_sources: number;
+  stale_resources: number;
+  unknown_owner: number;
+  internet_exposed: number;
+  non_compliant: number;
+  at_risk: number;
+  approved_ai: number;
+  unapproved_ai: number;
+  source_coverage: Record<string, number>;
+  kind_coverage: Record<string, number>;
+  average_identity_confidence: string;
+}
+
+export type SecurityPolicyKind =
+  | "ztna" | "secure_web_gateway" | "firewall" | "tls_inspection" | "dlp" | "casb"
+  | "sspm" | "ai_gateway" | "ai_guard" | "endpoint_isolation" | "browser_isolation";
+
+export interface SecurityPolicy {
+  id: Uuid;
+  name: string;
+  kind: SecurityPolicyKind;
+  mode: "monitor" | "recommend" | "enforce";
+  status: "draft" | "active" | "disabled";
+  version: number;
+  rules: Record<string, unknown>;
+  integration_id: Uuid | null;
+  created_at: IsoDateTime;
+}
+
+export interface SecurityPolicyEvaluation {
+  id: Uuid;
+  policy_id: Uuid;
+  resource_id: Uuid | null;
+  event_id: Uuid | null;
+  decision: "allow" | "block" | "redact" | "require_approval" | "recommend" | "not_applicable";
+  severity: Severity;
+  score: string;
+  findings: Array<Record<string, unknown>>;
+  evidence: Record<string, unknown>;
+  content_digest: string | null;
+  evaluated_at: IsoDateTime;
+}
+
+export type SecurityRecommendationStatus =
+  | "proposed" | "approved" | "applying" | "applied" | "rejected" | "failed" | "superseded";
+
+export interface SecurityRecommendation {
+  id: Uuid;
+  policy_id: Uuid | null;
+  resource_id: Uuid | null;
+  asset_id: Uuid | null;
+  integration_id: Uuid | null;
+  domain: string;
+  title: string;
+  rationale: string;
+  action: string;
+  severity: Severity;
+  status: SecurityRecommendationStatus;
+  current_state: Record<string, unknown>;
+  desired_state: Record<string, unknown>;
+  idempotency_key: string;
+  provider_receipt: Record<string, unknown>;
+  applied_by_id: Uuid | null;
+  applied_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface SecurityThreatStory {
+  id: Uuid;
+  correlation_key: string;
+  title: string;
+  status: "open" | "investigating" | "contained" | "resolved" | "dismissed";
+  severity: Severity;
+  confidence: string;
+  summary: string;
+  event_ids: string[];
+  asset_ids: string[];
+  finding_ids: string[];
+  identity_refs: string[];
+  timeline: Array<Record<string, unknown>>;
+  first_seen_at: IsoDateTime;
+  last_seen_at: IsoDateTime;
+  assigned_user_id: Uuid | null;
+  resolution: string | null;
+}
+
+export interface SecurityExperienceSummary {
+  event_count: number;
+  monitored_journeys: number;
+  degraded_journeys: number;
+  average_score: string;
+  business_impact: "unknown" | "low" | "moderate" | "high" | "critical";
+  latest_at: IsoDateTime | null;
+}
+
+export interface SecurityCanary {
+  id: Uuid;
+  name: string;
+  kind: "credential" | "dns" | "http" | "file" | "cloud_resource" | "identity";
+  token_digest: string;
+  asset_id: Uuid | null;
+  status: "active" | "disabled" | "triggered" | "retired";
+  placement: Record<string, unknown>;
+  last_triggered_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+}
+
+export interface SecurityRiskSimulation {
+  id: Uuid;
+  name: string;
+  business_service_id: Uuid | null;
+  scenario_id: Uuid | null;
+  status: string;
+  annual_probability: string;
+  loss_min: string;
+  loss_likely: string;
+  loss_max: string;
+  control_effectiveness: string;
+  acceptance_status: string;
+  expected_loss: string;
+  inherent_annual_loss: string;
+  residual_annual_loss: string;
+  assumptions: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  narrative: string | null;
+}
+
+export interface AIGatewayDecision {
+  decision: "allow" | "block" | "redact" | "require_approval";
+  severity: Severity;
+  score: string;
+  reasons: string[];
+  content_digest: string;
+  redacted_content: string | null;
+  approval_required: boolean;
+}
+
+export interface DataClassification {
+  labels: string[];
+  highest_sensitivity: "public" | "internal" | "confidential" | "restricted";
+  redacted_content: string;
+  content_digest: string;
+  match_counts: Record<string, number>;
 }

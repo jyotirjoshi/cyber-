@@ -23,6 +23,14 @@ describe("ADDABLE_INTEGRATIONS", () => {
       credential: "api_token",
     });
   });
+
+  it("offers Zscaler inventory and control-plane credentials", () => {
+    expect(ADDABLE_INTEGRATIONS).toContainEqual({
+      kind: "zscaler",
+      label: "Zscaler Zero Trust Exchange",
+    });
+    expect(INTEGRATION_SETUP_HINTS.zscaler.credential).toBe("client_id + client_secret");
+  });
 });
 
 describe("BYOK_PROVIDERS", () => {

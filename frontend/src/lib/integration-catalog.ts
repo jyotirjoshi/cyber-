@@ -112,6 +112,10 @@ export const INTEGRATION_SETUP_HINTS = {
     config: '{"account_id":"example-project-1"}',
     credential: "service_account_json",
   },
+  zscaler: {
+    config: '{"customer_id":"customer-id","audience":"https://api.zscaler.com","verify_tls":true}',
+    credential: "client_id + client_secret",
+  },
 } as const;
 
 export const ADDABLE_INTEGRATIONS: Array<{ kind: IntegrationKind; label: string }> = [
@@ -151,4 +155,5 @@ export const ADDABLE_INTEGRATIONS: Array<{ kind: IntegrationKind; label: string 
   { kind: "prowler_aws", label: "Prowler AWS account" },
   { kind: "prowler_azure", label: "Prowler Azure subscription" },
   { kind: "prowler_gcp", label: "Prowler GCP project" },
+  { kind: "zscaler", label: "Zscaler Zero Trust Exchange" },
 ];

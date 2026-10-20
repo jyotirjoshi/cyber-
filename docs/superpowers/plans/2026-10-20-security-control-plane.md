@@ -113,7 +113,7 @@
 - [x] Run tests and confirm adapters are absent.
 - [x] Implement hardened clients and explicit-apply service path.
 - [x] Run integration, SSRF, retry, circuit-breaker, and control-plane tests.
-- [ ] Commit the connector slice.
+- [x] Commit the connector slice.
 
 ### Task 6: Control-plane product UI
 
@@ -128,9 +128,9 @@
 - Consumes: Tasks 2-5 REST contracts.
 - Produces: posture, data, AI, recommendations, experience, SOC stories, deception, and risk workspaces.
 
-- [ ] Write failing client projection and decision-label tests.
-- [ ] Implement typed API methods and operator UI.
-- [ ] Run frontend tests, typecheck, and production build.
+- [x] Write failing client projection and decision-label tests.
+- [x] Implement typed API methods and operator UI.
+- [x] Run frontend tests, typecheck, and production build.
 - [ ] Commit the UI slice.
 
 ### Task 7: Release verification

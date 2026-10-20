@@ -36,6 +36,7 @@ const NAV: NavItem[] = [
   { href: "/remediation", label: "Remediation", icon: <IconRemediation />, permission: "finding:read" },
   { href: "/assets", label: "Assets", icon: <IconAssets />, permission: "asset:read" },
   { href: "/asm", label: "Attack surface", icon: <IconASM />, permission: "asset:read" },
+  { href: "/control-plane", label: "Control plane", icon: <IconASM />, permission: "org:read" },
   { href: "/compliance", label: "Compliance", icon: <IconCompliance />, permission: "finding:read" },
   { href: "/threat-intelligence", label: "Threat intel", icon: <IconIntelligence />, permission: "finding:read" },
   { href: "/automation", label: "Automation", icon: <IconAutomation />, permission: "finding:read" },
