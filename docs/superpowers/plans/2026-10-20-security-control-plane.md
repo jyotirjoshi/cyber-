@@ -144,6 +144,6 @@
 
 - [x] Run backend focused/full relevant suites, migration parity, lint, frontend tests, typecheck, and production build.
 - [x] Review upgrade/downgrade behavior and worker compatibility.
-- [ ] Commit the release verification fixes; push only when explicitly requested.
+- [x] Commit the release verification fixes; push only when explicitly requested.
 - [ ] Deploy only when explicitly requested in this turn.
 
