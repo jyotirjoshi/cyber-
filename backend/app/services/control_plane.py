@@ -13,19 +13,29 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, ResourceNotFoundError
-from app.core.logging_conf import redact_mapping
+from app.core.logging_conf import redact_mapping, redact_text
 from app.db.enums import Permission
 from app.db.models.asset import Asset
+from app.db.models.business_risk import BusinessRiskScenario, BusinessService
 from app.db.models.control_plane import (
+    SecurityCanary,
+    SecurityCanaryInteraction,
+    SecurityEvent,
     SecurityPolicy,
     SecurityPolicyEvaluation,
     SecurityRecommendation,
     SecurityResource,
     SecurityResourceObservation,
+    SecurityRiskSimulation,
+    SecurityThreatStory,
 )
 from app.db.models.integration import Integration
 from app.db.repository import tenant_select
 from app.schemas.control_plane import (
+    CanaryInteractionIn,
+    DeceptionCanaryCreateIn,
+    RiskSimulationCreateIn,
+    SecurityEventIn,
     SecurityPolicyCreateIn,
     SecurityRecommendationDecisionIn,
     SecurityResourceUpsertIn,
@@ -139,6 +149,91 @@ def next_recommendation_status(current: str, action: str) -> str:
     if next_status is None:
         raise ConflictError(f"Cannot {action} a {current} recommendation")
     return next_status
+
+
+def correlation_key_for_event(
+    *,
+    organization_id: uuid.UUID,
+    occurred_at: dt.datetime,
+    asset_id: uuid.UUID | None,
+    resource_id: uuid.UUID | None,
+    identity_ref: str | None,
+) -> str:
+    """Create an opaque, stable 24-hour correlation window for related signals."""
+
+    anchor = (
+        f"identity:{identity_ref.casefold()}"
+        if identity_ref
+        else f"asset:{asset_id}"
+        if asset_id
+        else f"resource:{resource_id}"
+        if resource_id
+        else "unattributed"
+    )
+    bucket = int(occurred_at.timestamp()) // 86_400
+    raw = f"{organization_id}:{anchor}:{bucket}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+_SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def merge_story_values(
+    current: dict[str, Any],
+    *,
+    event_id: str,
+    asset_id: str | None,
+    identity_ref: str | None,
+    occurred_at: dt.datetime,
+    severity: str,
+    event_type: str,
+) -> dict[str, Any]:
+    merged = dict(current)
+    merged["event_ids"] = list(dict.fromkeys([*current.get("event_ids", []), event_id]))
+    merged["asset_ids"] = list(
+        dict.fromkeys([*current.get("asset_ids", []), *([asset_id] if asset_id else [])])
+    )
+    merged["identity_refs"] = list(
+        dict.fromkeys(
+            [*current.get("identity_refs", []), *([identity_ref] if identity_ref else [])]
+        )
+    )
+    timeline = [*current.get("timeline", [])]
+    if event_id not in {str(item.get("event_id")) for item in timeline}:
+        timeline.append(
+            {
+                "event_id": event_id,
+                "event_type": event_type,
+                "occurred_at": occurred_at.isoformat(),
+                "severity": severity,
+            }
+        )
+    merged["timeline"] = sorted(timeline, key=lambda item: str(item["occurred_at"]))
+    merged["severity"] = max(
+        (str(current.get("severity", "info")), severity), key=lambda item: _SEVERITY_ORDER[item]
+    )
+    return merged
+
+
+def calculate_experience_score(
+    *, availability: float, latency_ms: float, error_rate: float
+) -> Decimal:
+    availability_score = Decimal(str(max(0.0, min(1.0, availability)))) * Decimal("50")
+    latency_ratio = min(1.0, max(0.0, latency_ms) / 1800.0)
+    latency_score = Decimal(str(1.0 - latency_ratio)) * Decimal("30")
+    error_penalty = min(1.0, max(0.0, error_rate) * 12.5)
+    error_score = Decimal(str(1.0 - error_penalty)) * Decimal("20")
+    return (availability_score + latency_score + error_score).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+
+def canary_digest(token: str) -> str:
+    return hashlib.sha256(f"cynux-canary:{token}".encode("utf-8")).hexdigest()
+
+
+def source_address_digest(address: str) -> str:
+    return hashlib.sha256(f"cynux-source:{address.casefold()}".encode("utf-8")).hexdigest()
 
 
 async def _assert_optional_refs(
@@ -493,19 +588,380 @@ async def decide_recommendation(
     return row
 
 
+async def _correlate_event(
+    session: AsyncSession, principal: Principal, event: SecurityEvent
+) -> SecurityThreatStory:
+    key = correlation_key_for_event(
+        organization_id=principal.organization_id,
+        occurred_at=event.occurred_at,
+        asset_id=event.asset_id,
+        resource_id=event.resource_id,
+        identity_ref=event.identity_ref,
+    )
+    story = await session.scalar(
+        tenant_select(SecurityThreatStory, principal.organization_id)
+        .where(SecurityThreatStory.correlation_key == key)
+        .with_for_update()
+    )
+    event_id = str(event.id)
+    asset_id = str(event.asset_id) if event.asset_id else None
+    if story is None:
+        story = SecurityThreatStory(
+            organization_id=principal.organization_id,
+            correlation_key=key,
+            title="Correlated security activity",
+            status="open",
+            severity=event.severity,
+            confidence=Decimal("0.450"),
+            summary="Related security signals require analyst review.",
+            event_ids=[],
+            asset_ids=[],
+            finding_ids=[],
+            identity_refs=[],
+            timeline=[],
+            first_seen_at=event.occurred_at,
+            last_seen_at=event.occurred_at,
+        )
+        session.add(story)
+    merged = merge_story_values(
+        {
+            "event_ids": story.event_ids,
+            "asset_ids": story.asset_ids,
+            "identity_refs": story.identity_refs,
+            "timeline": story.timeline,
+            "severity": story.severity,
+        },
+        event_id=event_id,
+        asset_id=asset_id,
+        identity_ref=event.identity_ref,
+        occurred_at=event.occurred_at,
+        severity=event.severity,
+        event_type=event.event_type,
+    )
+    story.event_ids = merged["event_ids"]
+    story.asset_ids = merged["asset_ids"]
+    story.identity_refs = merged["identity_refs"]
+    story.timeline = merged["timeline"]
+    story.severity = merged["severity"]
+    story.first_seen_at = min(story.first_seen_at, event.occurred_at)
+    story.last_seen_at = max(story.last_seen_at, event.occurred_at)
+    story.confidence = min(
+        Decimal("0.990"), Decimal("0.350") + Decimal("0.100") * len(story.event_ids)
+    )
+    await session.flush()
+    return story
+
+
+async def ingest_event(
+    session: AsyncSession, principal: Principal, payload: SecurityEventIn
+) -> SecurityEvent:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    existing = await session.scalar(
+        tenant_select(SecurityEvent, principal.organization_id).where(
+            SecurityEvent.event_key == payload.event_key
+        )
+    )
+    if existing is not None:
+        return existing
+    if payload.asset_id is not None:
+        asset = await session.scalar(
+            tenant_select(Asset, principal.organization_id).where(Asset.id == payload.asset_id)
+        )
+        if asset is None:
+            raise ResourceNotFoundError("Asset not found")
+    if payload.resource_id is not None:
+        resource = await session.scalar(
+            tenant_select(SecurityResource, principal.organization_id).where(
+                SecurityResource.id == payload.resource_id
+            )
+        )
+        if resource is None:
+            raise ResourceNotFoundError("Security resource not found")
+    event = SecurityEvent(
+        organization_id=principal.organization_id,
+        event_key=payload.event_key,
+        category=payload.category,
+        event_type=payload.event_type,
+        source_kind=payload.source_kind,
+        occurred_at=payload.occurred_at,
+        severity=payload.severity,
+        summary=redact_text(payload.summary),
+        content_digest=payload.content_digest,
+        asset_id=payload.asset_id,
+        resource_id=payload.resource_id,
+        identity_ref=payload.identity_ref,
+        metrics=safe_metadata(payload.metrics),
+        evidence=safe_metadata(payload.evidence),
+    )
+    session.add(event)
+    await session.flush()
+    if payload.category in {"incident", "identity", "deception", "access", "endpoint"}:
+        await _correlate_event(session, principal, event)
+    await record(
+        session,
+        action="control_plane.event.ingest",
+        principal=principal,
+        resource_type="security_event",
+        resource_id=event.id,
+        detail={"category": event.category, "event_type": event.event_type},
+    )
+    return event
+
+
+async def list_events(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    category: str | None = None,
+    limit: int = 200,
+) -> list[SecurityEvent]:
+    principal.require(Permission.ORG_READ)
+    query = tenant_select(SecurityEvent, principal.organization_id)
+    if category:
+        query = query.where(SecurityEvent.category == category)
+    rows = await session.scalars(query.order_by(SecurityEvent.occurred_at.desc()).limit(limit))
+    return list(rows.all())
+
+
+async def list_threat_stories(
+    session: AsyncSession, principal: Principal, *, status: str | None = None
+) -> list[SecurityThreatStory]:
+    principal.require(Permission.ORG_READ)
+    query = tenant_select(SecurityThreatStory, principal.organization_id)
+    if status:
+        query = query.where(SecurityThreatStory.status == status)
+    rows = await session.scalars(query.order_by(SecurityThreatStory.last_seen_at.desc()).limit(500))
+    return list(rows.all())
+
+
+async def experience_summary(session: AsyncSession, principal: Principal) -> dict[str, Any]:
+    events = await list_events(session, principal, category="experience", limit=10_000)
+    scores: list[Decimal] = []
+    journeys: set[str] = set()
+    degraded: set[str] = set()
+    for event in events:
+        metrics = event.metrics
+        score = calculate_experience_score(
+            availability=float(metrics.get("availability", 0)),
+            latency_ms=float(metrics.get("latency_ms", 0)),
+            error_rate=float(metrics.get("error_rate", 0)),
+        )
+        scores.append(score)
+        journey = str(metrics.get("journey_key", event.event_type))
+        journeys.add(journey)
+        if score < 70:
+            degraded.add(journey)
+    average = (
+        sum(scores, Decimal("0")) / len(scores) if scores else Decimal("0")
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    impact = (
+        "unknown"
+        if not scores
+        else "critical"
+        if average < 30
+        else "high"
+        if average < 50
+        else "moderate"
+        if average < 70
+        else "low"
+    )
+    return {
+        "event_count": len(events),
+        "monitored_journeys": len(journeys),
+        "degraded_journeys": len(degraded),
+        "average_score": average,
+        "business_impact": impact,
+        "latest_at": max((event.occurred_at for event in events), default=None),
+    }
+
+
+async def create_canary(
+    session: AsyncSession, principal: Principal, payload: DeceptionCanaryCreateIn
+) -> SecurityCanary:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    if payload.asset_id is not None:
+        asset = await session.scalar(
+            tenant_select(Asset, principal.organization_id).where(Asset.id == payload.asset_id)
+        )
+        if asset is None:
+            raise ResourceNotFoundError("Asset not found")
+    duplicate = await session.scalar(
+        tenant_select(SecurityCanary, principal.organization_id).where(
+            SecurityCanary.name == payload.name.strip()
+        )
+    )
+    if duplicate is not None:
+        raise ConflictError("A canary with this name already exists")
+    row = SecurityCanary(
+        organization_id=principal.organization_id,
+        name=payload.name.strip(),
+        kind=payload.kind,
+        token_digest=canary_digest(payload.token),
+        asset_id=payload.asset_id,
+        status="active",
+        placement=safe_metadata(payload.placement),
+    )
+    session.add(row)
+    await session.flush()
+    await record(
+        session,
+        action="control_plane.canary.create",
+        principal=principal,
+        resource_type="security_canary",
+        resource_id=row.id,
+        detail={"kind": row.kind},
+    )
+    return row
+
+
+async def list_canaries(session: AsyncSession, principal: Principal) -> list[SecurityCanary]:
+    principal.require(Permission.ORG_READ)
+    rows = await session.scalars(
+        tenant_select(SecurityCanary, principal.organization_id).order_by(SecurityCanary.name)
+    )
+    return list(rows.all())
+
+
+async def record_canary_interaction(
+    session: AsyncSession,
+    principal: Principal,
+    canary_id: uuid.UUID,
+    payload: CanaryInteractionIn,
+) -> SecurityCanaryInteraction:
+    principal.require(Permission.INTEGRATION_MANAGE)
+    canary = await session.scalar(
+        tenant_select(SecurityCanary, principal.organization_id)
+        .where(SecurityCanary.id == canary_id)
+        .with_for_update()
+    )
+    if canary is None:
+        raise ResourceNotFoundError("Canary not found")
+    existing = await session.scalar(
+        tenant_select(SecurityCanaryInteraction, principal.organization_id).where(
+            SecurityCanaryInteraction.interaction_key == payload.interaction_key
+        )
+    )
+    if existing is not None:
+        return existing
+    event = await ingest_event(
+        session,
+        principal,
+        SecurityEventIn(
+            event_key=f"canary:{payload.interaction_key}",
+            category="deception",
+            event_type="canary_triggered",
+            source_kind="cynux_deception",
+            occurred_at=payload.occurred_at,
+            severity=payload.severity,
+            summary=f"{canary.kind} canary interaction detected",
+            asset_id=canary.asset_id,
+            identity_ref=payload.identity_ref,
+            evidence={"canary_id": str(canary.id), **safe_metadata(payload.evidence)},
+        ),
+    )
+    interaction = SecurityCanaryInteraction(
+        organization_id=principal.organization_id,
+        canary_id=canary.id,
+        event_id=event.id,
+        interaction_key=payload.interaction_key,
+        occurred_at=payload.occurred_at,
+        source_ip_digest=source_address_digest(payload.source_ip) if payload.source_ip else None,
+        identity_ref=payload.identity_ref,
+        protocol=payload.protocol,
+        severity=payload.severity,
+        evidence=safe_metadata(payload.evidence),
+    )
+    session.add(interaction)
+    canary.status = "triggered"
+    canary.last_triggered_at = payload.occurred_at
+    await session.flush()
+    return interaction
+
+
+async def create_risk_simulation(
+    session: AsyncSession, principal: Principal, payload: RiskSimulationCreateIn
+) -> SecurityRiskSimulation:
+    principal.require(Permission.ASSET_TAG)
+    if payload.business_service_id is not None:
+        business_service = await session.scalar(
+            tenant_select(BusinessService, principal.organization_id).where(
+                BusinessService.id == payload.business_service_id
+            )
+        )
+        if business_service is None:
+            raise ResourceNotFoundError("Business service not found")
+    if payload.scenario_id is not None:
+        scenario = await session.scalar(
+            tenant_select(BusinessRiskScenario, principal.organization_id).where(
+                BusinessRiskScenario.id == payload.scenario_id
+            )
+        )
+        if scenario is None:
+            raise ResourceNotFoundError("Business risk scenario not found")
+    row = SecurityRiskSimulation(
+        organization_id=principal.organization_id,
+        status="completed",
+        acceptance_status="unreviewed",
+        narrative=None,
+        created_by_id=principal.user_id,
+        **payload.model_dump(),
+    )
+    row.narrative = (
+        f"Expected residual annual loss is {row.residual_annual_loss}; controls reduce "
+        f"the modeled inherent annual loss by {row.control_effectiveness * 100} percent."
+    )
+    session.add(row)
+    await session.flush()
+    await record(
+        session,
+        action="control_plane.risk.simulate",
+        principal=principal,
+        resource_type="security_risk_simulation",
+        resource_id=row.id,
+        detail={"residual_annual_loss": str(row.residual_annual_loss)},
+    )
+    return row
+
+
+async def list_risk_simulations(
+    session: AsyncSession, principal: Principal
+) -> list[SecurityRiskSimulation]:
+    principal.require(Permission.ORG_READ)
+    rows = await session.scalars(
+        tenant_select(SecurityRiskSimulation, principal.organization_id).order_by(
+            SecurityRiskSimulation.created_at.desc()
+        )
+    )
+    return list(rows.all())
+
+
 __all__ = [
+    "calculate_experience_score",
     "calculate_identity_confidence",
+    "canary_digest",
+    "correlation_key_for_event",
+    "create_canary",
     "create_policy",
+    "create_risk_simulation",
     "decide_recommendation",
     "evaluate_policy",
     "evaluate_resource_policy",
+    "experience_summary",
+    "ingest_event",
+    "list_canaries",
+    "list_events",
     "list_policies",
     "list_recommendations",
     "list_resources",
+    "list_risk_simulations",
+    "list_threat_stories",
+    "merge_story_values",
     "next_recommendation_status",
     "observation_fingerprint",
     "posture_summary",
     "reconcile_resource_values",
     "safe_metadata",
+    "source_address_digest",
+    "record_canary_interaction",
     "upsert_resource",
 ]

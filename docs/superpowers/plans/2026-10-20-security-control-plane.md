@@ -79,7 +79,7 @@
 - [x] Run tests and confirm evaluator is absent.
 - [x] Implement pure evaluator and persistence adapter.
 - [x] Run focused security, logging-redaction, and API tests.
-- [ ] Commit the data/AI protection slice.
+- [x] Commit the data/AI protection slice.
 
 ### Task 4: Experience, threat stories, deception, and risk simulation
 
@@ -91,10 +91,10 @@
 **Interfaces:**
 - Produces: idempotent telemetry ingestion, deterministic incident correlation, threat-story timelines, canary interaction escalation, and residual-loss simulations.
 
-- [ ] Write failing replay, correlation, canary, telemetry, and risk-math tests.
-- [ ] Run tests and confirm operations are absent.
-- [ ] Implement deterministic services and routes.
-- [ ] Run focused, audit, automation, and business-risk tests.
+- [x] Write failing replay, correlation, canary, telemetry, and risk-math tests.
+- [x] Run tests and confirm operations are absent.
+- [x] Implement deterministic services and routes.
+- [x] Run focused, audit, automation, and business-risk tests.
 - [ ] Commit the operations slice.
 
 ### Task 5: Enforcement adapters and Zscaler integration contracts

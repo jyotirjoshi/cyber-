@@ -177,6 +177,46 @@ class SecurityEventIn(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
+class SecurityEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    event_key: str
+    category: str
+    event_type: str
+    source_kind: str
+    occurred_at: dt.datetime
+    severity: str
+    summary: str
+    content_digest: str | None
+    asset_id: uuid.UUID | None
+    resource_id: uuid.UUID | None
+    identity_ref: str | None
+    metrics: dict[str, Any]
+    evidence: dict[str, Any]
+
+
+class ThreatStoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    correlation_key: str
+    title: str
+    status: str
+    severity: str
+    confidence: Decimal
+    summary: str
+    event_ids: list[str]
+    asset_ids: list[str]
+    finding_ids: list[str]
+    identity_refs: list[str]
+    timeline: list[dict[str, Any]]
+    first_seen_at: dt.datetime
+    last_seen_at: dt.datetime
+    assigned_user_id: uuid.UUID | None
+    resolution: str | None
+
+
 class DeceptionCanaryCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -185,6 +225,20 @@ class DeceptionCanaryCreateIn(BaseModel):
     token: str = Field(min_length=24, max_length=512, repr=False)
     asset_id: uuid.UUID | None = None
     placement: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeceptionCanaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    kind: str
+    token_digest: str
+    asset_id: uuid.UUID | None
+    status: str
+    placement: dict[str, Any]
+    last_triggered_at: dt.datetime | None
+    created_at: dt.datetime
 
 
 class CanaryInteractionIn(BaseModel):
@@ -197,6 +251,30 @@ class CanaryInteractionIn(BaseModel):
     protocol: str | None = Field(default=None, max_length=40)
     severity: Severity = "high"
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class CanaryInteractionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    canary_id: uuid.UUID
+    event_id: uuid.UUID | None
+    interaction_key: str
+    occurred_at: dt.datetime
+    source_ip_digest: str | None
+    identity_ref: str | None
+    protocol: str | None
+    severity: str
+    evidence: dict[str, Any]
+
+
+class ExperienceSummaryOut(BaseModel):
+    event_count: int
+    monitored_journeys: int
+    degraded_journeys: int
+    average_score: Decimal
+    business_impact: Literal["unknown", "low", "moderate", "high", "critical"]
+    latest_at: dt.datetime | None
 
 
 class RiskSimulationCreateIn(BaseModel):
@@ -286,12 +364,16 @@ __all__ = [
     "AIGatewayEvaluateIn",
     "AIGatewayEvaluateOut",
     "CanaryInteractionIn",
+    "CanaryInteractionOut",
     "DataClassificationIn",
     "DataClassificationOut",
     "DeceptionCanaryCreateIn",
+    "DeceptionCanaryOut",
+    "ExperienceSummaryOut",
     "RiskSimulationCreateIn",
     "RiskSimulationOut",
     "SecurityEventIn",
+    "SecurityEventOut",
     "SecurityPolicyCreateIn",
     "SecurityPolicyEvaluationOut",
     "SecurityPolicyOut",
@@ -300,4 +382,5 @@ __all__ = [
     "SecurityRecommendationDecisionIn",
     "SecurityResourceOut",
     "SecurityResourceUpsertIn",
+    "ThreatStoryOut",
 ]

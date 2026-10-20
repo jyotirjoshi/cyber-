@@ -10,8 +10,17 @@ from app.api.deps import DbSession, PrincipalDep
 from app.schemas.control_plane import (
     AIGatewayEvaluateIn,
     AIGatewayEvaluateOut,
+    CanaryInteractionIn,
+    CanaryInteractionOut,
     DataClassificationIn,
     DataClassificationOut,
+    DeceptionCanaryCreateIn,
+    DeceptionCanaryOut,
+    ExperienceSummaryOut,
+    RiskSimulationCreateIn,
+    RiskSimulationOut,
+    SecurityEventIn,
+    SecurityEventOut,
     SecurityPolicyCreateIn,
     SecurityPolicyEvaluationOut,
     SecurityPolicyOut,
@@ -20,6 +29,7 @@ from app.schemas.control_plane import (
     SecurityRecommendationOut,
     SecurityResourceOut,
     SecurityResourceUpsertIn,
+    ThreatStoryOut,
 )
 from app.services import ai_security
 from app.services import control_plane as service
@@ -45,6 +55,99 @@ async def classify_data(
     )
     await session.commit()
     return result
+
+
+@router.get("/events", response_model=list[SecurityEventOut])
+async def events(
+    principal: PrincipalDep,
+    session: DbSession,
+    category: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> list[SecurityEventOut]:
+    rows = await service.list_events(session, principal, category=category, limit=limit)
+    return [SecurityEventOut.model_validate(row) for row in rows]
+
+
+@router.post("/events", response_model=SecurityEventOut, status_code=status.HTTP_201_CREATED)
+async def ingest_event(
+    payload: SecurityEventIn, principal: PrincipalDep, session: DbSession
+) -> SecurityEventOut:
+    row = await service.ingest_event(session, principal, payload)
+    await session.commit()
+    return SecurityEventOut.model_validate(row)
+
+
+@router.get("/experience", response_model=ExperienceSummaryOut)
+async def experience(principal: PrincipalDep, session: DbSession) -> ExperienceSummaryOut:
+    return ExperienceSummaryOut.model_validate(await service.experience_summary(session, principal))
+
+
+@router.get("/threat-stories", response_model=list[ThreatStoryOut])
+async def threat_stories(
+    principal: PrincipalDep,
+    session: DbSession,
+    status_filter: str | None = Query(default=None, alias="status"),
+) -> list[ThreatStoryOut]:
+    rows = await service.list_threat_stories(session, principal, status=status_filter)
+    return [ThreatStoryOut.model_validate(row) for row in rows]
+
+
+@router.get("/canaries", response_model=list[DeceptionCanaryOut])
+async def canaries(principal: PrincipalDep, session: DbSession) -> list[DeceptionCanaryOut]:
+    return [
+        DeceptionCanaryOut.model_validate(row)
+        for row in await service.list_canaries(session, principal)
+    ]
+
+
+@router.post("/canaries", response_model=DeceptionCanaryOut, status_code=status.HTTP_201_CREATED)
+async def create_canary(
+    payload: DeceptionCanaryCreateIn, principal: PrincipalDep, session: DbSession
+) -> DeceptionCanaryOut:
+    row = await service.create_canary(session, principal, payload)
+    await session.commit()
+    return DeceptionCanaryOut.model_validate(row)
+
+
+@router.post(
+    "/canaries/{canary_id}/interactions",
+    response_model=CanaryInteractionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_canary_interaction(
+    canary_id: uuid.UUID,
+    payload: CanaryInteractionIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> CanaryInteractionOut:
+    row = await service.record_canary_interaction(
+        session, principal, canary_id, payload
+    )
+    await session.commit()
+    return CanaryInteractionOut.model_validate(row)
+
+
+@router.get("/risk-simulations", response_model=list[RiskSimulationOut])
+async def risk_simulations(
+    principal: PrincipalDep, session: DbSession
+) -> list[RiskSimulationOut]:
+    return [
+        RiskSimulationOut.model_validate(row)
+        for row in await service.list_risk_simulations(session, principal)
+    ]
+
+
+@router.post(
+    "/risk-simulations",
+    response_model=RiskSimulationOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_risk_simulation(
+    payload: RiskSimulationCreateIn, principal: PrincipalDep, session: DbSession
+) -> RiskSimulationOut:
+    row = await service.create_risk_simulation(session, principal, payload)
+    await session.commit()
+    return RiskSimulationOut.model_validate(row)
 
 
 @router.get("/resources", response_model=list[SecurityResourceOut])
