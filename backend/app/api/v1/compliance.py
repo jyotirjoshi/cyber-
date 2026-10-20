@@ -8,6 +8,13 @@ from typing import Literal
 from fastapi import APIRouter, Query, status
 
 from app.api.deps import DbSession, PrincipalDep
+from app.schemas.assurance import (
+    ComplianceEvidenceRequestCreateIn,
+    ComplianceEvidenceRequestOut,
+    ComplianceEvidenceRequestTransitionIn,
+    ComplianceInheritanceCreateIn,
+    ComplianceInheritanceOut,
+)
 from app.schemas.common import OkOut
 from app.schemas.compliance import (
     ComplianceAuditWorkspaceCreateIn,
@@ -26,9 +33,148 @@ from app.schemas.compliance import (
     ComplianceOverviewOut,
 )
 from app.services import compliance as compliance_service
+from app.services import compliance_automation
 from app.services.audit import AuditAction, record
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
+
+
+@router.get("/control-inheritances", response_model=list[ComplianceInheritanceOut])
+async def list_control_inheritances(
+    principal: PrincipalDep,
+    session: DbSession,
+    control_id: uuid.UUID | None = Query(default=None),
+) -> list[ComplianceInheritanceOut]:
+    return [
+        ComplianceInheritanceOut.model_validate(row)
+        for row in await compliance_automation.list_inheritances(
+            session, principal, control_id=control_id
+        )
+    ]
+
+
+@router.post(
+    "/control-inheritances",
+    response_model=ComplianceInheritanceOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_control_inheritance(
+    payload: ComplianceInheritanceCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceInheritanceOut:
+    row = await compliance_automation.create_inheritance(session, principal, payload)
+    await record(
+        session,
+        action="compliance.control_inheritance.create",
+        principal=principal,
+        resource_type="compliance_control_inheritance",
+        resource_id=row.id,
+        detail={
+            "control_id": str(row.control_id),
+            "parent_control_id": str(row.parent_control_id),
+            "responsibility": row.responsibility,
+        },
+    )
+    await session.commit()
+    return ComplianceInheritanceOut.model_validate(row)
+
+
+@router.delete("/control-inheritances/{inheritance_id}", response_model=OkOut)
+async def delete_control_inheritance(
+    inheritance_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> OkOut:
+    row = await compliance_automation.delete_inheritance(session, principal, inheritance_id)
+    await record(
+        session,
+        action="compliance.control_inheritance.delete",
+        principal=principal,
+        resource_type="compliance_control_inheritance",
+        resource_id=row.id,
+        detail={
+            "control_id": str(row.control_id),
+            "parent_control_id": str(row.parent_control_id),
+        },
+    )
+    await session.commit()
+    return OkOut()
+
+
+@router.get("/evidence-requests", response_model=list[ComplianceEvidenceRequestOut])
+async def list_evidence_requests(
+    principal: PrincipalDep,
+    session: DbSession,
+    workspace_id: uuid.UUID | None = Query(default=None),
+    request_status: Literal["open", "collecting", "submitted", "accepted", "rejected", "cancelled"]
+    | None = Query(default=None, alias="status"),
+) -> list[ComplianceEvidenceRequestOut]:
+    return [
+        ComplianceEvidenceRequestOut.model_validate(row)
+        for row in await compliance_automation.list_evidence_requests(
+            session,
+            principal,
+            workspace_id=workspace_id,
+            status=request_status,
+        )
+    ]
+
+
+@router.post(
+    "/evidence-requests",
+    response_model=ComplianceEvidenceRequestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_evidence_request(
+    payload: ComplianceEvidenceRequestCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceEvidenceRequestOut:
+    row = await compliance_automation.create_evidence_request(session, principal, payload)
+    await record(
+        session,
+        action="compliance.evidence_request.create",
+        principal=principal,
+        resource_type="compliance_evidence_request",
+        resource_id=row.id,
+        detail={
+            "workspace_id": str(row.workspace_id),
+            "control_id": str(row.control_id),
+            "due_at": row.due_at.isoformat() if row.due_at else None,
+        },
+    )
+    await session.commit()
+    return ComplianceEvidenceRequestOut.model_validate(row)
+
+
+@router.post(
+    "/evidence-requests/{request_id}/transition",
+    response_model=ComplianceEvidenceRequestOut,
+)
+async def transition_evidence_request(
+    request_id: uuid.UUID,
+    payload: ComplianceEvidenceRequestTransitionIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> ComplianceEvidenceRequestOut:
+    row = await compliance_automation.transition_evidence_request(
+        session, principal, request_id, payload
+    )
+    await record(
+        session,
+        action="compliance.evidence_request.transition",
+        principal=principal,
+        resource_type="compliance_evidence_request",
+        resource_id=row.id,
+        detail={
+            "from_status": payload.expected_status,
+            "to_status": row.status,
+            "evidence_count": len(row.fulfilled_evidence_ids),
+        },
+    )
+    await session.commit()
+    return ComplianceEvidenceRequestOut.model_validate(row)
 
 
 @router.get("/audit-workspaces", response_model=list[ComplianceAuditWorkspaceOut])

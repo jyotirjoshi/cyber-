@@ -1848,6 +1848,77 @@ export interface ComplianceOverviewOut {
   frameworks: ComplianceFrameworkSummaryOut[];
 }
 
+export interface ComplianceAuditWorkspaceOut {
+  id: string;
+  name: string;
+  framework: ComplianceFramework;
+  status: "draft" | "open" | "in_review" | "completed" | "archived";
+  control_ids: string[];
+  auditor_emails: string[];
+  starts_at: string | null;
+  due_at: string | null;
+  evidence_cutoff_at: string | null;
+  created_by_id: string | null;
+  created_at: string;
+}
+
+export interface ComplianceEvidenceOut {
+  id: string;
+  control_id: string;
+  title: string;
+  evidence_type: "artifact" | "report" | "screenshot" | "log" | "ticket" | "attestation" | "external_link";
+  source_reference: string;
+  content_sha256: string | null;
+  collection_status: "requested" | "collected" | "verified" | "rejected" | "expired";
+  collected_at: string | null;
+  valid_until: string | null;
+  collected_by_id: string | null;
+  verified_by_id: string | null;
+  review_note: string | null;
+  created_at: string;
+}
+
+export type ComplianceEvidenceRequestStatus =
+  | "open"
+  | "collecting"
+  | "submitted"
+  | "accepted"
+  | "rejected"
+  | "cancelled";
+
+export interface ComplianceEvidenceRequestOut {
+  id: string;
+  workspace_id: string;
+  control_id: string;
+  request_key: string;
+  title: string;
+  description: string;
+  assignee_user_id: string | null;
+  requested_by_id: string | null;
+  submitted_by_id: string | null;
+  reviewed_by_id: string | null;
+  status: ComplianceEvidenceRequestStatus;
+  freshness_days: number;
+  due_at: string | null;
+  fulfilled_evidence_ids: string[];
+  review_note: string | null;
+  status_changed_at: string;
+  submitted_at: string | null;
+  fulfilled_at: string | null;
+  created_at: string;
+}
+
+export interface ComplianceInheritanceOut {
+  id: string;
+  control_id: string;
+  parent_control_id: string;
+  source_system: string;
+  responsibility: "inherited" | "shared" | "customer";
+  inherited_percentage: string;
+  evidence_refs: string[];
+  created_at: string;
+}
+
 // ---------------------------------------------------------------------------
 // Agent conversation + runs (app/schemas/agent.py).
 // ---------------------------------------------------------------------------

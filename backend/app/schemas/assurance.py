@@ -587,6 +587,19 @@ class ComplianceInheritanceCreateIn(StrictModel):
     evidence_refs: list[str] = Field(default_factory=list, max_length=1000)
 
 
+class ComplianceInheritanceOut(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    control_id: uuid.UUID
+    parent_control_id: uuid.UUID
+    source_system: str
+    responsibility: str
+    inherited_percentage: Decimal
+    evidence_refs: list[str]
+    created_at: dt.datetime
+
+
 class ComplianceEvidenceRequestCreateIn(StrictModel):
     workspace_id: uuid.UUID
     control_id: uuid.UUID
@@ -596,6 +609,37 @@ class ComplianceEvidenceRequestCreateIn(StrictModel):
     assignee_user_id: uuid.UUID | None = None
     freshness_days: int = Field(default=90, ge=1, le=3650)
     due_at: dt.datetime | None = None
+
+
+class ComplianceEvidenceRequestTransitionIn(StrictModel):
+    expected_status: Literal["open", "collecting", "submitted", "accepted", "rejected"]
+    status: Literal["collecting", "submitted", "accepted", "rejected", "cancelled"]
+    evidence_ids: list[uuid.UUID] = Field(default_factory=list, max_length=1000)
+    note: str | None = Field(default=None, max_length=4000)
+
+
+class ComplianceEvidenceRequestOut(StrictModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    control_id: uuid.UUID
+    request_key: str
+    title: str
+    description: str
+    assignee_user_id: uuid.UUID | None
+    requested_by_id: uuid.UUID | None
+    submitted_by_id: uuid.UUID | None
+    reviewed_by_id: uuid.UUID | None
+    status: str
+    freshness_days: int
+    due_at: dt.datetime | None
+    fulfilled_evidence_ids: list[str]
+    review_note: str | None
+    status_changed_at: dt.datetime
+    submitted_at: dt.datetime | None
+    fulfilled_at: dt.datetime | None
+    created_at: dt.datetime
 
 
 class OSCALExportCreateIn(StrictModel):

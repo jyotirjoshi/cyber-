@@ -572,10 +572,24 @@ class ComplianceEvidenceRequest(Base, TenantMixin, TimestampMixin):
     assignee_user_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    requested_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    submitted_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
     freshness_days: Mapped[int] = mapped_column(Integer, nullable=False, default=90)
     due_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     fulfilled_evidence_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    review_note: Mapped[str | None] = mapped_column(Text)
+    status_changed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     fulfilled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (

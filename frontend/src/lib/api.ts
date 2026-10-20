@@ -81,7 +81,12 @@ import type {
   CanonicalStatusDecisionIn,
   CanonicalWorkIn,
   ComplianceControlOut,
+  ComplianceAuditWorkspaceOut,
+  ComplianceEvidenceOut,
+  ComplianceEvidenceRequestOut,
+  ComplianceEvidenceRequestStatus,
   ComplianceFramework,
+  ComplianceInheritanceOut,
   ComplianceOverviewOut,
   ChangePasswordIn,
   DashboardOut,
@@ -795,6 +800,59 @@ export const api = {
       }),
     seed: (framework: ComplianceFramework) =>
       request<ComplianceControlOut[]>("POST", `/compliance/frameworks/${framework}/seed`),
+    workspaces: () =>
+      request<ComplianceAuditWorkspaceOut[]>("GET", "/compliance/audit-workspaces"),
+    createWorkspace: (body: {
+      name: string;
+      framework: ComplianceFramework;
+      control_ids: string[];
+      auditor_emails: string[];
+      starts_at?: string | null;
+      due_at?: string | null;
+      evidence_cutoff_at?: string | null;
+    }) => request<ComplianceAuditWorkspaceOut>("POST", "/compliance/audit-workspaces", { body }),
+    evidence: (controlId: string) =>
+      request<ComplianceEvidenceOut[]>("GET", `/compliance/controls/${controlId}/evidence`),
+    addEvidence: (controlId: string, body: {
+      title: string;
+      evidence_type: ComplianceEvidenceOut["evidence_type"];
+      source_reference: string;
+      content_sha256?: string | null;
+      valid_until?: string | null;
+      metadata?: Record<string, unknown>;
+    }) => request<ComplianceEvidenceOut>("POST", `/compliance/controls/${controlId}/evidence`, { body }),
+    reviewEvidence: (evidenceId: string, body: { decision: "verified" | "rejected"; note: string }) =>
+      request<ComplianceEvidenceOut>("POST", `/compliance/evidence/${evidenceId}/review`, { body }),
+    evidenceRequests: (params?: { workspace_id?: string; status?: ComplianceEvidenceRequestStatus }) =>
+      request<ComplianceEvidenceRequestOut[]>("GET", "/compliance/evidence-requests", { query: params }),
+    createEvidenceRequest: (body: {
+      workspace_id: string;
+      control_id: string;
+      request_key: string;
+      title: string;
+      description: string;
+      assignee_user_id?: string | null;
+      freshness_days?: number;
+      due_at?: string | null;
+    }) => request<ComplianceEvidenceRequestOut>("POST", "/compliance/evidence-requests", { body }),
+    transitionEvidenceRequest: (id: string, body: {
+      expected_status: Exclude<ComplianceEvidenceRequestStatus, "cancelled">;
+      status: Exclude<ComplianceEvidenceRequestStatus, "open">;
+      evidence_ids?: string[];
+      note?: string | null;
+    }) => request<ComplianceEvidenceRequestOut>("POST", `/compliance/evidence-requests/${id}/transition`, { body }),
+    inheritances: (controlId?: string) =>
+      request<ComplianceInheritanceOut[]>("GET", "/compliance/control-inheritances", { query: controlId ? { control_id: controlId } : undefined }),
+    createInheritance: (body: {
+      control_id: string;
+      parent_control_id: string;
+      source_system: string;
+      responsibility: ComplianceInheritanceOut["responsibility"];
+      inherited_percentage: number;
+      evidence_refs: string[];
+    }) => request<ComplianceInheritanceOut>("POST", "/compliance/control-inheritances", { body }),
+    deleteInheritance: (id: string) =>
+      request<{ ok: boolean }>("DELETE", `/compliance/control-inheritances/${id}`),
   },
 
   assets: {
