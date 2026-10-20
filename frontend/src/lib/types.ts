@@ -3079,6 +3079,27 @@ export interface AssuranceSummary {
     metrics: Record<string, unknown>;
     finalized_at: IsoDateTime | null;
   }>;
+  agent_evaluations: {
+    suites: Array<{
+      id: Uuid;
+      suite_key: string;
+      name: string;
+      task_kind: string;
+      version: number;
+      case_count: number;
+      active: boolean;
+    }>;
+    runs: Array<{
+      id: Uuid;
+      suite_id: Uuid;
+      agent_version_id: Uuid;
+      status: string;
+      metrics: Record<string, string | number | boolean | null>;
+      failed_thresholds: string[];
+      passed: boolean;
+      completed_at: IsoDateTime;
+    }>;
+  };
   validation_recipes: Array<{
     id: Uuid;
     recipe_key: string;

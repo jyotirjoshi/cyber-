@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 from app.core.errors import ConflictError, ResourceNotFoundError
 from app.db.enums import Permission
 from app.db.models.assurance import (
+    AgentEvaluationRun,
+    AgentEvaluationSuite,
     AgentRunAssurance,
     AIInteractionReceipt,
     AIToolManifest,
@@ -591,6 +593,8 @@ async def assurance_summary(
     receipts = await recent(AIInteractionReceipt)
     manifests = await recent(AIToolManifest)
     agents = await recent(AgentRunAssurance)
+    evaluation_suites = await recent(AgentEvaluationSuite)
+    evaluation_runs = await recent(AgentEvaluationRun)
     recipes = await recent(ValidationRecipe)
     data_assessments = await recent(DataSecurityAssessment)
     responses = await recent(ThreatResponseAction)
@@ -645,6 +649,33 @@ async def assurance_summary(
             }
             for row in agents
         ],
+        "agent_evaluations": {
+            "suites": [
+                {
+                    "id": str(row.id),
+                    "suite_key": row.suite_key,
+                    "name": row.name,
+                    "task_kind": row.task_kind,
+                    "version": row.version,
+                    "case_count": len(row.case_manifest),
+                    "active": row.active,
+                }
+                for row in evaluation_suites
+            ],
+            "runs": [
+                {
+                    "id": str(row.id),
+                    "suite_id": str(row.suite_id),
+                    "agent_version_id": str(row.agent_version_id),
+                    "status": row.status,
+                    "metrics": row.metrics,
+                    "failed_thresholds": row.failed_thresholds,
+                    "passed": row.passed,
+                    "completed_at": row.completed_at,
+                }
+                for row in evaluation_runs
+            ],
+        },
         "validation_recipes": [
             {
                 "id": str(row.id),

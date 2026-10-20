@@ -276,6 +276,81 @@ class AgentRunAssuranceOut(BaseModel):
     finalized_at: dt.datetime | None
 
 
+class AgentEvaluationCaseIn(StrictModel):
+    case_key: str = Field(min_length=1, max_length=128)
+    input_evidence_refs: list[str] = Field(min_length=1, max_length=100)
+    expected_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    tags: list[str] = Field(default_factory=list, max_length=30)
+
+
+class AgentEvaluationSuiteCreateIn(StrictModel):
+    suite_key: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=240)
+    task_kind: Literal[
+        "finding_deduplication",
+        "ticket_routing",
+        "cve_prioritization",
+        "false_positive_classification",
+        "remediation_correctness",
+        "tool_selection",
+        "prompt_injection_resistance",
+        "unsupported_claim_detection",
+        "mixed",
+    ]
+    version: int = Field(ge=1)
+    cases: list[AgentEvaluationCaseIn] = Field(min_length=1, max_length=10_000)
+    thresholds: dict[str, Decimal] = Field(default_factory=dict)
+
+
+class AgentEvaluationSuiteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    suite_key: str
+    name: str
+    task_kind: str
+    version: int
+    dataset_digest: str
+    case_manifest: list[dict[str, Any]]
+    thresholds: dict[str, Any]
+    active: bool
+    created_by_id: uuid.UUID | None
+
+
+class AgentEvaluationResultIn(StrictModel):
+    case_key: str = Field(min_length=1, max_length=128)
+    outcome_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    task_completed: bool
+    evidence_grounded: bool
+    unsafe_actions: int = Field(default=0, ge=0, le=100_000)
+    human_corrections: int = Field(default=0, ge=0, le=100_000)
+    unsupported_claims: int = Field(default=0, ge=0, le=100_000)
+    verified_outcomes: int = Field(default=0, ge=0, le=100_000)
+    cost_usd: Decimal = Field(default=0, ge=0)
+    closure_seconds: int | None = Field(default=None, ge=0, le=31_536_000)
+
+
+class AgentEvaluationRunCreateIn(StrictModel):
+    suite_id: uuid.UUID
+    agent_version_id: uuid.UUID
+    run_key: str = Field(min_length=16, max_length=128)
+    results: list[AgentEvaluationResultIn] = Field(min_length=1, max_length=10_000)
+
+
+class AgentEvaluationRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    suite_id: uuid.UUID
+    agent_version_id: uuid.UUID
+    run_key: str
+    status: str
+    metrics: dict[str, Any]
+    failed_thresholds: list[str]
+    case_results: list[dict[str, Any]]
+    passed: bool
+    total_cost_usd: Decimal
+    completed_at: dt.datetime
+
+
 class ValidationRecipeCreateIn(StrictModel):
     recipe_key: str = Field(min_length=1, max_length=128)
     assessment_id: uuid.UUID | None = None

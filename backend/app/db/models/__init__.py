@@ -58,6 +58,8 @@ from app.db.models.asset import (
     AssetTag,
 )
 from app.db.models.assurance import (
+    AgentEvaluationRun,
+    AgentEvaluationSuite,
     AgentRunAssurance,
     AIAccessEdge,
     AIInteractionReceipt,
@@ -182,6 +184,8 @@ __all__ = [
     "AgentDefinition",
     "AgentDefinitionVersion",
     "AgentEvaluation",
+    "AgentEvaluationRun",
+    "AgentEvaluationSuite",
     "AgentTemplate",
     "AgentVersionCollection",
     "AgentVersionTool",

@@ -9,6 +9,10 @@ from fastapi import APIRouter, Query, status
 from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
 from app.integrations import control_enforcement
 from app.schemas.assurance import (
+    AgentEvaluationRunCreateIn,
+    AgentEvaluationRunOut,
+    AgentEvaluationSuiteCreateIn,
+    AgentEvaluationSuiteOut,
     AgentRunAssuranceCreateIn,
     AgentRunAssuranceFinalizeIn,
     AgentRunAssuranceOut,
@@ -70,6 +74,7 @@ from app.schemas.control_plane import (
     ThreatStoryOut,
 )
 from app.services import (
+    agent_evaluation,
     ai_runtime,
     ai_security,
     assurance_reporting,
@@ -205,6 +210,61 @@ async def query_ai_access_graph(
         max_depth=payload.max_depth,
     )
     return AIAccessGraphOut.model_validate(result)
+
+
+@router.get("/agent-evaluations/suites", response_model=list[AgentEvaluationSuiteOut])
+async def agent_evaluation_suites(
+    principal: PrincipalDep,
+    session: DbSession,
+    active_only: bool = True,
+) -> list[AgentEvaluationSuiteOut]:
+    rows = await agent_evaluation.list_evaluation_suites(
+        session, principal, active_only=active_only
+    )
+    return [AgentEvaluationSuiteOut.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/agent-evaluations/suites",
+    response_model=AgentEvaluationSuiteOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_agent_evaluation_suite(
+    payload: AgentEvaluationSuiteCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentEvaluationSuiteOut:
+    row = await agent_evaluation.create_evaluation_suite(session, principal, payload)
+    await session.commit()
+    return AgentEvaluationSuiteOut.model_validate(row)
+
+
+@router.get("/agent-evaluations/runs", response_model=list[AgentEvaluationRunOut])
+async def agent_evaluation_runs(
+    principal: PrincipalDep,
+    session: DbSession,
+    suite_id: uuid.UUID | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[AgentEvaluationRunOut]:
+    rows = await agent_evaluation.list_evaluation_runs(
+        session, principal, suite_id=suite_id, limit=limit
+    )
+    return [AgentEvaluationRunOut.model_validate(row) for row in rows]
+
+
+@router.post(
+    "/agent-evaluations/runs",
+    response_model=AgentEvaluationRunOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_agent_evaluation_run(
+    payload: AgentEvaluationRunCreateIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> AgentEvaluationRunOut:
+    row = await agent_evaluation.record_evaluation_run(session, principal, payload)
+    await session.commit()
+    return AgentEvaluationRunOut.model_validate(row)
 
 
 @router.post(

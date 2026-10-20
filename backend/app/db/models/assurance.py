@@ -246,6 +246,71 @@ class AgentRunAssurance(Base, TenantMixin, TimestampMixin):
     )
 
 
+class AgentEvaluationSuite(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "agent_evaluation_suites"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    suite_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(240), nullable=False)
+    task_kind: Mapped[str] = mapped_column(String(80), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    dataset_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    case_manifest: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    thresholds: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "suite_key", "version", name="unique_agent_evaluation_suite"
+        ),
+        CheckConstraint("version > 0", name="valid_agent_evaluation_suite_version"),
+        Index("ix_agent_evaluation_suites_org_active", "organization_id", "active"),
+    )
+
+
+class AgentEvaluationRun(Base, TenantMixin, TimestampMixin):
+    __tablename__ = "agent_evaluation_runs"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    suite_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("agent_evaluation_suites.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_version_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("agent_definition_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="completed")
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    failed_thresholds: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    case_results: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    total_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=0
+    )
+    completed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "run_key", name="unique_agent_evaluation_run_key"),
+        CheckConstraint(
+            "status IN ('completed','failed','superseded')",
+            name="valid_agent_evaluation_run_status",
+        ),
+        CheckConstraint("total_cost_usd >= 0", name="valid_agent_evaluation_run_cost"),
+        Index("ix_agent_evaluation_runs_org_suite", "organization_id", "suite_id"),
+    )
+
+
 class ValidationRecipe(Base, TenantMixin, TimestampMixin):
     __tablename__ = "validation_recipes"
 
@@ -568,6 +633,8 @@ __all__ = [
     "AIAccessEdge",
     "AIInteractionReceipt",
     "AIToolManifest",
+    "AgentEvaluationRun",
+    "AgentEvaluationSuite",
     "AgentRunAssurance",
     "ComplianceControlInheritance",
     "ComplianceEvidenceRequest",

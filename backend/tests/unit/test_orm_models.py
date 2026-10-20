@@ -337,6 +337,7 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
         ("ai_tool_manifests", "status"),
         ("ai_access_edges", "relation"),
         ("agent_run_assurance", "verifier_status"),
+        ("agent_evaluation_runs", "status"),
         ("validation_recipes", "exploitation_verdict"),
         ("validation_recipes", "status"),
         ("data_security_assessments", "scan_mode"),

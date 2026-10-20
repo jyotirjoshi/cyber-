@@ -24,6 +24,8 @@ EXPECTED_TABLES = {
     "compliance_control_inheritances",
     "compliance_evidence_requests",
     "compliance_export_packages",
+    "agent_evaluation_suites",
+    "agent_evaluation_runs",
 }
 
 
