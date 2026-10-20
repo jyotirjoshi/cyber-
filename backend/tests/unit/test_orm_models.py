@@ -218,12 +218,8 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
     EnumColumn("agent_tasks", "status", AgentTaskStatus),
     EnumColumn("agent_workspaces", "status", AgentWorkspaceStatus),
     EnumColumn("agent_workspace_artifacts", "kind", AgentWorkspaceArtifactKind),
-    EnumColumn(
-        "agent_workspace_credential_references", "status", AgentWorkspaceCredentialStatus
-    ),
-    EnumColumn(
-        "agent_workspace_executions", "execution_kind", AgentWorkspaceExecutionKind
-    ),
+    EnumColumn("agent_workspace_credential_references", "status", AgentWorkspaceCredentialStatus),
+    EnumColumn("agent_workspace_executions", "execution_kind", AgentWorkspaceExecutionKind),
     EnumColumn("agent_workspace_executions", "status", AgentWorkspaceExecutionStatus),
     EnumColumn("agent_task_dependencies", "dependency_kind", AgentTaskDependencyKind),
     EnumColumn("agent_task_attempts", "status", AgentTaskAttemptStatus),
@@ -245,14 +241,10 @@ ENUM_COLUMNS: tuple[EnumColumn, ...] = (
         "inbound_ticket_events",
         "provider",
         IntegrationKind,
-        narrowed_to=frozenset(
-            {"jira", "github", "gitlab", "servicenow", "azure_devops"}
-        ),
+        narrowed_to=frozenset({"jira", "github", "gitlab", "servicenow", "azure_devops"}),
         reason="Only providers with authenticated issue webhooks are accepted.",
     ),
-    EnumColumn(
-        "inbound_ticket_events", "processing_status", InboundTicketEventStatus
-    ),
+    EnumColumn("inbound_ticket_events", "processing_status", InboundTicketEventStatus),
     # --- notifications ----------------------------------------------------
     EnumColumn("notifications", "event", NotificationEvent),
     EnumColumn("notifications", "channel", NotificationChannel),
@@ -339,6 +331,22 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
         ("security_risk_simulations", "status"),
         ("security_threat_stories", "severity"),
         ("security_threat_stories", "status"),
+        ("enforcement_transactions", "status"),
+        ("ai_interaction_receipts", "decision"),
+        ("ai_interaction_receipts", "retention_mode"),
+        ("ai_tool_manifests", "status"),
+        ("ai_access_edges", "relation"),
+        ("agent_run_assurance", "verifier_status"),
+        ("validation_recipes", "exploitation_verdict"),
+        ("validation_recipes", "status"),
+        ("data_security_assessments", "scan_mode"),
+        ("threat_response_actions", "action_type"),
+        ("threat_response_actions", "status"),
+        ("risk_simulation_trials", "status"),
+        ("compliance_control_inheritances", "responsibility"),
+        ("compliance_evidence_requests", "status"),
+        ("compliance_export_packages", "oscal_model"),
+        ("compliance_export_packages", "status"),
     }
 )
 
