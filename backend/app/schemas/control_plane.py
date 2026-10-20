@@ -1,0 +1,227 @@
+"""Strict wire contracts for the unified security control plane."""
+
+from __future__ import annotations
+
+import datetime as dt
+import uuid
+from decimal import Decimal
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+Severity = Literal["info", "low", "medium", "high", "critical"]
+
+
+class SecurityResourceUpsertIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resource_key: str = Field(min_length=1, max_length=512)
+    kind: Literal[
+        "asset", "data_store", "dataset", "saas_application", "ai_application", "ai_model",
+        "ai_agent", "mcp_server", "ai_tool", "identity", "endpoint", "browser",
+    ]
+    name: str = Field(min_length=1, max_length=300)
+    source_kind: str = Field(min_length=1, max_length=80)
+    source_key: str = Field(min_length=1, max_length=512)
+    observed_at: dt.datetime
+    expires_at: dt.datetime | None = None
+    confidence: Decimal = Field(ge=0, le=1, max_digits=4, decimal_places=3)
+    provider: str | None = Field(default=None, max_length=80)
+    external_id: str | None = Field(default=None, max_length=512)
+    asset_id: uuid.UUID | None = None
+    owner_team: str | None = Field(default=None, max_length=120)
+    environment: Literal["production", "staging", "development", "test", "unknown"] = "unknown"
+    internet_exposed: bool = False
+    approved: bool | None = None
+    sensitivity: Literal["unknown", "public", "internal", "confidential", "restricted"] = "unknown"
+    classifications: list[str] = Field(default_factory=list, max_length=100)
+    permissions: dict[str, Any] = Field(default_factory=dict)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class SecurityResourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    resource_key: str
+    kind: str
+    name: str
+    provider: str | None
+    external_id: str | None
+    asset_id: uuid.UUID | None
+    owner_team: str | None
+    environment: str
+    internet_exposed: bool
+    approved: bool | None
+    posture_status: str
+    risk_score: Decimal
+    sensitivity: str
+    classifications: list[str]
+    permissions: dict[str, Any]
+    attributes: dict[str, Any]
+    provenance: dict[str, Any]
+    source_count: int
+    identity_confidence: Decimal
+    first_seen_at: dt.datetime
+    last_seen_at: dt.datetime
+
+
+class SecurityPolicyCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal[
+        "ztna", "secure_web_gateway", "firewall", "tls_inspection", "dlp", "casb", "sspm",
+        "ai_gateway", "ai_guard", "endpoint_isolation", "browser_isolation",
+    ]
+    mode: Literal["monitor", "recommend", "enforce"] = "recommend"
+    rules: dict[str, Any] = Field(default_factory=dict)
+    integration_id: uuid.UUID | None = None
+
+
+class SecurityPolicyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    kind: str
+    mode: str
+    status: str
+    version: int
+    rules: dict[str, Any]
+    integration_id: uuid.UUID | None
+    created_at: dt.datetime
+
+
+class SecurityRecommendationDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject", "apply"]
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class SecurityEventIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_key: str = Field(min_length=1, max_length=512)
+    category: Literal[
+        "experience", "incident", "identity", "deception", "access", "dlp", "ai_gateway",
+        "endpoint", "browser",
+    ]
+    event_type: str = Field(min_length=1, max_length=100)
+    source_kind: str = Field(min_length=1, max_length=80)
+    occurred_at: dt.datetime
+    severity: Severity = "info"
+    summary: str = Field(min_length=1, max_length=4000)
+    content_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    asset_id: uuid.UUID | None = None
+    resource_id: uuid.UUID | None = None
+    identity_ref: str | None = Field(default=None, max_length=512)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeceptionCanaryCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["credential", "dns", "http", "file", "cloud_resource", "identity"]
+    token: str = Field(min_length=24, max_length=512, repr=False)
+    asset_id: uuid.UUID | None = None
+    placement: dict[str, Any] = Field(default_factory=dict)
+
+
+class CanaryInteractionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interaction_key: str = Field(min_length=1, max_length=256)
+    occurred_at: dt.datetime
+    source_ip: str | None = Field(default=None, max_length=128, repr=False)
+    identity_ref: str | None = Field(default=None, max_length=512)
+    protocol: str | None = Field(default=None, max_length=40)
+    severity: Severity = "high"
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class RiskSimulationCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=240)
+    business_service_id: uuid.UUID | None = None
+    scenario_id: uuid.UUID | None = None
+    annual_probability: Decimal = Field(ge=0, le=1, max_digits=6, decimal_places=5)
+    loss_min: Decimal = Field(ge=0, max_digits=16, decimal_places=2)
+    loss_likely: Decimal = Field(ge=0, max_digits=16, decimal_places=2)
+    loss_max: Decimal = Field(ge=0, max_digits=16, decimal_places=2)
+    control_effectiveness: Decimal = Field(ge=0, le=1, max_digits=6, decimal_places=5)
+    assumptions: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def ordered_losses(self) -> RiskSimulationCreateIn:
+        if not self.loss_min <= self.loss_likely <= self.loss_max:
+            raise ValueError("loss estimates must be ordered min <= likely <= max")
+        return self
+
+
+class RiskSimulationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    business_service_id: uuid.UUID | None
+    scenario_id: uuid.UUID | None
+    status: str
+    annual_probability: Decimal
+    loss_min: Decimal
+    loss_likely: Decimal
+    loss_max: Decimal
+    control_effectiveness: Decimal
+    acceptance_status: str
+    expected_loss: Decimal
+    inherent_annual_loss: Decimal
+    residual_annual_loss: Decimal
+    assumptions: dict[str, Any]
+    evidence: dict[str, Any]
+    narrative: str | None
+
+
+class AIGatewayEvaluateIn(BaseModel):
+    """Transient content input. ``content`` is evaluated in memory and never stored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    direction: Literal["prompt", "output"]
+    content: str = Field(min_length=1, max_length=100_000, repr=False)
+    application_key: str | None = Field(default=None, max_length=512)
+    model_key: str | None = Field(default=None, max_length=512)
+    agent_key: str | None = Field(default=None, max_length=512)
+    tool_keys: list[str] = Field(default_factory=list, max_length=100)
+    requested_action: str | None = Field(default=None, max_length=200)
+
+
+class AIGatewayEvaluateOut(BaseModel):
+    decision: Literal["allow", "block", "redact", "require_approval"]
+    severity: Severity
+    score: Decimal
+    reasons: list[str]
+    content_digest: str
+    redacted_content: str | None = Field(default=None, repr=False)
+    approval_required: bool
+
+
+__all__ = [
+    "AIGatewayEvaluateIn",
+    "AIGatewayEvaluateOut",
+    "CanaryInteractionIn",
+    "DeceptionCanaryCreateIn",
+    "RiskSimulationCreateIn",
+    "RiskSimulationOut",
+    "SecurityEventIn",
+    "SecurityPolicyCreateIn",
+    "SecurityPolicyOut",
+    "SecurityRecommendationDecisionIn",
+    "SecurityResourceOut",
+    "SecurityResourceUpsertIn",
+]

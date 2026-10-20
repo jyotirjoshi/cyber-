@@ -85,6 +85,18 @@ from app.db.models.compliance import (
     ComplianceEvidenceItem,
     ComplianceFindingMapping,
 )
+from app.db.models.control_plane import (
+    SecurityCanary,
+    SecurityCanaryInteraction,
+    SecurityEvent,
+    SecurityPolicy,
+    SecurityPolicyEvaluation,
+    SecurityRecommendation,
+    SecurityResource,
+    SecurityResourceObservation,
+    SecurityRiskSimulation,
+    SecurityThreatStory,
+)
 from app.db.models.custom_connector import CustomConnector, CustomConnectorRun
 from app.db.models.engagement import (
     Engagement,
@@ -193,6 +205,16 @@ __all__ = [
     "ComplianceControlException",
     "ComplianceEvidenceItem",
     "ComplianceFindingMapping",
+    "SecurityCanary",
+    "SecurityCanaryInteraction",
+    "SecurityEvent",
+    "SecurityPolicy",
+    "SecurityPolicyEvaluation",
+    "SecurityRecommendation",
+    "SecurityResource",
+    "SecurityResourceObservation",
+    "SecurityRiskSimulation",
+    "SecurityThreatStory",
     "CustomConnector",
     "CustomConnectorRun",
     "AssessmentCanonicalFinding",
