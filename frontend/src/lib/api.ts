@@ -203,6 +203,7 @@ import type {
   AIGatewayDecision,
   AssuranceSummary,
   DataClassification,
+  NativeAIPostureAssessment,
   SecurityCanary,
   SecurityExperienceSummary,
   SecurityPolicy,
@@ -963,8 +964,29 @@ export const api = {
         query: { limit },
       }),
     posture: () => request<SecurityPosture>("GET", "/control-plane/posture"),
+    runNativeAIPosture: () =>
+      request<NativeAIPostureAssessment>("POST", "/control-plane/native-posture/assess"),
     resources: (params?: { kind?: string; posture_status?: string; limit?: number }) =>
       request<SecurityResource[]>("GET", "/control-plane/resources", { query: params }),
+    registerResource: (body: {
+      resource_key: string;
+      kind: SecurityResource["kind"];
+      name: string;
+      source_kind: string;
+      source_key: string;
+      observed_at: string;
+      confidence: number;
+      provider?: string | null;
+      owner_team?: string | null;
+      environment?: "production" | "staging" | "development" | "test" | "unknown";
+      internet_exposed?: boolean;
+      approved?: boolean | null;
+      sensitivity?: "unknown" | "public" | "internal" | "confidential" | "restricted";
+      classifications?: string[];
+      permissions?: Record<string, unknown>;
+      attributes?: Record<string, unknown>;
+      provenance?: Record<string, unknown>;
+    }) => request<SecurityResource>("POST", "/control-plane/resources", { body }),
     policies: () => request<SecurityPolicy[]>("GET", "/control-plane/policies"),
     createPolicy: (body: {
       name: string;

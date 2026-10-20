@@ -20,6 +20,7 @@ import type {
   AIGatewayDecision,
   AssuranceSummary,
   DataClassification,
+  NativeAIPostureAssessment,
   SecurityCanary,
   SecurityExperienceSummary,
   SecurityPolicy,
@@ -57,11 +58,14 @@ export default function ControlPlanePage() {
   const canaries = useApiResource(() => api.controlPlane.canaries(), [], { enabled: canRead });
   const risks = useApiResource(() => api.controlPlane.riskSimulations(), [], { enabled: canRead });
   const assurance = useApiResource(() => api.controlPlane.assuranceSummary(), [], { enabled: canRead });
+  const [nativeResult, setNativeResult] = React.useState<NativeAIPostureAssessment | null>(null);
   const refresh = React.useCallback(() => {
     posture.refetch(); resources.refetch(); policies.refetch(); recommendations.refetch();
     stories.refetch(); experience.refetch(); canaries.refetch(); risks.refetch(); assurance.refetch();
   }, [posture, resources, policies, recommendations, stories, experience, canaries, risks, assurance]);
-  const sync = useMutation(() => api.controlPlane.syncZscaler(), { onSuccess: refresh });
+  const nativePosture = useMutation(() => api.controlPlane.runNativeAIPosture(), {
+    onSuccess: (result) => { setNativeResult(result); refresh(); },
+  });
 
   if (!canRead) return <EmptyState title="No access" description="You do not have permission to view the security control plane." />;
 
@@ -70,16 +74,17 @@ export default function ControlPlanePage() {
       <PageHeader
         title="Security control plane"
         description="Reconcile exposure, data, AI, identity, experience, and threat signals into governed policy actions."
-        actions={canManage ? <Button loading={sync.loading} onClick={() => void sync.run()}>Sync Zscaler</Button> : undefined}
+        actions={canManage ? <Button loading={nativePosture.loading} onClick={() => void nativePosture.run()}>Run native posture</Button> : undefined}
       />
-      {sync.errorMessage && <p role="alert" className="text-sm text-danger">{sync.errorMessage}</p>}
+      {nativePosture.errorMessage && <p role="alert" className="text-sm text-danger">{nativePosture.errorMessage}</p>}
+      {nativeResult && <Card><CardBody className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm"><Badge tone={nativeResult.critical_resources ? "danger" : nativeResult.at_risk_resources ? "warn" : "ok"}>Native assessment complete</Badge><span>{nativeResult.assessed_resources} AI resources assessed</span><span>{nativeResult.at_risk_resources} at risk</span><span>{nativeResult.recommendations_created} new recommendations</span><span className="text-muted">No external connector required</span></CardBody></Card>}
       <div className="flex gap-2 overflow-x-auto border-b border-line pb-2">
         {WORKSPACES.map((item) => <Button key={item.id} size="sm" variant={workspace === item.id ? "primary" : "ghost"} onClick={() => setWorkspace(item.id)}>{item.label}</Button>)}
       </div>
 
       {workspace === "overview" && <Overview posture={posture} recommendations={recommendations} canManage={canManage} onChanged={refresh} />}
       {workspace === "assurance" && <AssuranceRuntime resource={assurance} />}
-      {workspace === "resources" && <Inventory resource={resources} />}
+      {workspace === "resources" && <Inventory resource={resources} canManage={canManage} onChanged={refresh} />}
       {workspace === "policies" && <Policies resource={policies} canManage={canManage} onChanged={refresh} />}
       {workspace === "ai-data" && <AIDataWorkspace />}
       {workspace === "soc" && <SocWorkspace stories={stories} experience={experience} />}
@@ -125,11 +130,44 @@ function Overview({ posture, recommendations, canManage, onChanged }: { posture:
   </div>;
 }
 
-function Inventory({ resource }: { resource: UseApiResourceResult<SecurityResource[]> }) {
+function Inventory({ resource, canManage, onChanged }: { resource: UseApiResourceResult<SecurityResource[]>; canManage: boolean; onChanged: () => void }) {
+  const [form, setForm] = React.useState({
+    name: "",
+    kind: "ai_application" as SecurityResource["kind"],
+    owner_team: "",
+    environment: "production" as "production" | "staging" | "development" | "test" | "unknown",
+    sensitivity: "internal" as "unknown" | "public" | "internal" | "confidential" | "restricted",
+    internet_exposed: false,
+    approved: false,
+  });
+  const register = useMutation(() => {
+    const id = crypto.randomUUID();
+    return api.controlPlane.registerResource({
+      resource_key: `cynux:native:${form.kind}:${id}`,
+      kind: form.kind,
+      name: form.name,
+      source_kind: "cynux_native",
+      source_key: id,
+      observed_at: new Date().toISOString(),
+      confidence: 1,
+      provider: "cynux",
+      owner_team: form.owner_team || null,
+      environment: form.environment,
+      internet_exposed: form.internet_exposed,
+      approved: form.approved,
+      sensitivity: form.sensitivity,
+      classifications: ["native_inventory"],
+      permissions: {},
+      attributes: { authentication: form.internet_exposed ? "unknown" : "private" },
+      provenance: { acquisition: "user_registered" },
+    });
+  }, { onSuccess: () => { setForm((value) => ({ ...value, name: "" })); onChanged(); } });
   if (resource.loading && !resource.data) return <LoadingState label="Loading unified inventory…" />;
   if (resource.error) return <ErrorState message={resource.error} onRetry={resource.refetch} />;
-  if (!resource.data?.length) return <EmptyState title="No reconciled resources" description="Connect Zscaler, cloud, identity, endpoint, and SaaS sources to build the golden inventory." />;
-  return <Card><CardBody><Table><THead><TR><TH>Resource</TH><TH>Kind</TH><TH>Owner</TH><TH>Sources</TH><TH>Confidence</TH><TH>Posture</TH><TH>Last seen</TH></TR></THead><TBody>{resource.data.map((item) => <TR key={item.id}><TD><p className="font-medium text-fg">{item.name}</p><p className="text-xs text-muted">{item.provider ?? "curated"} · {item.environment}</p></TD><TD>{humanize(item.kind)}</TD><TD>{item.owner_team ?? "Unassigned"}</TD><TD>{item.source_count}</TD><TD>{(Number(item.identity_confidence) * 100).toFixed(1)}%</TD><TD><Badge tone={item.posture_status === "healthy" ? "ok" : item.posture_status === "inactive" ? "neutral" : "warn"}>{humanize(item.posture_status)}</Badge></TD><TD>{formatDateTime(item.last_seen_at)}</TD></TR>)}</TBody></Table></CardBody></Card>;
+  return <div className="space-y-4">
+    {canManage && <Card><CardHeader><CardTitle>Register native AI resource</CardTitle></CardHeader><CardBody><form className="grid gap-3 md:grid-cols-3" onSubmit={(event) => { event.preventDefault(); void register.run(); }}><Field label="Resource name" htmlFor="native-resource-name"><Input id="native-resource-name" required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field><Field label="Resource kind" htmlFor="native-resource-kind"><select id="native-resource-kind" className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm" value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value as SecurityResource["kind"] })}>{["ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"].map((value) => <option key={value} value={value}>{humanize(value)}</option>)}</select></Field><Field label="Owner team" htmlFor="native-resource-owner"><Input id="native-resource-owner" value={form.owner_team} onChange={(event) => setForm({ ...form, owner_team: event.target.value })} /></Field><Field label="Environment" htmlFor="native-resource-environment"><select id="native-resource-environment" className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm" value={form.environment} onChange={(event) => setForm({ ...form, environment: event.target.value as typeof form.environment })}>{["production", "staging", "development", "test", "unknown"].map((value) => <option key={value} value={value}>{humanize(value)}</option>)}</select></Field><Field label="Data sensitivity" htmlFor="native-resource-sensitivity"><select id="native-resource-sensitivity" className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm" value={form.sensitivity} onChange={(event) => setForm({ ...form, sensitivity: event.target.value as typeof form.sensitivity })}>{["unknown", "public", "internal", "confidential", "restricted"].map((value) => <option key={value} value={value}>{humanize(value)}</option>)}</select></Field><div className="flex items-end gap-4 pb-2"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.internet_exposed} onChange={(event) => setForm({ ...form, internet_exposed: event.target.checked })} />Internet exposed</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.approved} onChange={(event) => setForm({ ...form, approved: event.target.checked })} />Approved</label></div>{register.errorMessage && <p role="alert" className="text-sm text-danger md:col-span-3">{register.errorMessage}</p>}<div className="md:col-span-3"><Button type="submit" loading={register.loading}>Register resource</Button></div></form></CardBody></Card>}
+    <Card><CardBody>{!resource.data?.length ? <EmptyState title="No resources yet" description="Register an AI resource here or deploy a Cynux collector for continuous discovery. Third-party connectors are optional." /> : <Table><THead><TR><TH>Resource</TH><TH>Kind</TH><TH>Owner</TH><TH>Sources</TH><TH>Confidence</TH><TH>Posture</TH><TH>Last seen</TH></TR></THead><TBody>{resource.data.map((item) => <TR key={item.id}><TD><p className="font-medium text-fg">{item.name}</p><p className="text-xs text-muted">{item.provider ?? "curated"} · {item.environment}</p></TD><TD>{humanize(item.kind)}</TD><TD>{item.owner_team ?? "Unassigned"}</TD><TD>{item.source_count}</TD><TD>{(Number(item.identity_confidence) * 100).toFixed(1)}%</TD><TD><Badge tone={item.posture_status === "healthy" ? "ok" : item.posture_status === "inactive" ? "neutral" : "warn"}>{humanize(item.posture_status)}</Badge></TD><TD>{formatDateTime(item.last_seen_at)}</TD></TR>)}</TBody></Table>}</CardBody></Card>
+  </div>;
 }
 
 function Policies({ resource, canManage, onChanged }: { resource: UseApiResourceResult<SecurityPolicy[]>; canManage: boolean; onChanged: () => void }) {

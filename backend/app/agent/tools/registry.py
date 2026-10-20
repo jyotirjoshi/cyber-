@@ -148,7 +148,7 @@ def _action_executor(action: str) -> ToolExecutor:
 
 _EXTERNAL_WRITES = frozenset({"create_jira_ticket", "create_ticket", "update_github_alert"})
 _ACTIVE_SECURITY = frozenset({"start_assessment"})
-_IDEMPOTENT_ACTIONS = frozenset({"refresh_ticket_status"})
+_IDEMPOTENT_ACTIONS = frozenset({"refresh_ticket_status", "run_native_ai_posture"})
 
 
 @lru_cache(maxsize=1)

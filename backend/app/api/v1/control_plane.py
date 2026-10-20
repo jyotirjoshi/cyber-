@@ -59,6 +59,7 @@ from app.schemas.control_plane import (
     DeceptionCanaryCreateIn,
     DeceptionCanaryOut,
     ExperienceSummaryOut,
+    NativeAIPostureAssessmentOut,
     RiskSimulationCreateIn,
     RiskSimulationOut,
     SecurityEventIn,
@@ -712,6 +713,15 @@ async def upsert_resource(
 @router.get("/posture", response_model=SecurityPostureOut)
 async def posture(principal: PrincipalDep, session: DbSession) -> SecurityPostureOut:
     return SecurityPostureOut.model_validate(await service.posture_summary(session, principal))
+
+
+@router.post("/native-posture/assess", response_model=NativeAIPostureAssessmentOut)
+async def assess_native_ai_posture(
+    principal: PrincipalDep, session: DbSession
+) -> NativeAIPostureAssessmentOut:
+    result = await service.run_native_ai_posture_assessment(session, principal)
+    await session.commit()
+    return NativeAIPostureAssessmentOut.model_validate(result)
 
 
 @router.get("/policies", response_model=list[SecurityPolicyOut])

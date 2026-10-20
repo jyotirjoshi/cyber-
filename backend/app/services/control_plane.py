@@ -139,6 +139,147 @@ def evaluate_resource_policy(*, resource: dict[str, Any], rules: dict[str, Any])
     return {"decision": decision, "severity": severity, "score": score, "findings": findings}
 
 
+_AI_RESOURCE_KINDS = frozenset(
+    {"ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"}
+)
+
+
+def evaluate_native_ai_posture(resource: dict[str, Any]) -> dict[str, Any]:
+    """Assess AI assets using Cynux-owned posture logic and normalized metadata.
+
+    This evaluator is intentionally connector- and model-independent.  A resource can be
+    entered by a user, discovered by a Cynux collector, or produced by an agent and is then
+    assessed with the same bounded rule vocabulary.
+    """
+
+    if resource.get("kind") not in _AI_RESOURCE_KINDS:
+        return {
+            "decision": "not_applicable",
+            "severity": "info",
+            "score": Decimal("0.00"),
+            "findings": [],
+            "recommended_controls": [],
+        }
+
+    findings: list[dict[str, Any]] = []
+    controls: list[str] = []
+    score = Decimal("0")
+
+    def add(code: str, message: str, weight: str, control: str) -> None:
+        nonlocal score
+        findings.append({"code": code, "message": message, "weight": weight})
+        controls.append(control)
+        score += Decimal(weight)
+
+    attributes = resource.get("attributes") or {}
+    permissions = resource.get("permissions") or {}
+    if not isinstance(attributes, dict):
+        attributes = {}
+    if not isinstance(permissions, dict):
+        permissions = {}
+
+    if resource.get("approved") is not True:
+        add(
+            "unapproved_ai_resource",
+            "AI resource has not completed organizational approval",
+            "20",
+            "Complete owner and security approval before production use",
+        )
+    if not resource.get("owner_team"):
+        add(
+            "ai_owner_missing",
+            "AI resource has no accountable owner",
+            "10",
+            "Assign an accountable team and escalation contact",
+        )
+    if (
+        resource.get("internet_exposed")
+        and resource.get("sensitivity") in {"confidential", "restricted"}
+    ):
+        add(
+            "sensitive_ai_endpoint_exposed",
+            "Internet-exposed AI resource handles sensitive data",
+            "25",
+            "Restrict network exposure or place the endpoint behind governed access",
+        )
+
+    authentication = str(attributes.get("authentication", "")).strip().casefold()
+    if resource.get("internet_exposed") and authentication in {"", "none", "anonymous"}:
+        add(
+            "anonymous_ai_access",
+            "Internet-exposed AI resource does not declare strong authentication",
+            "20",
+            "Require workload identity or SSO and disable anonymous access",
+        )
+
+    principals = permissions.get("principals", [])
+    if isinstance(principals, str):
+        principals = [principals]
+    if isinstance(principals, list) and any(
+        str(value).strip().casefold() in {"*", "all", "public", "anonymous"}
+        for value in principals
+    ):
+        add(
+            "wildcard_principal",
+            "AI resource grants access to a wildcard or public principal",
+            "20",
+            "Replace wildcard access with named least-privilege identities",
+        )
+
+    scopes = permissions.get("tool_scopes", [])
+    if isinstance(scopes, str):
+        scopes = [scopes]
+    privileged_scopes = {"admin", "owner", "root", "write", "execute", "*"}
+    if isinstance(scopes, list) and any(
+        str(value).strip().casefold() in privileged_scopes for value in scopes
+    ):
+        add(
+            "privileged_tool_scope",
+            "AI resource can invoke privileged tool operations",
+            "15",
+            "Limit tool scopes and require approval for state-changing operations",
+        )
+
+    data_connections = attributes.get("data_connections", [])
+    if isinstance(data_connections, dict):
+        data_connections = [data_connections]
+    if isinstance(data_connections, list) and any(
+        isinstance(item, dict) and item.get("reviewed") is not True
+        for item in data_connections
+    ):
+        add(
+            "unreviewed_data_connection",
+            "AI resource has a data connection without a completed review",
+            "15",
+            "Review, classify, and approve each connected data source",
+        )
+
+    if attributes.get("configuration_drift") is True:
+        add(
+            "configuration_drift",
+            "Observed AI configuration differs from its approved baseline",
+            "15",
+            "Restore the approved configuration or approve the recorded change",
+        )
+
+    score = min(Decimal("100"), score).quantize(_MONEY)
+    if score >= 80:
+        severity, decision = "critical", "block"
+    elif score >= 50:
+        severity, decision = "high", "require_approval"
+    elif score > 0:
+        severity, decision = "medium", "recommend"
+    else:
+        severity, decision = "info", "allow"
+    return {
+        "decision": decision,
+        "severity": severity,
+        "score": score,
+        "findings": findings,
+        "recommended_controls": controls,
+    }
+
+
 def next_recommendation_status(current: str, action: str) -> str:
     transitions = {
         ("proposed", "approve"): "approved",
@@ -571,6 +712,214 @@ async def evaluate_policy(
         detail={"evaluated_resources": len(results)},
     )
     return results
+
+
+_NATIVE_AI_POLICY_NAME = "Cynux Native AI Security Baseline"
+_NATIVE_AI_POLICY_VERSION = 1
+
+
+async def run_native_ai_posture_assessment(
+    session: AsyncSession, principal: Principal
+) -> dict[str, Any]:
+    """Assess and prioritize every normalized AI resource without a provider API.
+
+    The operation is safe to repeat.  Evaluations are immutable run evidence, while
+    recommendations use finding-aware idempotency keys and obsolete proposals are
+    superseded when the posture changes.
+    """
+
+    principal.require(Permission.INTEGRATION_MANAGE)
+    policy = await session.scalar(
+        tenant_select(SecurityPolicy, principal.organization_id).where(
+            SecurityPolicy.name == _NATIVE_AI_POLICY_NAME
+        )
+    )
+    if policy is None:
+        policy = SecurityPolicy(
+            organization_id=principal.organization_id,
+            name=_NATIVE_AI_POLICY_NAME,
+            kind="ai_guard",
+            mode="recommend",
+            status="active",
+            version=_NATIVE_AI_POLICY_VERSION,
+            rules={
+                "engine": "cynux-native-ai-posture",
+                "engine_version": _NATIVE_AI_POLICY_VERSION,
+                "external_connector_required": False,
+            },
+            integration_id=None,
+            created_by_id=principal.user_id,
+        )
+        session.add(policy)
+        await session.flush()
+
+    resources = await list_resources(session, principal, limit=10_000)
+    ai_resources = [item for item in resources if item.kind in _AI_RESOURCE_KINDS]
+    now = dt.datetime.now(dt.UTC)
+    evaluation_ids: list[uuid.UUID] = []
+    recommendation_ids: list[uuid.UUID] = []
+    finding_counts: dict[str, int] = {}
+    compliant = 0
+    at_risk = 0
+    critical = 0
+    created = 0
+
+    for resource in ai_resources:
+        previous_posture_status = resource.posture_status
+        previous_risk_score = str(resource.risk_score)
+        decision = evaluate_native_ai_posture(resource.as_dict())
+        content = {
+            "engine_version": _NATIVE_AI_POLICY_VERSION,
+            "resource_id": str(resource.id),
+            "decision": decision["decision"],
+            "score": str(decision["score"]),
+            "finding_codes": sorted(item["code"] for item in decision["findings"]),
+        }
+        digest = hashlib.sha256(
+            json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        evaluation = SecurityPolicyEvaluation(
+            organization_id=principal.organization_id,
+            policy_id=policy.id,
+            resource_id=resource.id,
+            decision=decision["decision"],
+            severity=decision["severity"],
+            score=decision["score"],
+            findings=decision["findings"],
+            evidence={
+                "engine": "cynux-native-ai-posture",
+                "engine_version": _NATIVE_AI_POLICY_VERSION,
+                "external_connector_required": False,
+                "resource_key": resource.resource_key,
+                "recommended_controls": decision["recommended_controls"],
+            },
+            content_digest=digest,
+            evaluated_at=now,
+        )
+        session.add(evaluation)
+        await session.flush()
+        evaluation_ids.append(evaluation.id)
+
+        for finding in decision["findings"]:
+            code = str(finding["code"])
+            finding_counts[code] = finding_counts.get(code, 0) + 1
+
+        resource.risk_score = decision["score"]
+        if decision["decision"] == "allow":
+            resource.posture_status = "healthy"
+            compliant += 1
+        elif decision["severity"] == "critical":
+            resource.posture_status = "non_compliant"
+            critical += 1
+            at_risk += 1
+        else:
+            resource.posture_status = "at_risk"
+            at_risk += 1
+
+        active_recommendations = list(
+            (
+                await session.scalars(
+                    tenant_select(SecurityRecommendation, principal.organization_id).where(
+                        SecurityRecommendation.resource_id == resource.id,
+                        SecurityRecommendation.policy_id == policy.id,
+                        SecurityRecommendation.status.in_(
+                            ["proposed", "approved", "failed"]
+                        ),
+                    )
+                )
+            ).all()
+        )
+        if decision["decision"] == "allow":
+            for previous in active_recommendations:
+                previous.status = "superseded"
+            continue
+
+        finding_codes = sorted(item["code"] for item in decision["findings"])
+        key = hashlib.sha256(
+            (
+                f"native-ai-posture:v{_NATIVE_AI_POLICY_VERSION}:"
+                f"{resource.id}:{','.join(finding_codes)}"
+            ).encode()
+        ).hexdigest()
+        recommendation = next(
+            (item for item in active_recommendations if item.idempotency_key == key), None
+        )
+        for previous in active_recommendations:
+            if previous.idempotency_key != key:
+                previous.status = "superseded"
+        if recommendation is None:
+            recommendation = await session.scalar(
+                tenant_select(SecurityRecommendation, principal.organization_id).where(
+                    SecurityRecommendation.idempotency_key == key
+                )
+            )
+        if recommendation is not None and recommendation.status in {
+            "applied",
+            "rejected",
+            "superseded",
+        }:
+            recommendation.status = "proposed"
+            recommendation.provider_receipt = {}
+            recommendation.applied_by_id = None
+            recommendation.applied_at = None
+        if recommendation is None:
+            recommendation = SecurityRecommendation(
+                organization_id=principal.organization_id,
+                policy_id=policy.id,
+                resource_id=resource.id,
+                asset_id=resource.asset_id,
+                integration_id=None,
+                domain="ai_security",
+                title=f"Harden native AI posture for {resource.name}",
+                rationale="; ".join(item["message"] for item in decision["findings"]),
+                action="native.remediate_ai_posture",
+                severity=decision["severity"],
+                status="proposed",
+                current_state={
+                    "posture_status": previous_posture_status,
+                    "risk_score": previous_risk_score,
+                    "finding_codes": finding_codes,
+                },
+                desired_state={
+                    "posture_status": "healthy",
+                    "risk_score": "0.00",
+                    "controls": decision["recommended_controls"],
+                    "external_connector_required": False,
+                },
+                idempotency_key=key,
+                provider_receipt={},
+                created_by_id=principal.user_id,
+            )
+            session.add(recommendation)
+            await session.flush()
+            created += 1
+        recommendation_ids.append(recommendation.id)
+
+    await session.flush()
+    await record(
+        session,
+        action="control_plane.native_ai_posture.assess",
+        principal=principal,
+        resource_type="security_policy",
+        resource_id=policy.id,
+        detail={
+            "assessed_resources": len(ai_resources),
+            "at_risk_resources": at_risk,
+            "recommendations_created": created,
+        },
+    )
+    return {
+        "policy_id": policy.id,
+        "assessed_resources": len(ai_resources),
+        "compliant_resources": compliant,
+        "at_risk_resources": at_risk,
+        "critical_resources": critical,
+        "recommendations_created": created,
+        "evaluation_ids": evaluation_ids,
+        "recommendation_ids": recommendation_ids,
+        "finding_counts": finding_counts,
+        "external_connector_required": False,
+    }
 
 
 async def list_recommendations(

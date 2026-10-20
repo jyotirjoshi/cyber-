@@ -511,6 +511,74 @@ def test_assessment_action_requires_exact_authorized_target() -> None:
         )
 
 
+def test_native_posture_action_has_a_zero_secret_contract() -> None:
+    from app.services.agent_action import registered_action_names, validate_action_payload
+
+    assert "run_native_ai_posture" in registered_action_names()
+    assert validate_action_payload("run_native_ai_posture", {}) == {}
+    with pytest.raises(ValueError):
+        validate_action_payload("run_native_ai_posture", {"provider": "zscaler"})
+
+
+@pytest.mark.asyncio
+async def test_approved_native_posture_action_records_bounded_evidence(monkeypatch) -> None:
+    from app.db.base import utcnow
+    from app.services import agent_action
+
+    principal = Principal(user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER)
+    row = agent_action.new_agent_action(
+        organization_id=principal.organization_id,
+        session_id=uuid.uuid4(),
+        requested_by_user_id=principal.user_id,
+        action="run_native_ai_posture",
+        label="Run native AI posture",
+        rationale=None,
+        payload={},
+    )
+    row.status = "approved"
+    row.approved_by_user_id = principal.user_id
+    row.resolved_at = utcnow()
+    policy_id = uuid.uuid4()
+    recommendation_id = uuid.uuid4()
+
+    async def fake_assessment(session, actor):
+        assert actor.organization_id == principal.organization_id
+        return {
+            "policy_id": policy_id,
+            "assessed_resources": 7,
+            "compliant_resources": 5,
+            "at_risk_resources": 2,
+            "critical_resources": 1,
+            "recommendation_ids": [recommendation_id],
+        }
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        agent_action.control_plane_service,
+        "run_native_ai_posture_assessment",
+        fake_assessment,
+    )
+    monkeypatch.setattr(agent_action.audit_service, "record", fake_audit)
+
+    result = await agent_action.execute_approved_action(
+        object(), principal, row, settings=object(), redis=None
+    )
+
+    assert result.status == "executed"
+    assert result.execution_evidence == {
+        "outcome": "assessed",
+        "resource": {"type": "native_ai_posture_assessment", "id": str(policy_id)},
+        "assessed_resources": 7,
+        "compliant_resources": 5,
+        "at_risk_resources": 2,
+        "critical_resources": 1,
+        "recommendation_ids": [str(recommendation_id)],
+        "external_connector_required": False,
+    }
+
+
 @pytest.mark.parametrize(
     "target",
     [

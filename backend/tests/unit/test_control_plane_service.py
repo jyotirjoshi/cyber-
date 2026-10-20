@@ -90,6 +90,82 @@ def test_resource_policy_evaluation_is_deterministic() -> None:
     }
 
 
+def test_native_ai_posture_detects_toxic_access_without_an_external_connector() -> None:
+    from app.services.control_plane import evaluate_native_ai_posture
+
+    decision = evaluate_native_ai_posture(
+        {
+            "kind": "ai_agent",
+            "approved": False,
+            "owner_team": None,
+            "internet_exposed": True,
+            "sensitivity": "restricted",
+            "classifications": [],
+            "permissions": {
+                "principals": ["*"],
+                "tool_scopes": ["admin", "write"],
+            },
+            "attributes": {
+                "authentication": "none",
+                "data_connections": [{"name": "customer-db", "reviewed": False}],
+                "configuration_drift": True,
+            },
+        }
+    )
+
+    assert decision["decision"] == "block"
+    assert decision["severity"] == "critical"
+    assert decision["score"] == Decimal("100.00")
+    assert {item["code"] for item in decision["findings"]} == {
+        "unapproved_ai_resource",
+        "ai_owner_missing",
+        "sensitive_ai_endpoint_exposed",
+        "anonymous_ai_access",
+        "wildcard_principal",
+        "privileged_tool_scope",
+        "unreviewed_data_connection",
+        "configuration_drift",
+    }
+
+
+def test_native_ai_posture_allows_a_governed_resource() -> None:
+    from app.services.control_plane import evaluate_native_ai_posture
+
+    decision = evaluate_native_ai_posture(
+        {
+            "kind": "ai_model",
+            "approved": True,
+            "owner_team": "AI Platform",
+            "internet_exposed": False,
+            "sensitivity": "internal",
+            "classifications": ["model"],
+            "permissions": {"principals": ["group:ai-platform"], "tool_scopes": ["read"]},
+            "attributes": {
+                "authentication": "oidc",
+                "data_connections": [{"name": "catalog", "reviewed": True}],
+                "configuration_drift": False,
+            },
+        }
+    )
+
+    assert decision == {
+        "decision": "allow",
+        "severity": "info",
+        "score": Decimal("0.00"),
+        "findings": [],
+        "recommended_controls": [],
+    }
+
+
+def test_native_ai_posture_marks_non_ai_resources_not_applicable() -> None:
+    from app.services.control_plane import evaluate_native_ai_posture
+
+    decision = evaluate_native_ai_posture({"kind": "endpoint"})
+
+    assert decision["decision"] == "not_applicable"
+    assert decision["score"] == Decimal("0.00")
+
+
 def test_recommendation_transition_rejects_invalid_or_replayed_actions() -> None:
     from app.core.errors import ConflictError
     from app.services.control_plane import next_recommendation_status
@@ -109,4 +185,5 @@ def test_control_plane_routes_are_mounted() -> None:
     assert "/control-plane/resources" in paths
     assert "/control-plane/posture" in paths
     assert "/control-plane/policies" in paths
+    assert "/control-plane/native-posture/assess" in paths
     assert "/control-plane/recommendations/{recommendation_id}/decision" in paths

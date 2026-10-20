@@ -30,6 +30,17 @@ def test_sync_request_plans_only_sources_explicitly_named_by_user() -> None:
     assert plan_chat_actions("I tried to sync GitHub but it failed") == []
 
 
+def test_native_ai_posture_request_needs_no_provider_connection() -> None:
+    from app.services.agent_chat_actions import plan_chat_actions
+
+    plans = plan_chat_actions("Please run the native AI posture assessment now")
+    assert [(item.action, item.payload) for item in plans] == [
+        ("run_native_ai_posture", {}),
+    ]
+    assert plan_chat_actions("What does the native AI posture assessment do?") == []
+    assert plan_chat_actions("Do not run the native AI posture assessment") == []
+
+
 def test_negated_clauses_do_not_cancel_separate_explicit_work() -> None:
     from app.services.agent_chat_actions import plan_chat_actions
 

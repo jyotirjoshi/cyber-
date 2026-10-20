@@ -214,7 +214,7 @@ class AgentAction(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','sync_qualys_host_detections','sync_rapid7_vulnerabilities','sync_wiz_issues','sync_prisma_cloud_alerts','sync_crowdstrike_vulnerabilities','sync_aws_security_hub_findings','sync_aws_inspector_findings','sync_hackerone_reports','sync_bugcrowd_submissions','sync_checkmarx_results','sync_fortify_issues','sync_azure_defender_alerts','sync_gcp_scc_findings','sync_burp_dast_findings','update_github_alert','create_jira_ticket','create_ticket','refresh_ticket_status','update_canonical_work','bulk_update_canonical_work','request_retest','request_remediation_group_retests','request_risk_acceptance','start_assessment')",
+            "action IN ('sync_github_alerts','sync_gitlab_alerts','sync_wazuh_alerts','sync_sonarqube_alerts','sync_snyk_issues','sync_tenable_vulnerabilities','sync_qualys_host_detections','sync_rapid7_vulnerabilities','sync_wiz_issues','sync_prisma_cloud_alerts','sync_crowdstrike_vulnerabilities','sync_aws_security_hub_findings','sync_aws_inspector_findings','sync_hackerone_reports','sync_bugcrowd_submissions','sync_checkmarx_results','sync_fortify_issues','sync_azure_defender_alerts','sync_gcp_scc_findings','sync_burp_dast_findings','update_github_alert','create_jira_ticket','create_ticket','refresh_ticket_status','update_canonical_work','bulk_update_canonical_work','request_retest','request_remediation_group_retests','request_risk_acceptance','start_assessment','run_native_ai_posture')",
             name="valid_agent_action",
         ),
         CheckConstraint(

@@ -149,6 +149,19 @@ class SecurityPostureOut(BaseModel):
     average_identity_confidence: Decimal
 
 
+class NativeAIPostureAssessmentOut(BaseModel):
+    policy_id: uuid.UUID
+    assessed_resources: int
+    compliant_resources: int
+    at_risk_resources: int
+    critical_resources: int
+    recommendations_created: int
+    evaluation_ids: list[uuid.UUID]
+    recommendation_ids: list[uuid.UUID]
+    finding_counts: dict[str, int]
+    external_connector_required: bool
+
+
 class SecurityRecommendationDecisionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -376,6 +389,7 @@ __all__ = [
     "SecurityEventOut",
     "SecurityPolicyCreateIn",
     "SecurityPolicyEvaluationOut",
+    "NativeAIPostureAssessmentOut",
     "SecurityPolicyOut",
     "SecurityPostureOut",
     "SecurityRecommendationOut",

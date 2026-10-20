@@ -46,6 +46,7 @@ from app.schemas.external_alert import ExternalAlertSourceActionIn
 from app.services import assessment as assessment_service
 from app.services import audit as audit_service
 from app.services import canonical_work as canonical_work_service
+from app.services import control_plane as control_plane_service
 from app.services import external_alert as external_alert_service
 from app.services import remediation_governance as remediation_governance_service
 from app.services import ticket as ticket_service
@@ -223,6 +224,7 @@ _ACTION_PERMISSIONS: dict[str, Permission] = {
     "request_remediation_group_retests": Permission.FINDING_VALIDATE,
     "request_risk_acceptance": Permission.FINDING_REMEDIATE,
     "start_assessment": Permission.ASSESSMENT_CREATE,
+    "run_native_ai_posture": Permission.INTEGRATION_MANAGE,
 }
 
 # Monitored autonomy is intentionally narrow. These operations synchronize a tenant's
@@ -251,6 +253,7 @@ MONITORED_AUTONOMY_ACTIONS: frozenset[str] = frozenset(
         "sync_gcp_scc_findings",
         "sync_burp_dast_findings",
         "refresh_ticket_status",
+        "run_native_ai_posture",
     }
 )
 _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
@@ -297,6 +300,7 @@ _ALLOWED_PAYLOAD_KEYS: dict[str, frozenset[str]] = {
     "request_remediation_group_retests": frozenset({"remediation_group", "note"}),
     "request_risk_acceptance": frozenset({"finding_id", "rationale", "expires_at"}),
     "start_assessment": frozenset({"target", "authorization_reference"}),
+    "run_native_ai_posture": frozenset(),
 }
 _SECRET_KEY_PARTS = frozenset({"token", "secret", "password", "credential", "api_key"})
 
@@ -961,6 +965,27 @@ async def execute_approved_action(
             "outcome": "created",
             "resource": {"type": "risk_acceptance", "id": str(acceptance.id)},
             "canonical_finding_id": payload["finding_id"],
+        }
+    elif proposed.action == "run_native_ai_posture":
+        result = await control_plane_service.run_native_ai_posture_assessment(
+            session, principal
+        )
+        summary = (
+            f"Native AI posture assessed {result['assessed_resources']} resources; "
+            f"{result['at_risk_resources']} require attention"
+        )
+        evidence = {
+            "outcome": "assessed",
+            "resource": {
+                "type": "native_ai_posture_assessment",
+                "id": str(result["policy_id"]),
+            },
+            "assessed_resources": result["assessed_resources"],
+            "compliant_resources": result["compliant_resources"],
+            "at_risk_resources": result["at_risk_resources"],
+            "critical_resources": result["critical_resources"],
+            "recommendation_ids": [str(value) for value in result["recommendation_ids"]],
+            "external_connector_required": False,
         }
     elif proposed.action == "start_assessment":
         assessment = await assessment_service.create_assessment(

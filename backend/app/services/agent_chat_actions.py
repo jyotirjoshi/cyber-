@@ -42,13 +42,13 @@ from app.services.context import Principal
 _NEGATION = re.compile(
     r"\b(?:do not|don't|dont|can't|cannot|never|without|except|excluding|not yet|"
     r"not\s+to\s+me|not\s+(?:to\s+)?(?:sync|refresh|import|pull|fetch|create|open|"
-    r"file|assign|triage|investigate|prepare|reopen|retest|scan|assess|github|gitlab|wazuh|sonarqube|snyk|tenable))\b",
+    r"file|assign|triage|investigate|prepare|reopen|retest|scan|assess|run|github|gitlab|wazuh|sonarqube|snyk|tenable))\b",
     re.I,
 )
 _EXPLANATORY_QUESTION = re.compile(r"^\s*(?:why|how|what|when|where)\b", re.I)
 _ACTION_CLAUSE_START = (
     r"(?:please\s+)?(?:sync|refresh|import|pull|fetch|create|open|file|reopen|"
-    r"triage|investigate|prepare\s+remediation\s+for|assign|scan|assess|retest)\b"
+    r"triage|investigate|prepare\s+remediation\s+for|assign|scan|assess|retest|run)\b"
 )
 _CLAUSE_BOUNDARY = re.compile(
     rf"\s*(?:[;—]|\bbut\b|,\s*(?={_ACTION_CLAUSE_START})|"
@@ -421,6 +421,8 @@ def _actionable_clauses(question: str) -> tuple[str, set[str], bool]:
             blocked.add("update_canonical_work")
         if re.search(r"\bgithub\s+alert\b", clause, re.I):
             blocked.add("update_github_alert")
+        if re.search(r"\bnative\s+ai\s+posture(?:\s+assessment)?\b", clause, re.I):
+            blocked.add("run_native_ai_posture")
     return ". ".join(positive), blocked, scan_negated
 
 
@@ -439,6 +441,18 @@ def plan_chat_actions(question: str) -> list[ChatActionPlan]:
         if not application_scope.strip():
             return []
     plans: list[ChatActionPlan] = []
+    if (
+        "run_native_ai_posture" not in blocked
+        and _explicit_request(question, "run|assess|evaluate")
+        and re.search(r"\bnative\s+ai\s+posture(?:\s+assessment)?\b", question, re.I)
+    ):
+        plans.append(
+            ChatActionPlan(
+                "run_native_ai_posture",
+                "Assess the native AI inventory posture",
+                {},
+            )
+        )
     group_retest = _REMEDIATION_GROUP_RETEST.search(question)
     if group_retest:
         remediation_group = next(value for value in group_retest.groups() if value).strip()

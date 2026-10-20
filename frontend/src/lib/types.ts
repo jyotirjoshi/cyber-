@@ -2981,6 +2981,19 @@ export interface SecurityPosture {
   average_identity_confidence: string;
 }
 
+export interface NativeAIPostureAssessment {
+  policy_id: Uuid;
+  assessed_resources: number;
+  compliant_resources: number;
+  at_risk_resources: number;
+  critical_resources: number;
+  recommendations_created: number;
+  evaluation_ids: Uuid[];
+  recommendation_ids: Uuid[];
+  finding_counts: Record<string, number>;
+  external_connector_required: false;
+}
+
 export type SecurityPolicyKind =
   | "ztna" | "secure_web_gateway" | "firewall" | "tls_inspection" | "dlp" | "casb"
   | "sspm" | "ai_gateway" | "ai_guard" | "endpoint_isolation" | "browser_isolation";
