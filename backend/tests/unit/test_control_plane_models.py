@@ -13,10 +13,9 @@ def test_control_plane_module_exists() -> None:
 
 
 def test_control_plane_models_are_registered_with_expected_tables() -> None:
-    from app.db.base import Base
-
     # Importing the model package is the registration boundary used by Alembic.
     import app.db.models  # noqa: F401
+    from app.db.base import Base
 
     expected = {
         "security_resources",

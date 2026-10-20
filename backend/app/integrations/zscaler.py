@@ -6,7 +6,11 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from app.core.config import Settings
-from app.core.errors import IntegrationError, IntegrationNotConfiguredError, InvalidConfigurationError
+from app.core.errors import (
+    IntegrationError,
+    IntegrationNotConfiguredError,
+    InvalidConfigurationError,
+)
 from app.integrations.circuit import BreakerConfig
 from app.integrations.control_enforcement import EnforcementCommand
 from app.integrations.http import ResilientClient, RetryPolicy, build_client, reveal

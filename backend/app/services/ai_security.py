@@ -12,7 +12,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,9 +24,12 @@ from app.schemas.control_plane import (
     AIGatewayEvaluateIn,
     AIGatewayEvaluateOut,
     DataClassificationOut,
+    Severity,
 )
 from app.services.audit import record
 from app.services.context import Principal
+
+Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +41,7 @@ class AIAuditProjection:
     match_counts: dict[str, int]
 
 
-_PATTERNS: tuple[tuple[str, str, str], ...] = (
+_PATTERNS: tuple[tuple[str, str, Sensitivity], ...] = (
     ("private_key", r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "restricted"),
     ("aws_access_key", r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "restricted"),
     ("bearer_token", r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}", "restricted"),
@@ -86,7 +89,7 @@ def _valid_card(candidate: str) -> bool:
 def classify_sensitive_data(content: str) -> DataClassificationOut:
     labels: list[str] = []
     counts: dict[str, int] = {}
-    sensitivity = "public"
+    sensitivity: Sensitivity = "public"
     redacted = content
     for label, pattern, level in _PATTERNS:
         compiled = re.compile(pattern, re.IGNORECASE)
@@ -102,8 +105,16 @@ def classify_sensitive_data(content: str) -> DataClassificationOut:
         # Re-evaluate against the progressively redacted text to avoid retaining a
         # second raw copy or managing overlapping indexes.
         if label == "payment_card":
+
+            def redact_card(match: re.Match[str], replacement_label: str = label) -> str:
+                return (
+                    f"[REDACTED:{replacement_label}]"
+                    if _valid_card(match.group(0))
+                    else match.group(0)
+                )
+
             redacted = compiled.sub(
-                lambda match: f"[REDACTED:{label}]" if _valid_card(match.group(0)) else match.group(0),
+                redact_card,
                 redacted,
             )
         else:
@@ -160,7 +171,7 @@ def evaluate_ai_content(
         score += Decimal("30")
 
     if injection and policy_rules.get("block_prompt_injection", True):
-        decision = "block"
+        decision: Literal["allow", "block", "redact", "require_approval"] = "block"
     elif unapproved_tools or action_needs_approval:
         decision = "require_approval"
     elif classification.labels and policy_rules.get("redact_sensitive_data", True):
@@ -168,8 +179,16 @@ def evaluate_ai_content(
     else:
         decision = "allow"
     score = min(Decimal("100"), score).quantize(Decimal("0.01"))
-    severity = (
-        "critical" if score >= 80 else "high" if score >= 50 else "medium" if score >= 20 else "low" if score else "info"
+    severity: Severity = (
+        "critical"
+        if score >= 80
+        else "high"
+        if score >= 50
+        else "medium"
+        if score >= 20
+        else "low"
+        if score
+        else "info"
     )
     return AIGatewayEvaluateOut(
         decision=decision,
@@ -266,7 +285,11 @@ async def classify_and_record(
         event_type="content_classified",
         source_kind="cynux_data_security",
         occurred_at=dt.datetime.now(dt.UTC),
-        severity="high" if result.highest_sensitivity == "restricted" else "medium" if result.labels else "info",
+        severity="high"
+        if result.highest_sensitivity == "restricted"
+        else "medium"
+        if result.labels
+        else "info",
         summary="Transient content classified by data security policy",
         content_digest=result.content_digest,
         metrics={"content_length": len(content), "match_counts": result.match_counts},

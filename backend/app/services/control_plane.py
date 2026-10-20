@@ -6,10 +6,9 @@ import datetime as dt
 import hashlib
 import json
 import uuid
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, ResourceNotFoundError
@@ -101,9 +100,7 @@ def reconcile_resource_values(
     return merged
 
 
-def evaluate_resource_policy(
-    *, resource: dict[str, Any], rules: dict[str, Any]
-) -> dict[str, Any]:
+def evaluate_resource_policy(*, resource: dict[str, Any], rules: dict[str, Any]) -> dict[str, Any]:
     """Evaluate the bounded rule vocabulary; no model output participates in decisions."""
 
     findings: list[dict[str, Any]] = []
@@ -114,11 +111,16 @@ def evaluate_resource_policy(
     denied = set(rules.get("deny_internet_exposed_sensitivities", []))
     if resource.get("internet_exposed") and resource.get("sensitivity") in denied:
         findings.append(
-            {"code": "sensitive_resource_exposed", "message": "Sensitive resource is internet exposed"}
+            {
+                "code": "sensitive_resource_exposed",
+                "message": "Sensitive resource is internet exposed",
+            }
         )
         score += Decimal("40")
     max_risk = rules.get("max_risk_score")
-    if max_risk is not None and Decimal(str(resource.get("risk_score", 0))) > Decimal(str(max_risk)):
+    if max_risk is not None and Decimal(str(resource.get("risk_score", 0))) > Decimal(
+        str(max_risk)
+    ):
         findings.append({"code": "risk_threshold_exceeded", "message": "Risk score exceeds policy"})
         score += Decimal("25")
     required_owner = bool(rules.get("require_owner"))
@@ -229,11 +231,11 @@ def calculate_experience_score(
 
 
 def canary_digest(token: str) -> str:
-    return hashlib.sha256(f"cynux-canary:{token}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"cynux-canary:{token}".encode()).hexdigest()
 
 
 def source_address_digest(address: str) -> str:
-    return hashlib.sha256(f"cynux-source:{address.casefold()}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"cynux-source:{address.casefold()}".encode()).hexdigest()
 
 
 async def _assert_optional_refs(
@@ -297,11 +299,10 @@ async def upsert_resource(
         session.add(resource)
         await session.flush()
     else:
-        current = {
-            key: getattr(resource, key)
-            for key in observed_values
-        }
-        for key, value in reconcile_resource_values(current=current, observed=observed_values).items():
+        current = {key: getattr(resource, key) for key in observed_values}
+        for key, value in reconcile_resource_values(
+            current=current, observed=observed_values
+        ).items():
             setattr(resource, key, value)
         resource.first_seen_at = min(resource.first_seen_at, payload.observed_at)
         resource.last_seen_at = max(resource.last_seen_at, payload.observed_at)
@@ -406,24 +407,32 @@ async def posture_summary(session: AsyncSession, principal: Principal) -> dict[s
     )
     now = dt.datetime.now(dt.UTC)
     source_coverage: dict[str, int] = {}
-    for item in observations:
-        source_coverage[item.source_kind] = source_coverage.get(item.source_kind, 0) + 1
+    for observation in observations:
+        source_coverage[observation.source_kind] = (
+            source_coverage.get(observation.source_kind, 0) + 1
+        )
     kind_coverage: dict[str, int] = {}
-    for item in resources:
-        kind_coverage[item.kind] = kind_coverage.get(item.kind, 0) + 1
+    for resource in resources:
+        kind_coverage[resource.kind] = kind_coverage.get(resource.kind, 0) + 1
     ai_kinds = {"ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"}
     confidences = [Decimal(str(item.identity_confidence)) for item in resources]
     average = sum(confidences, Decimal("0")) / max(1, len(confidences))
     return {
         "total_resources": len(resources),
         "active_sources": len(source_coverage),
-        "stale_resources": sum(1 for item in resources if item.last_seen_at < now - dt.timedelta(days=30)),
+        "stale_resources": sum(
+            1 for item in resources if item.last_seen_at < now - dt.timedelta(days=30)
+        ),
         "unknown_owner": sum(1 for item in resources if not item.owner_team),
         "internet_exposed": sum(1 for item in resources if item.internet_exposed),
         "non_compliant": sum(1 for item in resources if item.posture_status == "non_compliant"),
         "at_risk": sum(1 for item in resources if item.posture_status == "at_risk"),
-        "approved_ai": sum(1 for item in resources if item.kind in ai_kinds and item.approved is True),
-        "unapproved_ai": sum(1 for item in resources if item.kind in ai_kinds and item.approved is not True),
+        "approved_ai": sum(
+            1 for item in resources if item.kind in ai_kinds and item.approved is True
+        ),
+        "unapproved_ai": sum(
+            1 for item in resources if item.kind in ai_kinds and item.approved is not True
+        ),
         "source_coverage": source_coverage,
         "kind_coverage": kind_coverage,
         "average_identity_confidence": average.quantize(_CONFIDENCE, rounding=ROUND_HALF_UP),
@@ -486,7 +495,9 @@ async def evaluate_policy(
 ) -> list[SecurityPolicyEvaluation]:
     principal.require(Permission.INTEGRATION_MANAGE)
     policy = await session.scalar(
-        tenant_select(SecurityPolicy, principal.organization_id).where(SecurityPolicy.id == policy_id)
+        tenant_select(SecurityPolicy, principal.organization_id).where(
+            SecurityPolicy.id == policy_id
+        )
     )
     if policy is None:
         raise ResourceNotFoundError("Policy not found")
@@ -530,7 +541,11 @@ async def evaluate_policy(
                         resource_id=resource.id,
                         asset_id=resource.asset_id,
                         integration_id=policy.integration_id,
-                        domain=policy.kind if policy.kind in {"ztna", "secure_web_gateway", "firewall"} else "ai_security" if policy.kind in {"ai_gateway", "ai_guard"} else "data_security",
+                        domain=policy.kind
+                        if policy.kind in {"ztna", "secure_web_gateway", "firewall"}
+                        else "ai_security"
+                        if policy.kind in {"ai_gateway", "ai_guard"}
+                        else "data_security",
                         title=f"Resolve {policy.name} violation on {resource.name}",
                         rationale="; ".join(item["message"] for item in decision["findings"]),
                         action=enforcement_actions.get(policy.kind, f"remediate_{policy.kind}"),
@@ -565,7 +580,9 @@ async def list_recommendations(
     query = tenant_select(SecurityRecommendation, principal.organization_id)
     if status:
         query = query.where(SecurityRecommendation.status == status)
-    rows = await session.scalars(query.order_by(SecurityRecommendation.created_at.desc()).limit(500))
+    rows = await session.scalars(
+        query.order_by(SecurityRecommendation.created_at.desc()).limit(500)
+    )
     return list(rows.all())
 
 
@@ -759,9 +776,9 @@ async def experience_summary(session: AsyncSession, principal: Principal) -> dic
         journeys.add(journey)
         if score < 70:
             degraded.add(journey)
-    average = (
-        sum(scores, Decimal("0")) / len(scores) if scores else Decimal("0")
-    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    average = (sum(scores, Decimal("0")) / len(scores) if scores else Decimal("0")).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
     impact = (
         "unknown"
         if not scores

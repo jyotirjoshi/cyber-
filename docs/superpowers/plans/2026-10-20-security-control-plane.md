@@ -131,7 +131,7 @@
 - [x] Write failing client projection and decision-label tests.
 - [x] Implement typed API methods and operator UI.
 - [x] Run frontend tests, typecheck, and production build.
-- [ ] Commit the UI slice.
+- [x] Commit the UI slice.
 
 ### Task 7: Release verification
 
@@ -142,8 +142,8 @@
 - Consumes: all prior task contracts.
 - Produces: one migration-safe release candidate.
 
-- [ ] Run backend focused/full relevant suites, migration parity, lint, frontend tests, typecheck, and production build.
-- [ ] Review upgrade/downgrade behavior and worker compatibility.
-- [ ] Commit and push the release branch.
+- [x] Run backend focused/full relevant suites, migration parity, lint, frontend tests, typecheck, and production build.
+- [x] Review upgrade/downgrade behavior and worker compatibility.
+- [ ] Commit the release verification fixes; push only when explicitly requested.
 - [ ] Deploy only when explicitly requested in this turn.
 

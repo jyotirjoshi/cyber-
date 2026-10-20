@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import datetime as dt
 import uuid
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -93,8 +93,8 @@ async def apply_recommendation(
     """Apply one approved recommendation through its tenant-owned connector."""
 
     # Local import avoids a module cycle: integration service imports provider clients.
-    from app.services.integration import resolve_settings
     from app.integrations.zscaler import ZscalerClient
+    from app.services.integration import resolve_settings
 
     principal.require(Permission.INTEGRATION_MANAGE)
     recommendation = await session.scalar(
@@ -192,9 +192,9 @@ async def sync_zscaler_inventory(
 ) -> int:
     """Reconcile ZPA/ZIA inventory into the canonical resource graph."""
 
+    from app.integrations.zscaler import ZscalerClient
     from app.services import control_plane
     from app.services.integration import find_integration, resolve_settings
-    from app.integrations.zscaler import ZscalerClient
 
     principal.require(Permission.INTEGRATION_MANAGE)
     integration = await find_integration(session, principal, IntegrationKind.ZSCALER)
