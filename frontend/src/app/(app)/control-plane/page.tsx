@@ -14,9 +14,11 @@ import { useApiResource, useMutation, type UseApiResourceResult } from "@/hooks/
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { projectPostureCards, recommendationDecisionLabel, riskTone } from "@/lib/control-plane";
+import { assuranceStatusTone } from "@/lib/assurance-runtime";
 import { formatDateTime, humanize } from "@/lib/format";
 import type {
   AIGatewayDecision,
+  AssuranceSummary,
   DataClassification,
   SecurityCanary,
   SecurityExperienceSummary,
@@ -29,9 +31,10 @@ import type {
   SecurityThreatStory,
 } from "@/lib/types";
 
-type Workspace = "overview" | "resources" | "policies" | "ai-data" | "soc" | "deception" | "risk";
+type Workspace = "overview" | "assurance" | "resources" | "policies" | "ai-data" | "soc" | "deception" | "risk";
 const WORKSPACES: Array<{ id: Workspace; label: string }> = [
   { id: "overview", label: "Posture" },
+  { id: "assurance", label: "Assurance runtime" },
   { id: "resources", label: "Inventory" },
   { id: "policies", label: "Policies" },
   { id: "ai-data", label: "AI & data" },
@@ -53,10 +56,11 @@ export default function ControlPlanePage() {
   const experience = useApiResource(() => api.controlPlane.experience(), [], { enabled: canRead });
   const canaries = useApiResource(() => api.controlPlane.canaries(), [], { enabled: canRead });
   const risks = useApiResource(() => api.controlPlane.riskSimulations(), [], { enabled: canRead });
+  const assurance = useApiResource(() => api.controlPlane.assuranceSummary(), [], { enabled: canRead });
   const refresh = React.useCallback(() => {
     posture.refetch(); resources.refetch(); policies.refetch(); recommendations.refetch();
-    stories.refetch(); experience.refetch(); canaries.refetch(); risks.refetch();
-  }, [posture, resources, policies, recommendations, stories, experience, canaries, risks]);
+    stories.refetch(); experience.refetch(); canaries.refetch(); risks.refetch(); assurance.refetch();
+  }, [posture, resources, policies, recommendations, stories, experience, canaries, risks, assurance]);
   const sync = useMutation(() => api.controlPlane.syncZscaler(), { onSuccess: refresh });
 
   if (!canRead) return <EmptyState title="No access" description="You do not have permission to view the security control plane." />;
@@ -74,6 +78,7 @@ export default function ControlPlanePage() {
       </div>
 
       {workspace === "overview" && <Overview posture={posture} recommendations={recommendations} canManage={canManage} onChanged={refresh} />}
+      {workspace === "assurance" && <AssuranceRuntime resource={assurance} />}
       {workspace === "resources" && <Inventory resource={resources} />}
       {workspace === "policies" && <Policies resource={policies} canManage={canManage} onChanged={refresh} />}
       {workspace === "ai-data" && <AIDataWorkspace />}
@@ -82,6 +87,27 @@ export default function ControlPlanePage() {
       {workspace === "risk" && <RiskWorkspace resource={risks} canManage={can("asset:tag")} onChanged={refresh} />}
     </div>
   );
+}
+
+function AssuranceRuntime({ resource }: { resource: UseApiResourceResult<AssuranceSummary> }) {
+  if (resource.loading && !resource.data) return <LoadingState label="Loading assurance records…" />;
+  if (resource.error || !resource.data) return <ErrorState message={resource.error ?? "Assurance runtime unavailable"} onRetry={resource.refetch} />;
+  const data = resource.data;
+  const money = (value: string) => new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(Number(value));
+  return <div className="space-y-4">
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <Card><CardBody><Metric label="Enforcement transactions" value={data.transactions.length} /></CardBody></Card>
+      <Card><CardBody><Metric label="AI policy receipts" value={data.ai.receipts.length} /></CardBody></Card>
+      <Card><CardBody><Metric label="Verified agent records" value={data.agent_assurance.filter((item) => item.verifier_status === "passed").length} /></CardBody></Card>
+      <Card><CardBody><Metric label="Validation recipes" value={data.validation_recipes.length} /></CardBody></Card>
+    </div>
+    <div className="grid gap-4 xl:grid-cols-2">
+      <Card><CardHeader><CardTitle>Enforcement lifecycle</CardTitle></CardHeader><CardBody>{!data.transactions.length ? <EmptyState title="No enforcement transactions" description="Prepare a policy recommendation to preview its provider snapshot, diff, blast radius, approval, observation, verification, and rollback." /> : <div className="space-y-3">{data.transactions.map((item) => <div key={item.id} className="rounded-lg border border-line p-3"><div className="flex items-center justify-between gap-3"><p className="font-medium text-fg">{humanize(item.operation)}</p><Badge tone={assuranceStatusTone(item.status)}>{humanize(item.status)}</Badge></div><p className="mt-1 text-xs text-muted">{item.provider} · blast {String(item.blast_radius.level ?? "unknown")} · {formatDateTime(item.created_at)}</p><p className="mt-2 font-mono text-xs text-muted">{item.diff_digest.slice(0, 16)}…</p></div>)}</div>}</CardBody></Card>
+      <Card><CardHeader><CardTitle>AI runtime & tool trust</CardTitle></CardHeader><CardBody className="space-y-4"><div className="grid grid-cols-2 gap-3"><Metric label="Pinned manifests" value={data.ai.manifests.length} /><Metric label="Blocked/redacted" value={data.ai.receipts.filter((item) => item.decision !== "allow").length} /></div>{data.ai.manifests.slice(0, 6).map((item) => <div key={item.id} className="flex items-center justify-between rounded border border-line p-3 text-sm"><div><p className="font-medium text-fg">{item.tool_name}</p><p className="text-xs text-muted">{item.server_key} · v{item.version}</p></div><Badge tone={item.approved ? "ok" : "warn"}>{item.status}</Badge></div>)}</CardBody></Card>
+      <Card><CardHeader><CardTitle>Agent proof & validation</CardTitle></CardHeader><CardBody className="space-y-3">{!data.agent_assurance.length && !data.validation_recipes.length ? <EmptyState title="No assurance runs" description="Agent plans, tool receipts, verifier results, replay digests, and safe validation recipes appear here." /> : <>{data.agent_assurance.slice(0, 4).map((item) => <div key={item.id} className="flex justify-between rounded border border-line p-3 text-sm"><span>Run {item.run_id.slice(0, 8)}</span><Badge tone={item.verifier_status === "passed" ? "ok" : "warn"}>{item.verifier_status}</Badge></div>)}{data.validation_recipes.slice(0, 4).map((item) => <div key={item.id} className="rounded border border-line p-3 text-sm"><div className="flex justify-between"><span>{item.recipe_key}</span><Badge tone={item.status === "verified" ? "ok" : "warn"}>{item.status}</Badge></div><p className="mt-1 text-xs text-muted">{humanize(item.exploitation_verdict)} · {Number(item.reproducibility_score).toFixed(0)}% reproducible</p></div>)}</>}</CardBody></Card>
+      <Card><CardHeader><CardTitle>Data, response, risk & compliance</CardTitle></CardHeader><CardBody className="space-y-3"><div className="grid grid-cols-2 gap-3"><Metric label="DSPM assessments" value={data.data_security.length} /><Metric label="SOC actions" value={data.response_actions.length} /><Metric label="Risk trials" value={data.risk_trials.length} /><Metric label="Signed OSCAL exports" value={data.compliance_exports.length} /></div>{data.risk_trials[0] && <div className="rounded border border-line p-3"><p className="text-xs text-muted">Latest quantitative interval</p><p className="mt-1 text-sm font-medium text-fg">P05 {money(data.risk_trials[0].p05)} · P50 {money(data.risk_trials[0].p50)} · P95 {money(data.risk_trials[0].p95)}</p><p className="mt-1 text-xs text-muted">{data.risk_trials[0].iterations.toLocaleString()} iterations · seed {data.risk_trials[0].seed}</p></div>}{data.compliance_exports[0] && <div className="rounded border border-line p-3"><p className="text-sm font-medium text-fg">{data.compliance_exports[0].package_key}</p><p className="mt-1 text-xs text-muted">{humanize(data.compliance_exports[0].model)} · signed {formatDateTime(data.compliance_exports[0].generated_at)}</p></div>}</CardBody></Card>
+    </div>
+  </div>;
 }
 
 function Overview({ posture, recommendations, canManage, onChanged }: { posture: UseApiResourceResult<SecurityPosture>; recommendations: UseApiResourceResult<SecurityRecommendation[]>; canManage: boolean; onChanged: () => void }) {

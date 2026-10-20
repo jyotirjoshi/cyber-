@@ -8,7 +8,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-ProviderName = Literal["anthropic", "openai", "google", "openrouter"]
+ProviderName = Literal[
+    "anthropic",
+    "openai",
+    "google",
+    "openrouter",
+    "azure_openai",
+    "ollama",
+    "vllm",
+]
 AutonomyMode = Literal["manual", "supervised", "bounded"]
 
 

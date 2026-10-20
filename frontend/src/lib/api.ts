@@ -196,6 +196,7 @@ import type {
 } from "./types";
 import type {
   AIGatewayDecision,
+  AssuranceSummary,
   DataClassification,
   SecurityCanary,
   SecurityExperienceSummary,
@@ -899,6 +900,10 @@ export const api = {
   },
 
   controlPlane: {
+    assuranceSummary: (limit = 50) =>
+      request<AssuranceSummary>("GET", "/control-plane/assurance-summary", {
+        query: { limit },
+      }),
     posture: () => request<SecurityPosture>("GET", "/control-plane/posture"),
     resources: (params?: { kind?: string; posture_status?: string; limit?: number }) =>
       request<SecurityResource[]>("GET", "/control-plane/resources", { query: params }),

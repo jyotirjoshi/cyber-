@@ -64,7 +64,7 @@
 - [x] Verify the tests fail for missing transaction behavior.
 - [x] Implement deterministic transaction services and REST routes.
 - [x] Run focused integration and audit tests.
-- [ ] Commit the transaction slice.
+- [x] Commit the transaction slice.
 
 ### Task 3: AI runtime and access graph
 
@@ -77,11 +77,11 @@
 **Interfaces:**
 - Produces OpenAI-compatible policy requests, digest-only receipts, pinned manifests, schema-bound tool authorization, delegation validation, graph reachability, and blast-radius answers.
 
-- [ ] Write failing provider/model/region/budget/retention and raw-content tests.
-- [ ] Write failing manifest-change, strict-schema, delegation, approval, revocation, and graph tests.
-- [ ] Implement pure policy/graph functions and persistence adapters.
-- [ ] Run focused gateway and tenant-isolation tests.
-- [ ] Commit the AI runtime slice.
+- [x] Write failing provider/model/region/budget/retention and raw-content tests.
+- [x] Write failing manifest-change, strict-schema, delegation, approval, revocation, and graph tests.
+- [x] Implement pure policy/graph functions and persistence adapters.
+- [x] Run focused gateway and tenant-isolation tests.
+- [x] Commit the AI runtime slice.
 
 ### Task 4: Verifiable agent work and governed validation
 
@@ -93,11 +93,11 @@
 **Interfaces:**
 - Produces immutable plan/receipt/evidence/verifier records, evaluation metrics, non-destructive recipes, chain-of-custody hashes, exploitation verdicts, and reproducibility scores.
 
-- [ ] Write failing immutability, budget, evidence, verifier, recipe, and verdict tests.
-- [ ] Verify feature-absence failures.
-- [ ] Implement recording/finalization and recipe verification services.
-- [ ] Run focused agent, approval, and scanner-sandbox tests.
-- [ ] Commit the work-assurance slice.
+- [x] Write failing immutability, budget, evidence, verifier, recipe, and verdict tests.
+- [x] Verify feature-absence failures.
+- [x] Implement recording/finalization and recipe verification services.
+- [x] Run focused agent, approval, and scanner-sandbox tests.
+- [x] Commit the work-assurance slice.
 
 ### Task 5: DSPM and Agentic SOC
 
@@ -109,11 +109,11 @@
 **Interfaces:**
 - Produces provider-neutral data-store posture, OCSF normalization, enriched stories, identity compromise scores, evidence-balanced verdicts, response previews/actions, and post-response verification.
 
-- [ ] Write failing metadata-first, sharing, encryption, residency, OCSF, correlation, evidence, response, and replay tests.
-- [ ] Verify feature-absence failures.
-- [ ] Implement deterministic services and routes.
-- [ ] Run focused CAASM, threat-story, and enforcement tests.
-- [ ] Commit the operations slice.
+- [x] Write failing metadata-first, sharing, encryption, residency, OCSF, correlation, evidence, response, and replay tests.
+- [x] Verify feature-absence failures.
+- [x] Implement deterministic services and routes.
+- [x] Run focused CAASM, threat-story, and enforcement tests.
+- [x] Commit the operations slice.
 
 ### Task 6: Defensible risk and OSCAL evidence automation
 
@@ -125,11 +125,11 @@
 **Interfaces:**
 - Produces seeded Monte Carlo intervals/comparisons/calibration and signed OSCAL assessment-results/POA&M packages with inheritance, freshness, requests, and asset/finding relationships.
 
-- [ ] Write failing reproducibility, range, comparison, calibration, freshness, inheritance, canonicalization, and signature tests.
-- [ ] Verify feature-absence failures.
-- [ ] Implement deterministic simulations and OSCAL package services/routes.
-- [ ] Run focused business-risk and compliance tests.
-- [ ] Commit the reporting slice.
+- [x] Write failing reproducibility, range, comparison, calibration, freshness, inheritance, canonicalization, and signature tests.
+- [x] Verify feature-absence failures.
+- [x] Implement deterministic simulations and OSCAL package services/routes.
+- [x] Run focused business-risk and compliance tests.
+- [x] Commit the reporting slice.
 
 ### Task 7: Operator workspace
 
@@ -142,15 +142,15 @@
 **Interfaces:**
 - Consumes Tasks 2-6 REST projections and exposes exact-scope approval/verification UX.
 
-- [ ] Write failing projection/state/interval/privacy tests.
-- [ ] Implement typed transaction, AI graph, assurance, DSPM, SOC, risk, and compliance panels.
-- [ ] Run frontend tests, typecheck, and production build.
-- [ ] Commit the workspace slice.
+- [x] Write failing projection/state/interval/privacy tests.
+- [x] Implement typed transaction, AI graph, assurance, DSPM, SOC, risk, and compliance panels.
+- [x] Run frontend tests, typecheck, and production build.
+- [x] Commit the workspace slice.
 
 ### Task 8: Release verification
 
-- [ ] Run focused backend suites, migration parity, ORM integrity, Ruff, and isolated mypy.
+- [x] Run focused backend suites, migration parity, ORM integrity, Ruff, and isolated mypy.
 - [ ] Run worker/approval/integration compatibility suites.
-- [ ] Run frontend tests, typecheck, and production build.
+- [x] Run frontend tests, typecheck, and production build.
 - [ ] Commit the release candidate; do not push or deploy unless explicitly requested.
 

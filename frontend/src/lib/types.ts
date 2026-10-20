@@ -3041,3 +3041,83 @@ export interface DataClassification {
   content_digest: string;
   match_counts: Record<string, number>;
 }
+
+export interface AssuranceSummary {
+  transactions: Array<{
+    id: Uuid;
+    provider: string;
+    operation: string;
+    status: string;
+    diff_digest: string;
+    blast_radius: Record<string, unknown>;
+    created_at: IsoDateTime;
+  }>;
+  ai: {
+    receipts: Array<{
+      id: Uuid;
+      provider: string;
+      model: string;
+      decision: "allow" | "block" | "redact" | "require_approval";
+      reason_codes: string[];
+      created_at: IsoDateTime;
+    }>;
+    manifests: Array<{
+      id: Uuid;
+      server_key: string;
+      tool_name: string;
+      version: string;
+      status: string;
+      approved: boolean;
+      schema_digest: string;
+    }>;
+  };
+  agent_assurance: Array<{
+    id: Uuid;
+    run_id: Uuid;
+    verifier_status: string;
+    confidence: string;
+    metrics: Record<string, unknown>;
+    finalized_at: IsoDateTime | null;
+  }>;
+  validation_recipes: Array<{
+    id: Uuid;
+    recipe_key: string;
+    status: string;
+    exploitation_verdict: string;
+    reproducibility_score: string;
+  }>;
+  data_security: Array<{
+    id: Uuid;
+    provider: string;
+    service: string;
+    scan_mode: string;
+    posture_score: string;
+    findings: Array<Record<string, unknown>>;
+    observed_at: IsoDateTime;
+  }>;
+  response_actions: Array<{
+    id: Uuid;
+    action_type: string;
+    target_ref: string;
+    status: string;
+    predicted_impact: Record<string, unknown>;
+  }>;
+  risk_trials: Array<{
+    id: Uuid;
+    simulation_id: Uuid;
+    p05: string;
+    p50: string;
+    p95: string;
+    mean_annual_loss: string;
+    iterations: number;
+    seed: number;
+  }>;
+  compliance_exports: Array<{
+    id: Uuid;
+    package_key: string;
+    model: string;
+    status: string;
+    content_digest: string;
+    generated_at: IsoDateTime;
+  }>;
+}

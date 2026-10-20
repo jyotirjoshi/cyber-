@@ -31,7 +31,15 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from app.core.errors import ConfigurationError
 
 Environment = Literal["development", "staging", "production"]
-LLMProvider = Literal["anthropic", "openai", "google", "openrouter"]
+LLMProvider = Literal[
+    "anthropic",
+    "openai",
+    "google",
+    "openrouter",
+    "azure_openai",
+    "ollama",
+    "vllm",
+]
 
 #: Roles the gateway routes independently (PRD section 55).
 LLMRole = Literal["planning", "reasoning", "classification", "code_remediation", "report"]
@@ -135,6 +143,9 @@ class SecuritySettings(BaseSettings):
 
     #: Signs access/refresh tokens. No default: a shared default would be a backdoor.
     jwt_secret: SecretStr = SecretStr("")
+    #: Dedicated HMAC key for signed assurance/OSCAL packages. When unset, the API
+    #: retains backward compatibility by deriving signatures from ``jwt_secret``.
+    assurance_signing_secret: SecretStr = SecretStr("")
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     access_token_ttl_minutes: int = 30
     refresh_token_ttl_days: int = 14
@@ -259,6 +270,13 @@ class LLMSettings(BaseSettings):
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str | None = None
     google_api_key: SecretStr | None = None
+    azure_openai_api_key: SecretStr | None = None
+    azure_openai_base_url: str | None = None
+    azure_openai_api_version: str = "2024-10-21"
+    ollama_api_key: SecretStr | None = None
+    ollama_base_url: str | None = None
+    vllm_api_key: SecretStr | None = None
+    vllm_base_url: str | None = None
 
     #: Model used for roles without an explicit override. Still requires ``provider``.
     default_model: str | None = None
@@ -284,6 +302,9 @@ class LLMSettings(BaseSettings):
             "openai": self.openai_api_key,
             "openrouter": self.openrouter_api_key,
             "google": self.google_api_key,
+            "azure_openai": self.azure_openai_api_key,
+            "ollama": self.ollama_api_key,
+            "vllm": self.vllm_api_key,
         }.get(provider)
 
 
@@ -1119,11 +1140,25 @@ def validate_runtime_configuration(settings: Settings, *, role: str = "api") -> 
         warnings.append("No platform LLM is configured; organizations must provide their own key.")
     else:
         for provider in configured_providers:
-            if provider not in ("anthropic", "openai", "google", "openrouter"):
+            if provider not in (
+                "anthropic",
+                "openai",
+                "google",
+                "openrouter",
+                "azure_openai",
+                "ollama",
+                "vllm",
+            ):
                 fatal.append(
-                    f"Unknown LLM provider '{provider}'. Supported: anthropic, openai, google, openrouter."
+                    f"Unknown LLM provider '{provider}'."
                 )
-            elif not settings.llm.key_for(provider):
+            elif provider in {"ollama", "vllm"} and not getattr(
+                settings.llm, f"{provider}_base_url"
+            ):
+                fatal.append(
+                    f"LLM provider '{provider}' requires CYNUX_LLM__{provider.upper()}_BASE_URL."
+                )
+            elif provider not in {"ollama", "vllm"} and not settings.llm.key_for(provider):
                 fatal.append(
                     f"LLM provider '{provider}' is selected but "
                     f"CYNUX_LLM__{provider.upper()}_API_KEY is unset."

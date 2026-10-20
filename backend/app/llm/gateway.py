@@ -132,10 +132,10 @@ class LLMGateway:
             from app.llm.anthropic_client import AnthropicClient
 
             client: LLMProviderClient = AnthropicClient(self._llm)
-        elif provider == "openai":
+        elif provider in {"openai", "azure_openai", "ollama", "vllm"}:
             from app.llm.openai_client import OpenAIClient
 
-            client = OpenAIClient(self._llm)
+            client = OpenAIClient(self._llm, provider=provider)
         elif provider == "openrouter":
             from app.llm.openai_client import OpenAIClient
 
@@ -146,7 +146,7 @@ class LLMGateway:
             client = GoogleClient(self._llm)
         else:
             raise ConfigurationError(
-                f"Unsupported LLM provider {provider!r}. Supported: anthropic, openai, google, openrouter.",
+                f"Unsupported LLM provider {provider!r}.",
                 setting="CYNUX_LLM__PROVIDER",
             )
 
@@ -205,7 +205,15 @@ class LLMGateway:
         json_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """Complete with the exact provider/model pinned by an immutable agent version."""
-        if provider not in {"anthropic", "openai", "openrouter", "google"}:
+        if provider not in {
+            "anthropic",
+            "openai",
+            "openrouter",
+            "google",
+            "azure_openai",
+            "ollama",
+            "vllm",
+        }:
             raise ConfigurationError(f"Unsupported custom-agent provider {provider!r}.")
         if not model or max_output_tokens < 1:
             raise ConfigurationError("Custom-agent model and output budget are required.")

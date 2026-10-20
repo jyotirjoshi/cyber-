@@ -59,22 +59,19 @@ class OpenAIClient:
 
     def __init__(self, settings: LLMSettings, *, provider: str = PROVIDER) -> None:
         self.name = provider
-        key = (
-            settings.openrouter_api_key
-            if provider == OPENROUTER_PROVIDER
-            else settings.openai_api_key
-        )
-        if key is None or not key.get_secret_value():
+        key = settings.key_for(provider)
+        local_provider = provider in {"ollama", "vllm"}
+        if (key is None or not key.get_secret_value()) and not local_provider:
             raise ConfigurationError(
                 f"{provider.title()} is selected but no API key is set.",
                 setting=(
                     "CYNUX_LLM__OPENROUTER_API_KEY"
                     if provider == OPENROUTER_PROVIDER
-                    else "CYNUX_LLM__OPENAI_API_KEY"
+                    else f"CYNUX_LLM__{provider.upper()}_API_KEY"
                 ),
             )
         try:
-            from openai import AsyncOpenAI
+            from openai import AsyncAzureOpenAI, AsyncOpenAI
         except ImportError as exc:  # pragma: no cover - depends on install extras
             raise ConfigurationError(
                 "The 'openai' package is not installed but OpenAI is configured.",
@@ -83,18 +80,34 @@ class OpenAIClient:
             ) from exc
 
         kwargs: dict[str, Any] = {
-            "api_key": key.get_secret_value(),
+            "api_key": key.get_secret_value() if key else "local-runtime",
             "timeout": float(settings.request_timeout_seconds),
             "max_retries": settings.max_retries,
         }
-        base_url = (
-            settings.openrouter_base_url or OPENROUTER_BASE_URL
-            if provider == OPENROUTER_PROVIDER
-            else settings.openai_base_url
-        )
-        if base_url:
-            kwargs["base_url"] = base_url
-        self._client = AsyncOpenAI(**kwargs)
+        base_url = {
+            "openrouter": settings.openrouter_base_url or OPENROUTER_BASE_URL,
+            "openai": settings.openai_base_url,
+            "azure_openai": settings.azure_openai_base_url,
+            "ollama": settings.ollama_base_url,
+            "vllm": settings.vllm_base_url,
+        }.get(provider)
+        if provider in {"azure_openai", "ollama", "vllm"} and not base_url:
+            raise ConfigurationError(
+                f"{provider} requires an explicitly configured base URL.",
+                setting=f"CYNUX_LLM__{provider.upper()}_BASE_URL",
+            )
+        if provider == "azure_openai":
+            self._client = AsyncAzureOpenAI(
+                api_key=kwargs["api_key"],
+                azure_endpoint=base_url,
+                api_version=settings.azure_openai_api_version,
+                timeout=kwargs["timeout"],
+                max_retries=kwargs["max_retries"],
+            )
+        else:
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._client = AsyncOpenAI(**kwargs)
 
     async def complete(
         self,

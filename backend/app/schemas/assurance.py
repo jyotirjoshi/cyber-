@@ -109,6 +109,20 @@ class AIAccessEdgeCreateIn(StrictModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+class AIAccessEdgeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    source_resource_id: uuid.UUID
+    target_resource_id: uuid.UUID
+    relation: str
+    privileges: list[str]
+    approved: bool
+    source_kind: str
+    provenance: dict[str, Any]
+    first_seen_at: dt.datetime
+    last_seen_at: dt.datetime
+
+
 class AIInteractionReceiptOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -129,6 +143,94 @@ class AIInteractionReceiptOut(BaseModel):
     latency_ms: int | None
     retention_mode: str
     occurred_at: dt.datetime
+
+
+class AIRuntimeEvaluateIn(StrictModel):
+    provider: Literal[
+        "openai", "anthropic", "google", "openrouter", "azure_openai", "ollama", "vllm"
+    ]
+    direction: Literal["prompt", "output"] = "prompt"
+    model: str = Field(min_length=1, max_length=512)
+    region: str | None = Field(default=None, max_length=80)
+    content: str = Field(min_length=1, max_length=1_000_000, repr=False)
+    requested_output_tokens: int = Field(default=4096, ge=1, le=1_000_000)
+    estimated_cost_usd: Decimal = Field(default=0, ge=0)
+    policy: dict[str, Any] = Field(default_factory=dict)
+    request_key: str = Field(min_length=1, max_length=128)
+    application_key: str | None = Field(default=None, max_length=512)
+    agent_key: str | None = Field(default=None, max_length=512)
+
+
+class AIRuntimeDecisionOut(StrictModel):
+    decision: Literal["allow", "block", "redact"]
+    reason_codes: list[str]
+    prompt_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    input_tokens_estimate: int
+    requested_output_tokens: int
+    retention_mode: Literal["none", "digest_only", "metadata"]
+
+
+class OpenAIChatMessage(StrictModel):
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(min_length=1, max_length=400_000, repr=False)
+
+
+class OpenAIChatCompletionIn(StrictModel):
+    model: str = Field(min_length=1, max_length=512)
+    messages: list[OpenAIChatMessage] = Field(min_length=1, max_length=500)
+    provider: Literal[
+        "openai", "anthropic", "google", "openrouter", "azure_openai", "ollama", "vllm"
+    ] | None = None
+    region: str | None = Field(default=None, max_length=80)
+    max_tokens: int = Field(default=4096, ge=1, le=200_000)
+    temperature: float = Field(default=0, ge=0, le=2)
+    stream: Literal[False] = False
+    request_key: str | None = Field(default=None, min_length=1, max_length=128)
+    application_key: str | None = Field(default=None, max_length=512)
+    agent_key: str | None = Field(default=None, max_length=512)
+
+
+class OpenAIChatCompletionOut(StrictModel):
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int
+    model: str
+    choices: list[dict[str, Any]]
+    usage: dict[str, int]
+    policy_receipt: dict[str, Any]
+
+
+class AIToolManifestDecisionIn(StrictModel):
+    approved: bool
+    expected_schema_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AIToolCallAuthorizeIn(StrictModel):
+    manifest_id: uuid.UUID
+    arguments: dict[str, Any]
+    expected_manifest_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approval_scope_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    delegation_expires_at: dt.datetime | None = None
+
+
+class AIToolAuthorizationOut(StrictModel):
+    allowed: bool
+    manifest_digest: str
+    argument_digest: str
+    approval_scope_digest: str
+    authorized_at: dt.datetime
+
+
+class AIAccessGraphQueryIn(StrictModel):
+    source_resource_id: uuid.UUID
+    target_resource_id: uuid.UUID | None = None
+    max_depth: int = Field(default=8, ge=1, le=32)
+
+
+class AIAccessGraphOut(StrictModel):
+    source_resource_id: uuid.UUID
+    reachable: dict[str, int]
+    paths: list[list[str]]
 
 
 class AgentRunAssuranceCreateIn(StrictModel):
@@ -152,6 +254,28 @@ class AgentRunAssuranceFinalizeIn(StrictModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentRunAssuranceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    run_id: uuid.UUID
+    plan_version: int
+    plan_digest: str
+    input_evidence_refs: list[str]
+    tool_receipts: list[dict[str, Any]]
+    budgets: dict[str, Any]
+    approval_refs: list[str]
+    artifact_refs: list[str]
+    contradictory_evidence: list[dict[str, Any]]
+    confidence: Decimal
+    reason_codes: list[str]
+    success_criteria: list[dict[str, Any]]
+    verifier_status: str
+    verifier_result: dict[str, Any]
+    replay_digest: str | None
+    metrics: dict[str, Any]
+    finalized_at: dt.datetime | None
+
+
 class ValidationRecipeCreateIn(StrictModel):
     recipe_key: str = Field(min_length=1, max_length=128)
     assessment_id: uuid.UUID | None = None
@@ -170,6 +294,36 @@ class ValidationRecipeCreateIn(StrictModel):
     ] = "observed"
 
 
+class ValidationRecipeVerifyIn(StrictModel):
+    action_results: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+    exploitation_verdict: Literal[
+        "observed", "likely_exploitable", "proved_exploitable", "not_exploitable"
+    ]
+
+
+class ValidationRecipeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    recipe_key: str
+    assessment_id: uuid.UUID | None
+    campaign_id: uuid.UUID | None
+    run_id: uuid.UUID | None
+    original_recipe_id: uuid.UUID | None
+    target_digest: str
+    authorized_target_refs: list[str]
+    actions: list[dict[str, Any]]
+    credential_refs: list[str]
+    artifact_refs: list[str]
+    evidence_hashes: list[str]
+    budgets: dict[str, Any]
+    approval_refs: list[str]
+    exploitation_verdict: str
+    reproducibility_score: Decimal
+    status: str
+    verification: dict[str, Any]
+    verified_at: dt.datetime | None
+
+
 class DataSecurityAssessmentCreateIn(StrictModel):
     resource_id: uuid.UUID
     assessment_key: str = Field(min_length=1, max_length=128)
@@ -186,6 +340,30 @@ class DataSecurityAssessmentCreateIn(StrictModel):
     key_posture: dict[str, Any] = Field(default_factory=dict)
     retention: dict[str, Any] = Field(default_factory=dict)
     residency: dict[str, Any] = Field(default_factory=dict)
+    observed_at: dt.datetime
+
+
+class DataSecurityAssessmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    resource_id: uuid.UUID
+    assessment_key: str
+    provider: str
+    service: str
+    scan_mode: str
+    sample_policy: dict[str, Any]
+    classifications: list[str]
+    lineage: list[dict[str, Any]]
+    duplicate_group: str | None
+    sharing: dict[str, Any]
+    identity_access: list[dict[str, Any]]
+    encryption: dict[str, Any]
+    key_posture: dict[str, Any]
+    retention: dict[str, Any]
+    residency: dict[str, Any]
+    findings: list[dict[str, Any]]
+    recommendations: list[dict[str, Any]]
+    posture_score: Decimal
     observed_at: dt.datetime
 
 
@@ -219,6 +397,22 @@ class ThreatResponseActionCreateIn(StrictModel):
     target_ref: str = Field(min_length=1, max_length=512)
     predicted_impact: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str = Field(min_length=16, max_length=128)
+
+
+class ThreatResponseActionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    story_id: uuid.UUID
+    action_type: str
+    target_ref: str
+    status: str
+    predicted_impact: dict[str, Any]
+    approval_id: uuid.UUID | None
+    idempotency_key: str
+    provider_receipt: dict[str, Any]
+    verification: dict[str, Any]
+    executed_at: dt.datetime | None
+    verified_at: dt.datetime | None
 
 
 class MonteCarloSimulationCreateIn(StrictModel):
@@ -258,6 +452,27 @@ class MonteCarloSimulationCreateIn(StrictModel):
         return self
 
 
+class RiskSimulationTrialOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    simulation_id: uuid.UUID
+    comparison_trial_id: uuid.UUID | None
+    run_key: str
+    status: str
+    iterations: int
+    seed: int
+    assumptions_version: int
+    distributions: dict[str, Any]
+    percentile_05: Decimal
+    percentile_50: Decimal
+    percentile_95: Decimal
+    mean_annual_loss: Decimal
+    standard_deviation: Decimal
+    confidence_level: Decimal
+    calibration: dict[str, Any]
+    completed_at: dt.datetime
+
+
 class ComplianceInheritanceCreateIn(StrictModel):
     control_id: uuid.UUID
     parent_control_id: uuid.UUID
@@ -280,9 +495,19 @@ class ComplianceEvidenceRequestCreateIn(StrictModel):
 
 class OSCALExportCreateIn(StrictModel):
     workspace_id: uuid.UUID
-    model: Literal["assessment-results", "poam", "component-definition", "ssp"]
+    model: Literal["assessment-results", "poam"]
     package_key: str = Field(min_length=1, max_length=128)
     oscal_version: str = Field(default="1.1.2", min_length=1, max_length=20)
+
+
+class OSCALExportOut(StrictModel):
+    package_id: uuid.UUID
+    package_key: str
+    content_digest: str
+    signature: str
+    signing_key_id: str
+    manifest: dict[str, Any]
+    document: dict[str, Any]
 
 
 __all__ = [name for name in globals() if name.endswith(("In", "Out"))]
