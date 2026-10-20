@@ -874,6 +874,7 @@ class IntegrationKind(StrEnum):
     PROWLER_AWS = "prowler_aws"
     PROWLER_AZURE = "prowler_azure"
     PROWLER_GCP = "prowler_gcp"
+    ZSCALER = "zscaler"
 
 
 class IntegrationStatus(StrEnum):

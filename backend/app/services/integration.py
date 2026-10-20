@@ -110,6 +110,7 @@ from app.integrations.splunk import SplunkHecClient
 from app.integrations.tenable import TenableClient
 from app.integrations.wazuh import WazuhClient
 from app.integrations.wiz import WizClient
+from app.integrations.zscaler import ZscalerClient
 from app.llm.base import LLMMessage
 from app.llm.gateway import LLMGateway
 from app.scanners.base import ScannerRequest
@@ -339,6 +340,17 @@ _SPECS: dict[IntegrationKind, _KindSpec] = {
         config={"verify_tls": "verify_tls", "indexer_base_url": "indexer_base_url"},
         required=("api_username", "api_password"),
     ),
+    IntegrationKind.ZSCALER: _KindSpec(
+        section="zscaler",
+        base_url_field="base_url",
+        credentials={"client_id": "client_id", "client_secret": "client_secret"},
+        config={
+            "customer_id": "customer_id",
+            "audience": "audience",
+            "verify_tls": "verify_tls",
+        },
+        required=("client_id", "client_secret"),
+    ),
     IntegrationKind.SONARQUBE: _KindSpec(
         section="sonarqube",
         base_url_field="base_url",
@@ -534,6 +546,7 @@ _TENANT_PRIVATE_KINDS: frozenset[IntegrationKind] = frozenset(
         IntegrationKind.PROWLER_AWS,
         IntegrationKind.PROWLER_AZURE,
         IntegrationKind.PROWLER_GCP,
+        IntegrationKind.ZSCALER,
     }
 )
 
@@ -575,6 +588,7 @@ _DEFAULT_NAMES: dict[IntegrationKind, str] = {
     IntegrationKind.PROWLER_AWS: "Prowler AWS account",
     IntegrationKind.PROWLER_AZURE: "Prowler Azure subscription",
     IntegrationKind.PROWLER_GCP: "Prowler GCP project",
+    IntegrationKind.ZSCALER: "Zscaler Zero Trust Exchange",
 }
 
 
@@ -1946,6 +1960,12 @@ async def _ping(kind: IntegrationKind, scoped: Settings, redis: Redis | None) ->
         return await EmailSender(scoped).ping()
     if kind is IntegrationKind.WAZUH:
         return await WazuhClient(scoped, redis).ping()
+    if kind is IntegrationKind.ZSCALER:
+        client = ZscalerClient(scoped, redis)
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
     if kind is IntegrationKind.GITHUB:
         return await GitHubClient(scoped, redis).ping()
     if kind is IntegrationKind.GITLAB:

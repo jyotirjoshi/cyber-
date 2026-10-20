@@ -16,6 +16,9 @@ down_revision = "0102_compliance_evidence_workspaces"
 branch_labels = None
 depends_on = None
 
+_INTEGRATION_KINDS_OLD = "kind IN ('llm','defectdojo','jira','servicenow','azure_devops','linear','pagerduty','splunk','burp_dast','slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk','tenable','qualys','rapid7','wiz','prisma_cloud','crowdstrike','aws_security_hub','aws_inspector','hackerone','bugcrowd','checkmarx','fortify','azure_defender','gcp_scc','bitbucket','prowler_aws','prowler_azure','prowler_gcp')"
+_INTEGRATION_KINDS_NEW = "kind IN ('llm','defectdojo','jira','servicenow','azure_devops','linear','pagerduty','splunk','burp_dast','slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk','tenable','qualys','rapid7','wiz','prisma_cloud','crowdstrike','aws_security_hub','aws_inspector','hackerone','bugcrowd','checkmarx','fortify','azure_defender','gcp_scc','bitbucket','prowler_aws','prowler_azure','prowler_gcp','zscaler')"
+
 
 def _tenant_timestamps() -> list[sa.Column]:
     return [
@@ -40,6 +43,10 @@ def _base_indexes(table: str) -> None:
 
 
 def upgrade() -> None:
+    op.drop_constraint(op.f("ck_integrations_valid_integration_kind"), "integrations", type_="check")
+    op.create_check_constraint(
+        op.f("ck_integrations_valid_integration_kind"), "integrations", _INTEGRATION_KINDS_NEW
+    )
     op.create_table(
         "security_resources",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
@@ -416,6 +423,10 @@ _INDEXES = {
 
 
 def downgrade() -> None:
+    op.drop_constraint(op.f("ck_integrations_valid_integration_kind"), "integrations", type_="check")
+    op.create_check_constraint(
+        op.f("ck_integrations_valid_integration_kind"), "integrations", _INTEGRATION_KINDS_OLD
+    )
     table_order = [
         "security_risk_simulations",
         "security_canary_interactions",

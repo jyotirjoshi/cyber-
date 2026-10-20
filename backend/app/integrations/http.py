@@ -523,6 +523,7 @@ class ResilientClient:
         path: str,
         *,
         json: Any | None = None,
+        data: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         idempotency_key: str | None = None,
@@ -531,6 +532,7 @@ class ResilientClient:
             "POST",
             path,
             json=json,
+            data=data,
             params=params,
             headers=headers,
             idempotency_key=idempotency_key,
@@ -543,8 +545,11 @@ class ResilientClient:
         *,
         json: Any | None = None,
         headers: dict[str, str] | None = None,
+        idempotency_key: str | None = None,
     ) -> Any:
-        response = await self.request("PUT", path, json=json, headers=headers)
+        response = await self.request(
+            "PUT", path, json=json, headers=headers, idempotency_key=idempotency_key
+        )
         return self._decode(response, path=path)
 
     async def patch_json(

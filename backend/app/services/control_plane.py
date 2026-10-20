@@ -518,6 +518,11 @@ async def evaluate_policy(
                 )
             )
             if existing is None:
+                enforcement_actions = {
+                    "ztna": "zpa.update_application_access",
+                    "secure_web_gateway": "zia.update_url_filter_rule",
+                    "firewall": "zia.update_firewall_rule",
+                }
                 session.add(
                     SecurityRecommendation(
                         organization_id=principal.organization_id,
@@ -528,11 +533,14 @@ async def evaluate_policy(
                         domain=policy.kind if policy.kind in {"ztna", "secure_web_gateway", "firewall"} else "ai_security" if policy.kind in {"ai_gateway", "ai_guard"} else "data_security",
                         title=f"Resolve {policy.name} violation on {resource.name}",
                         rationale="; ".join(item["message"] for item in decision["findings"]),
-                        action=f"remediate_{policy.kind}",
+                        action=enforcement_actions.get(policy.kind, f"remediate_{policy.kind}"),
                         severity=decision["severity"],
                         status="proposed",
                         current_state={"posture_status": resource.posture_status},
-                        desired_state={"policy_decision": "allow"},
+                        desired_state={
+                            "policy_decision": "allow",
+                            "target_external_id": resource.external_id,
+                        },
                         idempotency_key=key,
                         provider_receipt={},
                         created_by_id=principal.user_id,

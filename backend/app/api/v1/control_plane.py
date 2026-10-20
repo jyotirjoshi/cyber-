@@ -6,7 +6,8 @@ import uuid
 
 from fastapi import APIRouter, Query, status
 
-from app.api.deps import DbSession, PrincipalDep
+from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
+from app.integrations import control_enforcement
 from app.schemas.control_plane import (
     AIGatewayEvaluateIn,
     AIGatewayEvaluateOut,
@@ -217,10 +218,58 @@ async def decide_recommendation(
     payload: SecurityRecommendationDecisionIn,
     principal: PrincipalDep,
     session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
 ) -> SecurityRecommendationOut:
-    row = await service.decide_recommendation(session, principal, recommendation_id, payload)
+    if payload.decision == "apply":
+        row = await control_enforcement.apply_recommendation(
+            session,
+            principal,
+            recommendation_id,
+            settings=settings,
+            redis=redis,
+            dry_run=False,
+        )
+    else:
+        row = await service.decide_recommendation(session, principal, recommendation_id, payload)
     await session.commit()
     return SecurityRecommendationOut.model_validate(row)
+
+
+@router.post(
+    "/recommendations/{recommendation_id}/preview", response_model=SecurityRecommendationOut
+)
+async def preview_recommendation(
+    recommendation_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> SecurityRecommendationOut:
+    row = await control_enforcement.apply_recommendation(
+        session,
+        principal,
+        recommendation_id,
+        settings=settings,
+        redis=redis,
+        dry_run=True,
+    )
+    await session.commit()
+    return SecurityRecommendationOut.model_validate(row)
+
+
+@router.post("/connectors/zscaler/sync", response_model=dict[str, int])
+async def sync_zscaler(
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> dict[str, int]:
+    count = await control_enforcement.sync_zscaler_inventory(
+        session, principal, settings=settings, redis=redis
+    )
+    await session.commit()
+    return {"resources_reconciled": count}
 
 
 __all__ = ["router"]

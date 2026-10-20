@@ -95,7 +95,7 @@
 - [x] Run tests and confirm operations are absent.
 - [x] Implement deterministic services and routes.
 - [x] Run focused, audit, automation, and business-risk tests.
-- [ ] Commit the operations slice.
+- [x] Commit the operations slice.
 
 ### Task 5: Enforcement adapters and Zscaler integration contracts
 
@@ -109,10 +109,10 @@
 **Interfaces:**
 - Produces: provider-neutral dry-run/apply contracts, ZPA/ZIA inventory adapters, explicit policy-change application, idempotency, and redacted provider receipts.
 
-- [ ] Write failing connector-auth, dry-run, replay, unsupported-action, and receipt-redaction tests.
-- [ ] Run tests and confirm adapters are absent.
-- [ ] Implement hardened clients and explicit-apply service path.
-- [ ] Run integration, SSRF, retry, circuit-breaker, and control-plane tests.
+- [x] Write failing connector-auth, dry-run, replay, unsupported-action, and receipt-redaction tests.
+- [x] Run tests and confirm adapters are absent.
+- [x] Implement hardened clients and explicit-apply service path.
+- [x] Run integration, SSRF, retry, circuit-breaker, and control-plane tests.
 - [ ] Commit the connector slice.
 
 ### Task 6: Control-plane product UI

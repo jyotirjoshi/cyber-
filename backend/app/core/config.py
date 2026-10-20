@@ -523,6 +523,24 @@ class WazuhSettings(BaseSettings):
         return bool(self.indexer_base_url and self.indexer_username and self.indexer_password)
 
 
+class ZscalerSettings(BaseSettings):
+    """Zscaler OneAPI access for inventory and approved policy changes."""
+
+    model_config = _cfg("CYNUX_ZSCALER__")
+
+    base_url: str | None = None
+    customer_id: str | None = None
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+    audience: str = "https://api.zscaler.com"
+    verify_tls: bool = True
+    timeout_seconds: int = 30
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.customer_id and self.client_id and self.client_secret)
+
+
 class GitHubSettings(BaseSettings):
     """GitHub security-alert ingestion and source-action settings."""
 
@@ -1002,6 +1020,7 @@ class Settings(BaseSettings):
     splunk: SplunkSettings = Field(default_factory=SplunkSettings)
     burp_dast: BurpDastSettings = Field(default_factory=BurpDastSettings)
     wazuh: WazuhSettings = Field(default_factory=WazuhSettings)
+    zscaler: ZscalerSettings = Field(default_factory=ZscalerSettings)
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     gitlab: GitLabSettings = Field(default_factory=GitLabSettings)
     bitbucket: BitbucketSettings = Field(default_factory=BitbucketSettings)

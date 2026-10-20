@@ -91,7 +91,7 @@ class Integration(Base, TenantMixin, TimestampMixin):
         # An unrecognized kind is a row that can be configured through the API and then
         # never used by anything, which looks to an operator like a working integration.
         CheckConstraint(
-            "kind IN ('llm','defectdojo','jira','servicenow','azure_devops','linear','pagerduty','splunk','burp_dast','slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk','tenable','qualys','rapid7','wiz','prisma_cloud','crowdstrike','aws_security_hub','aws_inspector','hackerone','bugcrowd','checkmarx','fortify','azure_defender','gcp_scc','bitbucket','prowler_aws','prowler_azure','prowler_gcp')",
+            "kind IN ('llm','defectdojo','jira','servicenow','azure_devops','linear','pagerduty','splunk','burp_dast','slack','email','dify','misp','nvd','github','gitlab','wazuh','sonarqube','snyk','tenable','qualys','rapid7','wiz','prisma_cloud','crowdstrike','aws_security_hub','aws_inspector','hackerone','bugcrowd','checkmarx','fortify','azure_defender','gcp_scc','bitbucket','prowler_aws','prowler_azure','prowler_gcp','zscaler')",
             name="valid_integration_kind",
         ),
         CheckConstraint(
