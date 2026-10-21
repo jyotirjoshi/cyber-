@@ -172,6 +172,18 @@ Describe "Cynux production release orchestration" {
         ([regex]::Matches($compute, 'desired_status\s*=\s*"RUNNING"')).Count | Should Be 2
     }
 
+    It "refreshes proxy DNS after compose recreates upstream containers" {
+        $root = Split-Path -Parent $here
+        $dropIn = Get-Content -Raw -LiteralPath (Join-Path $root "scripts\defectdojo-proxy-reload.conf")
+        $template = Get-Content -Raw -LiteralPath (Join-Path $root "templates\defectdojo-cloud-init.yaml.tftpl")
+        $deploy = Get-Content -Raw -LiteralPath (Join-Path $root "deploy.ps1")
+        $dropIn | Should Match 'ExecStartPost=/usr/bin/docker compose exec -T nginx nginx -s reload'
+        $template | Should Match 'ExecStartPost=/usr/bin/docker compose exec -T nginx nginx -s reload'
+        $deploy | Should Match '20-proxy-reload.conf'
+        $verify = Get-Content -Raw -LiteralPath (Join-Path $root "verify.ps1")
+        $verify | Should Match '"pgvector", "worker"'
+    }
+
     It "keeps local deployment state and verification artifacts out of git" {
         $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
         $ignore = Get-Content -Raw -LiteralPath (Join-Path $repoRoot ".gitignore")
