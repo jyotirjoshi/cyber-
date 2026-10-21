@@ -1,5 +1,5 @@
 import type { BadgeTone } from "@/components/ui/Badge";
-import type { SecurityPosture, SecurityRecommendationStatus } from "./types";
+import type { NativeEndpointEventInput, SecurityPosture, SecurityRecommendationStatus } from "./types";
 
 export interface PostureCard {
   label: string;
@@ -31,4 +31,33 @@ export function recommendationDecisionLabel(status: SecurityRecommendationStatus
     failed: "Provider action failed",
     superseded: "Superseded",
   }[status];
+}
+
+export function endpointFleetSummary(
+  endpoints: Array<{ posture_status: string; attributes: Record<string, unknown> }>,
+  events: Array<{ severity: string; evidence: Record<string, unknown> }>,
+): { endpoints: number; reporting: number; atRisk: number; activeDetections: number } {
+  return {
+    endpoints: endpoints.length,
+    reporting: endpoints.filter((item) => item.attributes.sensor_status === "reporting").length,
+    atRisk: endpoints.filter((item) => item.posture_status === "at_risk" || item.posture_status === "non_compliant").length,
+    activeDetections: events.filter((item) => item.evidence.verdict === "detect" && ["high", "critical"].includes(item.severity)).length,
+  };
+}
+
+export function buildDemoEndpointEvent(eventId: string, occurredAt: string): NativeEndpointEventInput {
+  return {
+    event_key: `demo-${eventId}`,
+    endpoint_key: "cynux-demo-endpoint",
+    hostname: "demo-finance-workstation",
+    operating_system: "windows",
+    occurred_at: occurredAt,
+    event_type: "process_start",
+    process_name: "powershell.exe",
+    parent_process_name: "winword.exe",
+    executable_path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    command_line: "powershell.exe -NoProfile Get-Date",
+    signature_status: "signed",
+    environment: "test",
+  };
 }

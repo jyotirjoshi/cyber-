@@ -5,11 +5,14 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Severity = Literal["info", "low", "medium", "high", "critical"]
+AttackTechniqueId = Annotated[
+    str, Field(min_length=5, max_length=9, pattern=r"^T\d{4}(?:\.\d{3})?$")
+]
 
 
 class SecurityResourceUpsertIn(BaseModel):
@@ -17,8 +20,18 @@ class SecurityResourceUpsertIn(BaseModel):
 
     resource_key: str = Field(min_length=1, max_length=512)
     kind: Literal[
-        "asset", "data_store", "dataset", "saas_application", "ai_application", "ai_model",
-        "ai_agent", "mcp_server", "ai_tool", "identity", "endpoint", "browser",
+        "asset",
+        "data_store",
+        "dataset",
+        "saas_application",
+        "ai_application",
+        "ai_model",
+        "ai_agent",
+        "mcp_server",
+        "ai_tool",
+        "identity",
+        "endpoint",
+        "browser",
     ]
     name: str = Field(min_length=1, max_length=300)
     source_kind: str = Field(min_length=1, max_length=80)
@@ -73,8 +86,17 @@ class SecurityPolicyCreateIn(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     kind: Literal[
-        "ztna", "secure_web_gateway", "firewall", "tls_inspection", "dlp", "casb", "sspm",
-        "ai_gateway", "ai_guard", "endpoint_isolation", "browser_isolation",
+        "ztna",
+        "secure_web_gateway",
+        "firewall",
+        "tls_inspection",
+        "dlp",
+        "casb",
+        "sspm",
+        "ai_gateway",
+        "ai_guard",
+        "endpoint_isolation",
+        "browser_isolation",
     ]
     mode: Literal["monitor", "recommend", "enforce"] = "recommend"
     rules: dict[str, Any] = Field(default_factory=dict)
@@ -174,8 +196,15 @@ class SecurityEventIn(BaseModel):
 
     event_key: str = Field(min_length=1, max_length=512)
     category: Literal[
-        "experience", "incident", "identity", "deception", "access", "dlp", "ai_gateway",
-        "endpoint", "browser",
+        "experience",
+        "incident",
+        "identity",
+        "deception",
+        "access",
+        "dlp",
+        "ai_gateway",
+        "endpoint",
+        "browser",
     ]
     event_type: str = Field(min_length=1, max_length=100)
     source_kind: str = Field(min_length=1, max_length=80)
@@ -188,6 +217,45 @@ class SecurityEventIn(BaseModel):
     identity_ref: str | None = Field(default=None, max_length=512)
     metrics: dict[str, Any] = Field(default_factory=dict)
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class NativeEndpointEventIn(BaseModel):
+    """Bounded telemetry contract for a Cynux endpoint sensor or collector."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_key: str = Field(min_length=1, max_length=512)
+    endpoint_key: str = Field(min_length=1, max_length=256)
+    hostname: str = Field(min_length=1, max_length=255)
+    operating_system: Literal["windows", "linux", "macos", "other"]
+    occurred_at: dt.datetime
+    event_type: Literal[
+        "process_start",
+        "network_connection",
+        "file_change",
+        "identity_activity",
+        "persistence",
+        "autorun_change",
+        "scheduled_task_created",
+        "security_control_disabled",
+        "sensor_tamper",
+        "defense_evasion",
+        "ransomware_activity",
+        "malware",
+    ]
+    process_name: str | None = Field(default=None, max_length=260)
+    parent_process_name: str | None = Field(default=None, max_length=260)
+    executable_path: str | None = Field(default=None, max_length=1024, repr=False)
+    command_line: str | None = Field(default=None, max_length=8192, repr=False)
+    signature_status: Literal["signed", "unsigned", "invalid", "unknown"] = "unknown"
+    destination_host: str | None = Field(default=None, max_length=253, repr=False)
+    destination_port: int | None = Field(default=None, ge=1, le=65535)
+    file_activity_count: int = Field(default=0, ge=0, le=1_000_000)
+    identity_ref: str | None = Field(default=None, max_length=512, repr=False)
+    attack_techniques: list[AttackTechniqueId] = Field(default_factory=list, max_length=100)
+    asset_id: uuid.UUID | None = None
+    environment: Literal["production", "staging", "development", "test", "unknown"] = "unknown"
+    internet_exposed: bool = False
 
 
 class SecurityEventOut(BaseModel):
@@ -228,6 +296,13 @@ class ThreatStoryOut(BaseModel):
     last_seen_at: dt.datetime
     assigned_user_id: uuid.UUID | None
     resolution: str | None
+
+
+class NativeEndpointEventOut(BaseModel):
+    endpoint: SecurityResourceOut
+    event: SecurityEventOut
+    story: ThreatStoryOut | None
+    decision: dict[str, Any]
 
 
 class DeceptionCanaryCreateIn(BaseModel):

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import text
+
 from app.core.errors import ConflictError, ResourceNotFoundError
 from app.core.logging_conf import redact_mapping
 from app.db.enums import Permission
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
         OCSFEventCreateIn,
         ThreatResponseActionCreateIn,
     )
+    from app.schemas.control_plane import NativeEndpointEventIn
 
 _RESPONSE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "crowdstrike": ("isolate_endpoint", frozenset()),
@@ -56,10 +59,159 @@ _ZSCALER_RESPONSE_ACTIONS = frozenset(
     }
 )
 
+_SHELL_PROCESSES = frozenset(
+    {"cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "sh", "bash", "zsh"}
+)
+_DOCUMENT_PROCESSES = frozenset(
+    {"winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "acrord32.exe"}
+)
+
+
+def evaluate_native_endpoint_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Evaluate bounded endpoint metadata without retaining raw command or network values."""
+
+    process = str(event.get("process_name") or "").strip().lower()
+    parent = str(event.get("parent_process_name") or "").strip().lower()
+    path = str(event.get("executable_path") or "").strip().lower()
+    command = str(event.get("command_line") or "")
+    command_lower = command.lower()
+    event_type = str(event.get("event_type") or "").strip().lower()
+    signature = str(event.get("signature_status") or "unknown").strip().lower()
+    destination = str(event.get("destination_host") or "").strip().lower()
+    supplied_techniques = {
+        str(value).strip().upper()
+        for value in (event.get("attack_techniques") or [])
+        if str(value).strip()
+    }
+    detections: list[dict[str, Any]] = []
+    techniques = set(supplied_techniques)
+
+    def detect(code: str, score: int, technique: str, rationale: str) -> None:
+        detections.append(
+            {"code": code, "score": score, "technique_id": technique, "rationale": rationale}
+        )
+        techniques.add(technique)
+
+    if process in {"procdump.exe", "rundll32.exe", "comsvcs.dll"} and (
+        "lsass" in command_lower
+        and any(marker in command_lower for marker in {"minidump", "sekurlsa", "logonpasswords"})
+    ):
+        detect(
+            "credential_access_lsass",
+            95,
+            "T1003.001",
+            "Process metadata indicates an attempt to access or dump LSASS memory.",
+        )
+    if parent in _DOCUMENT_PROCESSES and process in _SHELL_PROCESSES:
+        detect(
+            "office_spawned_shell",
+            70,
+            "T1204.002",
+            "A document or mail application spawned a command interpreter.",
+        )
+    if process in {"powershell.exe", "pwsh.exe"} and re.search(
+        r"(?:^|\s)(?:-e|-enc|-encodedcommand)(?:\s|$)", command_lower
+    ):
+        detect(
+            "encoded_powershell",
+            65,
+            "T1059.001",
+            "PowerShell metadata includes an encoded-command execution flag.",
+        )
+    if signature in {"unsigned", "invalid"} and any(
+        marker in path
+        for marker in {"\\temp\\", "/tmp/", "\\appdata\\", "/dev/shm/"}  # noqa: S108
+    ):
+        detect(
+            "unsigned_user_writable_execution",
+            75 if destination else 60,
+            "T1204.002",
+            "An unsigned executable ran from a user-writable location.",
+        )
+    if event_type in {"persistence", "autorun_change", "scheduled_task_created"}:
+        detect(
+            "persistence_change",
+            55,
+            "T1547",
+            "Endpoint telemetry reported a persistence mechanism change.",
+        )
+    if event_type in {"security_control_disabled", "sensor_tamper", "defense_evasion"}:
+        detect(
+            "security_control_tamper",
+            90,
+            "T1562.001",
+            "Endpoint telemetry reported an attempt to impair security controls.",
+        )
+    if event_type == "ransomware_activity":
+        detect(
+            "mass_file_modification",
+            95,
+            "T1486",
+            "The endpoint reported a ransomware-like burst of file modifications.",
+        )
+
+    score = min(100, sum(int(item["score"]) for item in detections))
+    if score >= 90:
+        severity = "critical"
+    elif score >= 65:
+        severity = "high"
+    elif score >= 40:
+        severity = "medium"
+    elif score:
+        severity = "low"
+    else:
+        severity = "info"
+    return {
+        "verdict": "detect" if detections else "observe",
+        "severity": severity,
+        "score": score,
+        "detections": detections,
+        "attack_techniques": sorted(techniques),
+        "command_digest": canonical_digest(command) if command else None,
+        "destination_digest": canonical_digest(destination) if destination else None,
+    }
+
 
 def canonical_digest(value: Any) -> str:
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(data).hexdigest()
+
+
+def native_endpoint_event_key(endpoint_key: str, event_key: str) -> str:
+    """Return a fixed-width event key scoped to the reporting endpoint."""
+
+    return f"cynux:endpoint:{canonical_digest({'endpoint': endpoint_key, 'event': event_key})}"
+
+
+def endpoint_advisory_lock_id(organization_id: uuid.UUID, endpoint_key: str) -> int:
+    """Map one tenant endpoint to a stable signed PostgreSQL advisory-lock key."""
+
+    digest = hashlib.sha256(f"{organization_id}:{endpoint_key}".encode()).digest()[:8]
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def next_endpoint_risk(_current: Decimal | int | float, decision: Mapping[str, Any]) -> Decimal:
+    """Reflect the latest deterministic sensor evaluation; open stories retain history."""
+
+    return min(Decimal("100"), max(Decimal("0"), Decimal(str(decision.get("score") or 0))))
+
+
+def validate_native_endpoint_replay(existing_digest: str | None, incoming_digest: str) -> None:
+    if existing_digest != incoming_digest:
+        raise ConflictError("endpoint event replay payload does not match the original event")
+
+
+def should_apply_endpoint_risk(
+    current_observed_at: str | dt.datetime | None, incoming_observed_at: dt.datetime
+) -> bool:
+    if current_observed_at is None:
+        return True
+    current = (
+        current_observed_at
+        if isinstance(current_observed_at, dt.datetime)
+        else _moment_from_iso(current_observed_at)
+    )
+    return incoming_observed_at >= current
 
 
 def normalize_response_request(
@@ -75,16 +227,16 @@ def normalize_response_request(
         raise ValueError(f"{provider} does not support {action_type}")
     extra = set(requested_action) - allowed_keys
     if extra:
-        raise ValueError(f"response request contains unsupported fields: {', '.join(sorted(extra))}")
+        raise ValueError(
+            f"response request contains unsupported fields: {', '.join(sorted(extra))}"
+        )
     if len(json.dumps(requested_action, default=str)) > 32_000:
         raise ValueError("response request exceeds the maximum size")
     safe = redact_mapping(dict(requested_action))
     if provider == "zscaler":
         provider_action = str(safe.get("provider_action", ""))
         desired_state = safe.get("desired_state")
-        if provider_action not in _ZSCALER_RESPONSE_ACTIONS or not isinstance(
-            desired_state, dict
-        ):
+        if provider_action not in _ZSCALER_RESPONSE_ACTIONS or not isinstance(desired_state, dict):
             raise ValueError("Zscaler response requires an allow-listed action and desired state")
     elif provider in {"jira", "servicenow"}:
         summary = str(safe.get("summary", "")).strip()
@@ -203,10 +355,15 @@ def assess_data_store(
         region=region,
         scan_mode=scan_mode,
         classifications=tuple(safe_material["classifications"]),
-        identity_access=tuple(redact_mapping(item) for item in identities if isinstance(item, dict)),
+        identity_access=tuple(
+            redact_mapping(item) for item in identities if isinstance(item, dict)
+        ),
         encryption={"enabled": metadata.get("encrypted") is True},
         retention={"days": int(metadata.get("retention_days") or 0)},
-        residency={"region": region, "approved": not approved_regions or region in approved_regions},
+        residency={
+            "region": region,
+            "approved": not approved_regions or region in approved_regions,
+        },
         findings=tuple(findings),
         recommendations=tuple(recommendations),
         posture_score=float(score),
@@ -249,7 +406,9 @@ def normalize_ocsf_event(payload: Mapping[str, Any], *, source: str) -> dict[str
     ]
     attacks = [
         {
-            "technique_id": str(item.get("technique_id") or item.get("technique", {}).get("uid", "")),
+            "technique_id": str(
+                item.get("technique_id") or item.get("technique", {}).get("uid", "")
+            ),
             "tactic": str(item.get("tactic") or item.get("tactic", {}).get("name", "")),
         }
         for item in list(payload.get("attacks") or [])[:100]
@@ -522,6 +681,164 @@ async def ingest_ocsf_event(
     return row
 
 
+async def ingest_native_endpoint_event(
+    session: AsyncSession,
+    principal: Principal,
+    payload: NativeEndpointEventIn,
+) -> dict[str, Any]:
+    """Register an endpoint, evaluate telemetry, persist safe evidence, and correlate a story."""
+
+    from app.schemas.control_plane import SecurityEventIn, SecurityResourceUpsertIn
+    from app.services import control_plane as control_plane_service
+
+    principal.require(Permission.ENDPOINT_INGEST)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": endpoint_advisory_lock_id(principal.organization_id, payload.endpoint_key)},
+    )
+    persisted_event_key = native_endpoint_event_key(payload.endpoint_key, payload.event_key)
+    payload_digest = canonical_digest(payload.model_dump(mode="json"))
+    existing = await session.scalar(
+        tenant_select(SecurityEvent, principal.organization_id).where(
+            SecurityEvent.event_key == persisted_event_key
+        )
+    )
+    if existing is not None:
+        validate_native_endpoint_replay(existing.content_digest, payload_digest)
+        endpoint = await session.scalar(
+            tenant_select(SecurityResource, principal.organization_id).where(
+                SecurityResource.id == existing.resource_id
+            )
+        )
+        if endpoint is None:
+            raise ResourceNotFoundError("Endpoint resource for the existing event was not found")
+        evidence = dict(existing.evidence or {})
+        decision = {
+            "verdict": str(evidence.get("verdict") or "observe"),
+            "severity": existing.severity,
+            "score": int((existing.metrics or {}).get("risk_score") or 0),
+            "detections": list(evidence.get("detections") or []),
+            "attack_techniques": list(evidence.get("attack_techniques") or []),
+            "command_digest": evidence.get("command_digest"),
+            "destination_digest": evidence.get("destination_digest"),
+        }
+        story = None
+        if control_plane_service.should_correlate_security_event(
+            category=existing.category, severity=existing.severity
+        ):
+            story_key = control_plane_service.correlation_key_for_event(
+                organization_id=principal.organization_id,
+                occurred_at=existing.occurred_at,
+                asset_id=existing.asset_id,
+                resource_id=existing.resource_id,
+                identity_ref=existing.identity_ref,
+            )
+            story = await session.scalar(
+                tenant_select(SecurityThreatStory, principal.organization_id).where(
+                    SecurityThreatStory.correlation_key == story_key
+                )
+            )
+        return {"endpoint": endpoint, "event": existing, "story": story, "decision": decision}
+
+    decision = evaluate_native_endpoint_event(payload.model_dump(mode="python"))
+    endpoint_resource_key = f"cynux:endpoint:{canonical_digest(payload.endpoint_key)[:32]}"
+    endpoint = await control_plane_service._upsert_resource(
+        session,
+        principal,
+        SecurityResourceUpsertIn(
+            resource_key=endpoint_resource_key,
+            kind="endpoint",
+            name=payload.hostname,
+            source_kind="cynux_endpoint_sensor",
+            source_key=payload.endpoint_key,
+            observed_at=payload.occurred_at,
+            confidence=Decimal("0.990"),
+            provider="cynux",
+            external_id=payload.endpoint_key,
+            asset_id=payload.asset_id,
+            environment=payload.environment,
+            internet_exposed=payload.internet_exposed,
+            approved=True,
+            attributes={
+                "operating_system": payload.operating_system,
+                "sensor_status": "reporting",
+            },
+            provenance={"collector": "cynux_endpoint_sensor", "schema_version": "1.0"},
+        ),
+    )
+    if should_apply_endpoint_risk(endpoint.attributes.get("risk_observed_at"), payload.occurred_at):
+        endpoint.risk_score = next_endpoint_risk(endpoint.risk_score, decision)
+        endpoint.posture_status = "at_risk" if endpoint.risk_score >= 70 else "healthy"
+        endpoint.attributes = {
+            **endpoint.attributes,
+            "last_event_type": payload.event_type,
+            "risk_observed_at": payload.occurred_at.isoformat(),
+        }
+
+    detection_codes = [item["code"] for item in decision["detections"]]
+    summary = (
+        f"Cynux detected {len(detection_codes)} endpoint behavior"
+        f"{'s' if len(detection_codes) != 1 else ''} on {payload.hostname}."
+        if detection_codes
+        else f"Cynux observed {payload.event_type.replace('_', ' ')} on {payload.hostname}."
+    )
+    event = await control_plane_service._ingest_event(
+        session,
+        principal,
+        SecurityEventIn(
+            event_key=persisted_event_key,
+            category="endpoint",
+            event_type=payload.event_type,
+            source_kind="cynux_endpoint_sensor",
+            occurred_at=payload.occurred_at,
+            severity=decision["severity"],
+            summary=summary,
+            content_digest=payload_digest,
+            asset_id=payload.asset_id,
+            resource_id=endpoint.id,
+            identity_ref=payload.identity_ref,
+            metrics={
+                "risk_score": decision["score"],
+                "detection_count": len(detection_codes),
+                "destination_port": payload.destination_port,
+                "file_activity_count": payload.file_activity_count,
+            },
+            evidence={
+                "verdict": decision["verdict"],
+                "detection_codes": detection_codes,
+                "detections": decision["detections"],
+                "attack_techniques": decision["attack_techniques"],
+                "process_name": payload.process_name,
+                "parent_process_name": payload.parent_process_name,
+                "command_digest": decision["command_digest"],
+                "destination_digest": decision["destination_digest"],
+                "signature_status": payload.signature_status,
+            },
+        ),
+    )
+    story = None
+    if control_plane_service.should_correlate_security_event(
+        category=event.category, severity=event.severity
+    ):
+        story_key = control_plane_service.correlation_key_for_event(
+            organization_id=principal.organization_id,
+            occurred_at=event.occurred_at,
+            asset_id=event.asset_id,
+            resource_id=event.resource_id,
+            identity_ref=event.identity_ref,
+        )
+        story = await session.scalar(
+            tenant_select(SecurityThreatStory, principal.organization_id).where(
+                SecurityThreatStory.correlation_key == story_key
+            )
+        )
+    if story is not None and detection_codes:
+        story.title = f"Endpoint detection on {payload.hostname}"
+        story.summary = "Cynux correlated deterministic endpoint detections for analyst review."
+    await session.flush()
+    return {"endpoint": endpoint, "event": event, "story": story, "decision": decision}
+
+
 def _moment_from_iso(value: str) -> dt.datetime:
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -672,7 +989,8 @@ async def _dispatch_response_action(
     client = SlackClient(scoped, redis)
     try:
         message = await client.notify(
-            str(requested["text"]), channel=str(requested["channel"]) if requested.get("channel") else None
+            str(requested["text"]),
+            channel=str(requested["channel"]) if requested.get("channel") else None,
         )
         return {
             "provider": "slack",

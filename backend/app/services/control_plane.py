@@ -139,9 +139,7 @@ def evaluate_resource_policy(*, resource: dict[str, Any], rules: dict[str, Any])
     return {"decision": decision, "severity": severity, "score": score, "findings": findings}
 
 
-_AI_RESOURCE_KINDS = frozenset(
-    {"ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"}
-)
+_AI_RESOURCE_KINDS = frozenset({"ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"})
 
 
 def evaluate_native_ai_posture(resource: dict[str, Any]) -> dict[str, Any]:
@@ -192,10 +190,10 @@ def evaluate_native_ai_posture(resource: dict[str, Any]) -> dict[str, Any]:
             "10",
             "Assign an accountable team and escalation contact",
         )
-    if (
-        resource.get("internet_exposed")
-        and resource.get("sensitivity") in {"confidential", "restricted"}
-    ):
+    if resource.get("internet_exposed") and resource.get("sensitivity") in {
+        "confidential",
+        "restricted",
+    }:
         add(
             "sensitive_ai_endpoint_exposed",
             "Internet-exposed AI resource handles sensitive data",
@@ -216,8 +214,7 @@ def evaluate_native_ai_posture(resource: dict[str, Any]) -> dict[str, Any]:
     if isinstance(principals, str):
         principals = [principals]
     if isinstance(principals, list) and any(
-        str(value).strip().casefold() in {"*", "all", "public", "anonymous"}
-        for value in principals
+        str(value).strip().casefold() in {"*", "all", "public", "anonymous"} for value in principals
     ):
         add(
             "wildcard_principal",
@@ -244,8 +241,7 @@ def evaluate_native_ai_posture(resource: dict[str, Any]) -> dict[str, Any]:
     if isinstance(data_connections, dict):
         data_connections = [data_connections]
     if isinstance(data_connections, list) and any(
-        isinstance(item, dict) and item.get("reviewed") is not True
-        for item in data_connections
+        isinstance(item, dict) and item.get("reviewed") is not True for item in data_connections
     ):
         add(
             "unreviewed_data_connection",
@@ -305,7 +301,9 @@ def correlation_key_for_event(
     """Create an opaque, stable 24-hour correlation window for related signals."""
 
     anchor = (
-        f"identity:{identity_ref.casefold()}"
+        f"resource-identity:{resource_id}:{identity_ref.casefold()}"
+        if resource_id and identity_ref
+        else f"identity:{identity_ref.casefold()}"
         if identity_ref
         else f"asset:{asset_id}"
         if asset_id
@@ -330,9 +328,10 @@ def merge_story_values(
     occurred_at: dt.datetime,
     severity: str,
     event_type: str,
+    resource_id: str | None = None,
 ) -> dict[str, Any]:
     merged = dict(current)
-    merged["event_ids"] = list(dict.fromkeys([*current.get("event_ids", []), event_id]))
+    merged["event_ids"] = list(dict.fromkeys([*current.get("event_ids", []), event_id]))[-500:]
     merged["asset_ids"] = list(
         dict.fromkeys([*current.get("asset_ids", []), *([asset_id] if asset_id else [])])
     )
@@ -349,13 +348,20 @@ def merge_story_values(
                 "event_type": event_type,
                 "occurred_at": occurred_at.isoformat(),
                 "severity": severity,
+                "resource_id": resource_id,
             }
         )
-    merged["timeline"] = sorted(timeline, key=lambda item: str(item["occurred_at"]))
+    merged["timeline"] = sorted(timeline, key=lambda item: str(item["occurred_at"]))[-500:]
     merged["severity"] = max(
         (str(current.get("severity", "info")), severity), key=lambda item: _SEVERITY_ORDER[item]
     )
     return merged
+
+
+def should_correlate_security_event(*, category: str, severity: str) -> bool:
+    if category == "endpoint":
+        return severity in {"high", "critical"}
+    return category in {"incident", "identity", "deception", "access"}
 
 
 def calculate_experience_score(
@@ -402,6 +408,12 @@ async def upsert_resource(
     session: AsyncSession, principal: Principal, payload: SecurityResourceUpsertIn
 ) -> SecurityResource:
     principal.require(Permission.INTEGRATION_MANAGE)
+    return await _upsert_resource(session, principal, payload)
+
+
+async def _upsert_resource(
+    session: AsyncSession, principal: Principal, payload: SecurityResourceUpsertIn
+) -> SecurityResource:
     await _assert_optional_refs(session, principal, payload)
     now = dt.datetime.now(dt.UTC)
     resource = await session.scalar(
@@ -822,9 +834,7 @@ async def run_native_ai_posture_assessment(
                     tenant_select(SecurityRecommendation, principal.organization_id).where(
                         SecurityRecommendation.resource_id == resource.id,
                         SecurityRecommendation.policy_id == policy.id,
-                        SecurityRecommendation.status.in_(
-                            ["proposed", "approved", "failed"]
-                        ),
+                        SecurityRecommendation.status.in_(["proposed", "approved", "failed"]),
                     )
                 )
             ).all()
@@ -1011,6 +1021,7 @@ async def _correlate_event(
         occurred_at=event.occurred_at,
         severity=event.severity,
         event_type=event.event_type,
+        resource_id=str(event.resource_id) if event.resource_id else None,
     )
     story.event_ids = merged["event_ids"]
     story.asset_ids = merged["asset_ids"]
@@ -1030,6 +1041,12 @@ async def ingest_event(
     session: AsyncSession, principal: Principal, payload: SecurityEventIn
 ) -> SecurityEvent:
     principal.require(Permission.INTEGRATION_MANAGE)
+    return await _ingest_event(session, principal, payload)
+
+
+async def _ingest_event(
+    session: AsyncSession, principal: Principal, payload: SecurityEventIn
+) -> SecurityEvent:
     existing = await session.scalar(
         tenant_select(SecurityEvent, principal.organization_id).where(
             SecurityEvent.event_key == payload.event_key
@@ -1069,7 +1086,7 @@ async def ingest_event(
     )
     session.add(event)
     await session.flush()
-    if payload.category in {"incident", "identity", "deception", "access", "endpoint"}:
+    if should_correlate_security_event(category=payload.category, severity=payload.severity):
         await _correlate_event(session, principal, event)
     await record(
         session,

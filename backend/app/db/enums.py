@@ -54,6 +54,7 @@ class Permission(StrEnum):
     MEMBER_MANAGE = "member:manage"
     INTEGRATION_READ = "integration:read"
     INTEGRATION_MANAGE = "integration:manage"
+    ENDPOINT_INGEST = "endpoint:ingest"
     ASSESSMENT_READ = "assessment:read"
     ASSESSMENT_CREATE = "assessment:create"
     ASSESSMENT_APPROVE = "assessment:approve"

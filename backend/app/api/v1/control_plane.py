@@ -60,6 +60,8 @@ from app.schemas.control_plane import (
     DeceptionCanaryOut,
     ExperienceSummaryOut,
     NativeAIPostureAssessmentOut,
+    NativeEndpointEventIn,
+    NativeEndpointEventOut,
     RiskSimulationCreateIn,
     RiskSimulationOut,
     SecurityEventIn,
@@ -281,18 +283,14 @@ async def create_agent_assurance(
     return AgentRunAssuranceOut.model_validate(row)
 
 
-@router.post(
-    "/agent-assurance/{assurance_id}/finalize", response_model=AgentRunAssuranceOut
-)
+@router.post("/agent-assurance/{assurance_id}/finalize", response_model=AgentRunAssuranceOut)
 async def finalize_agent_assurance(
     assurance_id: uuid.UUID,
     payload: AgentRunAssuranceFinalizeIn,
     principal: PrincipalDep,
     session: DbSession,
 ) -> AgentRunAssuranceOut:
-    row = await assurance_work.finalize_agent_assurance(
-        session, principal, assurance_id, payload
-    )
+    row = await assurance_work.finalize_agent_assurance(session, principal, assurance_id, payload)
     await session.commit()
     return AgentRunAssuranceOut.model_validate(row)
 
@@ -310,9 +308,7 @@ async def create_validation_recipe(
     return ValidationRecipeOut.model_validate(row)
 
 
-@router.post(
-    "/validation-recipes/{recipe_id}/evidence", response_model=ValidationRecipeOut
-)
+@router.post("/validation-recipes/{recipe_id}/evidence", response_model=ValidationRecipeOut)
 async def append_validation_evidence(
     recipe_id: uuid.UUID,
     payload: ValidationEvidenceAppendIn,
@@ -331,9 +327,7 @@ async def append_validation_evidence(
     return ValidationRecipeOut.model_validate(row)
 
 
-@router.post(
-    "/validation-recipes/{recipe_id}/verify", response_model=ValidationRecipeOut
-)
+@router.post("/validation-recipes/{recipe_id}/verify", response_model=ValidationRecipeOut)
 async def verify_validation_recipe(
     recipe_id: uuid.UUID,
     payload: ValidationRecipeVerifyIn,
@@ -357,9 +351,7 @@ async def create_data_security_assessment(
     principal: PrincipalDep,
     session: DbSession,
 ) -> DataSecurityAssessmentOut:
-    row = await security_operations.create_data_security_assessment(
-        session, principal, payload
-    )
+    row = await security_operations.create_data_security_assessment(session, principal, payload)
     await session.commit()
     return DataSecurityAssessmentOut.model_validate(row)
 
@@ -382,6 +374,28 @@ async def ingest_ocsf_event(
 
 
 @router.post(
+    "/endpoint/events",
+    response_model=NativeEndpointEventOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_native_endpoint_event(
+    payload: NativeEndpointEventIn,
+    principal: PrincipalDep,
+    session: DbSession,
+) -> NativeEndpointEventOut:
+    result = await security_operations.ingest_native_endpoint_event(session, principal, payload)
+    await session.commit()
+    return NativeEndpointEventOut(
+        endpoint=SecurityResourceOut.model_validate(result["endpoint"]),
+        event=SecurityEventOut.model_validate(result["event"]),
+        story=(
+            ThreatStoryOut.model_validate(result["story"]) if result["story"] is not None else None
+        ),
+        decision=result["decision"],
+    )
+
+
+@router.post(
     "/soc/response-actions",
     response_model=ThreatResponseActionOut,
     status_code=status.HTTP_201_CREATED,
@@ -391,9 +405,7 @@ async def create_threat_response_action(
     principal: PrincipalDep,
     session: DbSession,
 ) -> ThreatResponseActionOut:
-    row = await security_operations.create_threat_response_action(
-        session, principal, payload
-    )
+    row = await security_operations.create_threat_response_action(session, principal, payload)
     await session.commit()
     return ThreatResponseActionOut.model_validate(row)
 
@@ -517,9 +529,7 @@ async def transactions(
     session: DbSession,
     status_filter: str | None = Query(default=None, alias="status"),
 ) -> list[EnforcementTransactionOut]:
-    rows = await assurance_transactions.list_transactions(
-        session, principal, status=status_filter
-    )
+    rows = await assurance_transactions.list_transactions(session, principal, status=status_filter)
     return [EnforcementTransactionOut.model_validate(row) for row in rows]
 
 
@@ -657,17 +667,13 @@ async def record_canary_interaction(
     principal: PrincipalDep,
     session: DbSession,
 ) -> CanaryInteractionOut:
-    row = await service.record_canary_interaction(
-        session, principal, canary_id, payload
-    )
+    row = await service.record_canary_interaction(session, principal, canary_id, payload)
     await session.commit()
     return CanaryInteractionOut.model_validate(row)
 
 
 @router.get("/risk-simulations", response_model=list[RiskSimulationOut])
-async def risk_simulations(
-    principal: PrincipalDep, session: DbSession
-) -> list[RiskSimulationOut]:
+async def risk_simulations(principal: PrincipalDep, session: DbSession) -> list[RiskSimulationOut]:
     return [
         RiskSimulationOut.model_validate(row)
         for row in await service.list_risk_simulations(session, principal)
@@ -726,7 +732,10 @@ async def assess_native_ai_posture(
 
 @router.get("/policies", response_model=list[SecurityPolicyOut])
 async def policies(principal: PrincipalDep, session: DbSession) -> list[SecurityPolicyOut]:
-    return [SecurityPolicyOut.model_validate(row) for row in await service.list_policies(session, principal)]
+    return [
+        SecurityPolicyOut.model_validate(row)
+        for row in await service.list_policies(session, principal)
+    ]
 
 
 @router.post("/policies", response_model=SecurityPolicyOut, status_code=status.HTTP_201_CREATED)
@@ -749,7 +758,9 @@ async def evaluate_policy(
 
 @router.get("/recommendations", response_model=list[SecurityRecommendationOut])
 async def recommendations(
-    principal: PrincipalDep, session: DbSession, status_filter: str | None = Query(default=None, alias="status")
+    principal: PrincipalDep,
+    session: DbSession,
+    status_filter: str | None = Query(default=None, alias="status"),
 ) -> list[SecurityRecommendationOut]:
     rows = await service.list_recommendations(session, principal, status=status_filter)
     return [SecurityRecommendationOut.model_validate(row) for row in rows]

@@ -13,7 +13,7 @@ import { TBody, TD, TH, THead, TR, Table } from "@/components/ui/Table";
 import { useApiResource, useMutation, type UseApiResourceResult } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { projectPostureCards, recommendationDecisionLabel, riskTone } from "@/lib/control-plane";
+import { buildDemoEndpointEvent, endpointFleetSummary, projectPostureCards, recommendationDecisionLabel, riskTone } from "@/lib/control-plane";
 import { assuranceStatusTone } from "@/lib/assurance-runtime";
 import { formatDateTime, humanize } from "@/lib/format";
 import type {
@@ -22,6 +22,7 @@ import type {
   DataClassification,
   NativeAIPostureAssessment,
   SecurityCanary,
+  SecurityEvent,
   SecurityExperienceSummary,
   SecurityPolicy,
   SecurityPolicyKind,
@@ -32,11 +33,12 @@ import type {
   SecurityThreatStory,
 } from "@/lib/types";
 
-type Workspace = "overview" | "assurance" | "resources" | "policies" | "ai-data" | "soc" | "deception" | "risk";
+type Workspace = "overview" | "assurance" | "resources" | "endpoint" | "policies" | "ai-data" | "soc" | "deception" | "risk";
 const WORKSPACES: Array<{ id: Workspace; label: string }> = [
   { id: "overview", label: "Posture" },
   { id: "assurance", label: "Assurance runtime" },
   { id: "resources", label: "Inventory" },
+  { id: "endpoint", label: "Endpoint/XDR" },
   { id: "policies", label: "Policies" },
   { id: "ai-data", label: "AI & data" },
   { id: "soc", label: "Threat stories" },
@@ -54,6 +56,8 @@ export default function ControlPlanePage() {
   const policies = useApiResource(() => api.controlPlane.policies(), [], { enabled: canRead });
   const recommendations = useApiResource(() => api.controlPlane.recommendations(), [], { enabled: canRead });
   const stories = useApiResource(() => api.controlPlane.threatStories(), [], { enabled: canRead });
+  const endpoints = useApiResource(() => api.controlPlane.resources({ kind: "endpoint", limit: 500 }), [], { enabled: canRead });
+  const endpointEvents = useApiResource(() => api.controlPlane.events("endpoint", 500), [], { enabled: canRead });
   const experience = useApiResource(() => api.controlPlane.experience(), [], { enabled: canRead });
   const canaries = useApiResource(() => api.controlPlane.canaries(), [], { enabled: canRead });
   const risks = useApiResource(() => api.controlPlane.riskSimulations(), [], { enabled: canRead });
@@ -61,8 +65,8 @@ export default function ControlPlanePage() {
   const [nativeResult, setNativeResult] = React.useState<NativeAIPostureAssessment | null>(null);
   const refresh = React.useCallback(() => {
     posture.refetch(); resources.refetch(); policies.refetch(); recommendations.refetch();
-    stories.refetch(); experience.refetch(); canaries.refetch(); risks.refetch(); assurance.refetch();
-  }, [posture, resources, policies, recommendations, stories, experience, canaries, risks, assurance]);
+    stories.refetch(); endpoints.refetch(); endpointEvents.refetch(); experience.refetch(); canaries.refetch(); risks.refetch(); assurance.refetch();
+  }, [posture, resources, policies, recommendations, stories, endpoints, endpointEvents, experience, canaries, risks, assurance]);
   const nativePosture = useMutation(() => api.controlPlane.runNativeAIPosture(), {
     onSuccess: (result) => { setNativeResult(result); refresh(); },
   });
@@ -85,6 +89,7 @@ export default function ControlPlanePage() {
       {workspace === "overview" && <Overview posture={posture} recommendations={recommendations} canManage={canManage} onChanged={refresh} />}
       {workspace === "assurance" && <AssuranceRuntime resource={assurance} />}
       {workspace === "resources" && <Inventory resource={resources} canManage={canManage} onChanged={refresh} />}
+      {workspace === "endpoint" && <EndpointWorkspace endpoints={endpoints} events={endpointEvents} canManage={canManage} onChanged={refresh} />}
       {workspace === "policies" && <Policies resource={policies} canManage={canManage} onChanged={refresh} />}
       {workspace === "ai-data" && <AIDataWorkspace />}
       {workspace === "soc" && <SocWorkspace stories={stories} experience={experience} />}
@@ -188,6 +193,22 @@ function AIDataWorkspace() {
   const ai = useMutation(() => api.controlPlane.evaluateAI({ direction: "prompt", content, agent_key: "operator:test" }), { onSuccess: setAiResult });
   const classify = useMutation(() => api.controlPlane.classifyData(content), { onSuccess: setDataResult });
   return <div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader><CardTitle>Transient inspection</CardTitle></CardHeader><CardBody className="space-y-4"><p className="text-sm text-muted">Content is evaluated in memory. Only a digest, length, labels, and decision are persisted.</p><textarea aria-label="Content to inspect" className="min-h-48 w-full rounded-md border border-line bg-surface-2 p-3 text-sm" value={content} onChange={(event) => setContent(event.target.value)} placeholder="Paste a prompt or output to test policy enforcement" /><div className="flex gap-2"><Button disabled={!content} loading={ai.loading} onClick={() => void ai.run()}>Run AI guard</Button><Button variant="outline" disabled={!content} loading={classify.loading} onClick={() => void classify.run()}>Classify & redact</Button></div></CardBody></Card><Card><CardHeader><CardTitle>Decision</CardTitle></CardHeader><CardBody className="space-y-4">{!aiResult && !dataResult ? <EmptyState title="No inspection yet" description="Run AI guard or data classification to see the deterministic decision." /> : <>{aiResult && <div><Badge tone={riskTone(Number(aiResult.score))}>{aiResult.decision}</Badge><p className="mt-2 text-sm text-muted">{aiResult.reasons.map(humanize).join(", ") || "No policy violations"}</p></div>}{dataResult && <div><Badge tone={dataResult.highest_sensitivity === "restricted" ? "danger" : "warn"}>{dataResult.highest_sensitivity}</Badge><p className="mt-2 text-sm text-muted">{dataResult.labels.map(humanize).join(", ") || "No sensitive classes"}</p><pre className="mt-3 whitespace-pre-wrap rounded bg-surface-2 p-3 text-xs">{dataResult.redacted_content}</pre></div>}</>}</CardBody></Card></div>;
+}
+
+function EndpointWorkspace({ endpoints, events, canManage, onChanged }: { endpoints: UseApiResourceResult<SecurityResource[]>; events: UseApiResourceResult<SecurityEvent[]>; canManage: boolean; onChanged: () => void }) {
+  const [lastDecision, setLastDecision] = React.useState<{ verdict: string; severity: string; score: number } | null>(null);
+  const simulate = useMutation(() => api.controlPlane.ingestEndpointEvent(
+    buildDemoEndpointEvent(crypto.randomUUID(), new Date().toISOString()),
+  ), { onSuccess: (result) => { setLastDecision(result.decision); onChanged(); } });
+  if ((endpoints.loading && !endpoints.data) || (events.loading && !events.data)) return <LoadingState label="Loading endpoint telemetry…" />;
+  if (endpoints.error || events.error) return <ErrorState message={endpoints.error ?? events.error ?? "Endpoint telemetry unavailable"} onRetry={() => { endpoints.refetch(); events.refetch(); }} />;
+  const summary = endpointFleetSummary(endpoints.data ?? [], events.data ?? []);
+  return <div className="space-y-4">
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardBody><Metric label="Known endpoints" value={summary.endpoints} /></CardBody></Card><Card><CardBody><Metric label="Sensors reporting" value={summary.reporting} /></CardBody></Card><Card><CardBody><Metric label="Endpoints at risk" value={summary.atRisk} /></CardBody></Card><Card><CardBody><Metric label="High/critical detections" value={summary.activeDetections} /></CardBody></Card></div>
+    {canManage && <Card><CardHeader><CardTitle>Native Cynux telemetry</CardTitle></CardHeader><CardBody className="flex flex-wrap items-center justify-between gap-4"><div><p className="text-sm text-fg">The ingestion API registers endpoint identity, evaluates bounded telemetry, and correlates a threat story without storing raw command lines or destinations.</p><p className="mt-1 text-xs text-muted">This module is detection-only. Host isolation still requires a separately installed and approved response agent or provider. The demo creates test-environment telemetry only.</p></div><Button loading={simulate.loading} onClick={() => void simulate.run()}>Generate demo detection</Button>{simulate.errorMessage && <p role="alert" className="w-full text-sm text-danger">{simulate.errorMessage}</p>}{lastDecision && <p className="w-full text-sm"><Badge tone={riskTone(lastDecision.score)}>{lastDecision.severity}</Badge><span className="ml-2 text-muted">{humanize(lastDecision.verdict)} · score {lastDecision.score}</span></p>}</CardBody></Card>}
+    <Card><CardHeader><CardTitle>Endpoint fleet</CardTitle></CardHeader><CardBody>{!endpoints.data?.length ? <EmptyState title="No native endpoints" description="Deploy a Cynux collector or use the test-environment demo event to register an endpoint." /> : <Table><THead><TR><TH>Endpoint</TH><TH>OS</TH><TH>Environment</TH><TH>Risk</TH><TH>Sensor</TH><TH>Last seen</TH></TR></THead><TBody>{endpoints.data.map((item) => <TR key={item.id}><TD className="font-medium text-fg">{item.name}</TD><TD>{humanize(String(item.attributes.operating_system ?? "unknown"))}</TD><TD>{humanize(item.environment)}</TD><TD><Badge tone={riskTone(Number(item.risk_score))}>{Number(item.risk_score).toFixed(0)}</Badge></TD><TD>{humanize(String(item.attributes.sensor_status ?? "unknown"))}</TD><TD>{formatDateTime(item.last_seen_at)}</TD></TR>)}</TBody></Table>}</CardBody></Card>
+    <Card><CardHeader><CardTitle>Detection timeline</CardTitle></CardHeader><CardBody>{!events.data?.length ? <EmptyState title="No endpoint events" description="Endpoint observations and deterministic detections appear here." /> : <div className="space-y-3">{events.data.map((event) => <div key={event.id} className="rounded-lg border border-line p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex gap-2"><Badge tone={riskTone(event.severity === "critical" ? 100 : event.severity === "high" ? 70 : 20)}>{event.severity}</Badge><Badge tone="neutral">{humanize(String(event.evidence.verdict ?? "observe"))}</Badge></div><span className="text-xs text-muted">{formatDateTime(event.occurred_at)}</span></div><p className="mt-2 text-sm font-medium text-fg">{event.summary}</p><p className="mt-1 text-xs text-muted">{(Array.isArray(event.evidence.detection_codes) ? event.evidence.detection_codes : []).map((value) => humanize(String(value))).join(", ") || humanize(event.event_type)}</p></div>)}</div>}</CardBody></Card>
+  </div>;
 }
 
 function SocWorkspace({ stories, experience }: { stories: UseApiResourceResult<SecurityThreatStory[]>; experience: UseApiResourceResult<SecurityExperienceSummary> }) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { projectPostureCards, recommendationDecisionLabel, riskTone } from "./control-plane";
+import { buildDemoEndpointEvent, endpointFleetSummary, projectPostureCards, recommendationDecisionLabel, riskTone } from "./control-plane";
 import type { SecurityPosture } from "./types";
 
 const posture: SecurityPosture = {
@@ -39,5 +39,28 @@ describe("control-plane projections", () => {
     expect(riskTone(82)).toBe("danger");
     expect(riskTone(60)).toBe("warn");
     expect(riskTone(20)).toBe("ok");
+  });
+
+  it("summarizes native endpoint coverage and active detections", () => {
+    expect(endpointFleetSummary(
+      [
+        { posture_status: "healthy", attributes: { sensor_status: "reporting" } },
+        { posture_status: "at_risk", attributes: { sensor_status: "reporting" } },
+        { posture_status: "inactive", attributes: { sensor_status: "stale" } },
+      ],
+      [
+        { severity: "critical", evidence: { verdict: "detect" } },
+        { severity: "info", evidence: { verdict: "observe" } },
+      ],
+    )).toEqual({ endpoints: 3, reporting: 2, atRisk: 1, activeDetections: 1 });
+  });
+
+  it("keeps endpoint identity stable while making demo telemetry idempotent per event", () => {
+    const event = buildDemoEndpointEvent("event-42", "2026-10-21T00:00:00.000Z");
+    expect(event.endpoint_key).toBe("cynux-demo-endpoint");
+    expect(event.event_key).toBe("demo-event-42");
+    expect(event.environment).toBe("test");
+    expect(event.parent_process_name).toBe("winword.exe");
+    expect(event.process_name).toBe("powershell.exe");
   });
 });

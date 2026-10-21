@@ -4,6 +4,11 @@ import datetime as dt
 import uuid
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
+from app.core.errors import PermissionDeniedError
+
 
 def test_event_correlation_groups_related_sources_without_exposing_identity() -> None:
     from app.services.control_plane import correlation_key_for_event
@@ -49,12 +54,49 @@ def test_threat_story_merge_is_deduplicated_and_time_ordered() -> None:
         occurred_at=dt.datetime(2026, 10, 20, 10, 0, tzinfo=dt.UTC),
         severity="critical",
         event_type="canary_triggered",
+        resource_id="endpoint-7",
     )
 
     assert merged["event_ids"] == ["event-a", "event-b"]
     assert merged["asset_ids"] == ["asset-a"]
     assert merged["severity"] == "critical"
     assert merged["timeline"][0]["event_id"] == "event-b"
+    assert merged["timeline"][0]["resource_id"] == "endpoint-7"
+
+
+def test_endpoint_correlation_keeps_same_identity_separate_by_endpoint() -> None:
+    """Removing endpoint identity from the anchor must fail this test."""
+
+    from app.services.control_plane import correlation_key_for_event
+
+    org = uuid.uuid4()
+    occurred = dt.datetime(2026, 10, 21, tzinfo=dt.UTC)
+    first = correlation_key_for_event(
+        organization_id=org,
+        occurred_at=occurred,
+        asset_id=None,
+        resource_id=uuid.uuid4(),
+        identity_ref="employee-17",
+    )
+    second = correlation_key_for_event(
+        organization_id=org,
+        occurred_at=occurred,
+        asset_id=None,
+        resource_id=uuid.uuid4(),
+        identity_ref="employee-17",
+    )
+    assert first != second
+
+
+def test_only_actionable_endpoint_events_create_threat_stories() -> None:
+    """Informational endpoint observations must not create hot-row threat stories."""
+
+    from app.services.control_plane import should_correlate_security_event
+
+    assert not should_correlate_security_event(category="endpoint", severity="info")
+    assert not should_correlate_security_event(category="endpoint", severity="medium")
+    assert should_correlate_security_event(category="endpoint", severity="high")
+    assert should_correlate_security_event(category="incident", severity="low")
 
 
 def test_experience_score_blends_availability_latency_and_errors() -> None:
@@ -88,3 +130,103 @@ def test_control_plane_operational_routes_are_mounted() -> None:
     assert "/control-plane/canaries" in paths
     assert "/control-plane/canaries/{canary_id}/interactions" in paths
     assert "/control-plane/risk-simulations" in paths
+    assert "/control-plane/endpoint/events" in paths
+
+
+def test_native_endpoint_contract_bounds_and_hides_sensitive_telemetry() -> None:
+    """Removing telemetry bounds or exposing command lines through repr must fail this test."""
+
+    from app.schemas.control_plane import NativeEndpointEventIn
+
+    payload = NativeEndpointEventIn(
+        event_key="sensor-7:42",
+        endpoint_key="sensor-7",
+        hostname="finance-laptop-7",
+        operating_system="windows",
+        occurred_at=dt.datetime(2026, 10, 21, tzinfo=dt.UTC),
+        event_type="process_start",
+        process_name="powershell.exe",
+        parent_process_name="winword.exe",
+        command_line="powershell.exe -NoProfile Get-Date",
+        identity_ref="employee-17",
+    )
+    assert payload.endpoint_key == "sensor-7"
+    assert "Get-Date" not in repr(payload)
+
+    with pytest.raises(ValidationError):
+        NativeEndpointEventIn(
+            event_key="sensor-7:43",
+            endpoint_key="sensor-7",
+            hostname="finance-laptop-7",
+            operating_system="windows",
+            occurred_at=dt.datetime(2026, 10, 21, tzinfo=dt.UTC),
+            event_type="process_start",
+            command_line="x" * 8193,
+        )
+
+    with pytest.raises(ValidationError):
+        NativeEndpointEventIn(
+            event_key="sensor-7:44",
+            endpoint_key="sensor-7",
+            hostname="finance-laptop-7",
+            operating_system="windows",
+            occurred_at=dt.datetime(2026, 10, 21, tzinfo=dt.UTC),
+            event_type="process_start",
+            attack_techniques=["not-a-technique"],
+        )
+
+
+def test_endpoint_ingest_has_a_machine_specific_permission() -> None:
+    """Endpoint keys must not inherit broad integration-management authority."""
+
+    from app.db.enums import Permission, Role, role_has
+
+    assert Permission.ENDPOINT_INGEST.value == "endpoint:ingest"
+    assert role_has(Role.ADMIN, Permission.ENDPOINT_INGEST)
+    assert role_has(Role.OWNER, Permission.ENDPOINT_INGEST)
+    assert not role_has(Role.DEVELOPER, Permission.ENDPOINT_INGEST)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_ingest_scope_cannot_use_generic_control_plane_writes() -> None:
+    """A sensor credential must be confined to the bounded endpoint ingestion route."""
+
+    from app.db.enums import Permission
+    from app.schemas.control_plane import SecurityEventIn, SecurityResourceUpsertIn
+    from app.services.context import Principal
+    from app.services.control_plane import ingest_event, upsert_resource
+
+    principal = Principal.for_api_key(
+        organization_id=uuid.uuid4(),
+        scopes=frozenset({Permission.ENDPOINT_INGEST}),
+    )
+    now = dt.datetime(2026, 10, 21, tzinfo=dt.UTC)
+    with pytest.raises(PermissionDeniedError):
+        await upsert_resource(
+            object(),
+            principal,
+            SecurityResourceUpsertIn(
+                resource_key="arbitrary",
+                kind="identity",
+                name="Not allowed",
+                source_kind="cynux_endpoint_sensor",
+                source_key="sensor-7",
+                observed_at=now,
+                confidence=Decimal("1"),
+            ),
+        )
+    with pytest.raises(PermissionDeniedError):
+        await ingest_event(
+            object(),
+            principal,
+            SecurityEventIn(
+                event_key="arbitrary",
+                category="endpoint",
+                event_type="process_start",
+                source_kind="cynux_endpoint_sensor",
+                occurred_at=now,
+                severity="critical",
+                summary="Not allowed",
+                evidence={"command_line": "raw"},
+            ),
+        )

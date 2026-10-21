@@ -204,7 +204,10 @@ import type {
   AssuranceSummary,
   DataClassification,
   NativeAIPostureAssessment,
+  NativeEndpointEventInput,
+  NativeEndpointEventResult,
   SecurityCanary,
+  SecurityEvent,
   SecurityExperienceSummary,
   SecurityPolicy,
   SecurityPolicyEvaluation,
@@ -1014,6 +1017,12 @@ export const api = {
       request<SecurityThreatStory[]>("GET", "/control-plane/threat-stories", {
         query: status ? { status } : undefined,
       }),
+    events: (category?: string, limit = 200) =>
+      request<SecurityEvent[]>("GET", "/control-plane/events", {
+        query: { category, limit },
+      }),
+    ingestEndpointEvent: (body: NativeEndpointEventInput) =>
+      request<NativeEndpointEventResult>("POST", "/control-plane/endpoint/events", { body }),
     canaries: () => request<SecurityCanary[]>("GET", "/control-plane/canaries"),
     createCanary: (body: {
       name: string;

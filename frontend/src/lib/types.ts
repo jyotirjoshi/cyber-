@@ -3067,6 +3067,60 @@ export interface SecurityThreatStory {
   resolution: string | null;
 }
 
+export interface SecurityEvent {
+  id: Uuid;
+  event_key: string;
+  category: string;
+  event_type: string;
+  source_kind: string;
+  occurred_at: IsoDateTime;
+  severity: Severity;
+  summary: string;
+  content_digest: string | null;
+  asset_id: Uuid | null;
+  resource_id: Uuid | null;
+  identity_ref: string | null;
+  metrics: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+}
+
+export interface NativeEndpointEventInput {
+  event_key: string;
+  endpoint_key: string;
+  hostname: string;
+  operating_system: "windows" | "linux" | "macos" | "other";
+  occurred_at: IsoDateTime;
+  event_type: "process_start" | "network_connection" | "file_change" | "identity_activity" | "persistence" | "autorun_change" | "scheduled_task_created" | "security_control_disabled" | "sensor_tamper" | "defense_evasion" | "ransomware_activity" | "malware";
+  process_name?: string | null;
+  parent_process_name?: string | null;
+  executable_path?: string | null;
+  command_line?: string | null;
+  signature_status?: "signed" | "unsigned" | "invalid" | "unknown";
+  destination_host?: string | null;
+  destination_port?: number | null;
+  file_activity_count?: number;
+  identity_ref?: string | null;
+  attack_techniques?: string[];
+  asset_id?: Uuid | null;
+  environment?: "production" | "staging" | "development" | "test" | "unknown";
+  internet_exposed?: boolean;
+}
+
+export interface NativeEndpointEventResult {
+  endpoint: SecurityResource;
+  event: SecurityEvent;
+  story: SecurityThreatStory | null;
+  decision: {
+    verdict: "observe" | "detect";
+    severity: Severity;
+    score: number;
+    detections: Array<{ code: string; score: number; technique_id: string; rationale: string }>;
+    attack_techniques: string[];
+    command_digest: string | null;
+    destination_digest: string | null;
+  };
+}
+
 export interface SecurityExperienceSummary {
   event_count: number;
   monitored_journeys: number;
