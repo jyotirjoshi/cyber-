@@ -150,6 +150,14 @@ def evaluate_native_endpoint_event(event: Mapping[str, Any]) -> dict[str, Any]:
             "The endpoint reported a ransomware-like burst of file modifications.",
         )
 
+    if event_type == "malware" and event.get("file_sha256") and event.get("malware_signature"):
+        detect(
+            "file_malware_detection",
+            85,
+            "T1204.002",
+            "The endpoint scanner reported a malicious file with hash and signature evidence.",
+        )
+
     score = min(100, sum(int(item["score"]) for item in detections))
     if score >= 90:
         severity = "critical"
@@ -813,6 +821,9 @@ async def ingest_native_endpoint_event(
                 "command_digest": decision["command_digest"],
                 "destination_digest": decision["destination_digest"],
                 "signature_status": payload.signature_status,
+                "file_sha256": payload.file_sha256,
+                "malware_signature": payload.malware_signature,
+                "scanner_engine": payload.scanner_engine,
             },
         ),
     )

@@ -5,6 +5,12 @@
 # NEXT_PUBLIC_* values are baked into the client bundle at build time, so they
 # arrive as build args (wired from .env in docker-compose.yml).
 
+FROM python:3.12-slim AS endpoint-package
+WORKDIR /endpoint
+COPY endpoint/pyproject.toml ./
+COPY endpoint/cynux_endpoint ./cynux_endpoint
+RUN pip wheel --no-deps --wheel-dir /dist . && cd /dist && sha256sum *.whl > SHA256SUMS
+
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
@@ -20,6 +26,7 @@ ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL \
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend/ ./
 RUN mkdir -p public
+COPY --from=endpoint-package /dist/ ./public/downloads/endpoint/
 RUN npm run build
 
 

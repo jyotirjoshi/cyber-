@@ -251,6 +251,9 @@ class NativeEndpointEventIn(BaseModel):
     destination_host: str | None = Field(default=None, max_length=253, repr=False)
     destination_port: int | None = Field(default=None, ge=1, le=65535)
     file_activity_count: int = Field(default=0, ge=0, le=1_000_000)
+    file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    malware_signature: str | None = Field(default=None, min_length=1, max_length=256)
+    scanner_engine: Literal["clamav"] | None = None
     identity_ref: str | None = Field(default=None, max_length=512, repr=False)
     attack_techniques: list[AttackTechniqueId] = Field(default_factory=list, max_length=100)
     asset_id: uuid.UUID | None = None
