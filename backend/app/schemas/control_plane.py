@@ -250,6 +250,8 @@ class NativeEndpointEventIn(BaseModel):
     signature_status: Literal["signed", "unsigned", "invalid", "unknown"] = "unknown"
     destination_host: str | None = Field(default=None, max_length=253, repr=False)
     destination_port: int | None = Field(default=None, ge=1, le=65535)
+    destination_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    network_action: Literal["allowed", "blocked"] | None = None
     file_activity_count: int = Field(default=0, ge=0, le=1_000_000)
     file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     malware_signature: str | None = Field(default=None, min_length=1, max_length=256)

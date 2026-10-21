@@ -9,14 +9,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import datetime as dt
 import hashlib
 import hmac
 import ipaddress
 import json
 import os
+import platform
 import re
 import socket
+import sqlite3
+import uuid
 from pathlib import Path
+
+from cynux_endpoint.agent import Spool
 
 
 def domain(value: str) -> str:
@@ -69,6 +75,68 @@ class Policy:
             )
 
         return matches("allow") and not matches("deny")
+
+
+class ReloadingPolicy:
+    """Read a bounded policy for each new tunnel; invalid updates deny access.
+
+    Already established tunnels finish within their existing five-minute cap.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.load()  # Invalid initial policy must fail startup.
+
+    def load(self):
+        with self.path.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("Policy exceeds 64 KiB")
+        return Policy(json.loads(raw))
+
+    def allows(self, host):
+        try:
+            return self.load().allows(host)
+        except (OSError, ValueError):
+            return False
+
+
+class AuditSink:
+    def __init__(self, spool, *, emit=None):
+        self.spool = spool
+        self.emit = (
+            emit
+            if emit is not None
+            else lambda item: print(json.dumps(item), flush=True)
+        )
+
+    def __call__(self, record):
+        record = dict(record)
+        if record.get("outcome") in {"allowed", "policy_denied"}:
+            payload = {
+                "event_key": f"proxy:{uuid.uuid4()}",
+                "endpoint_key": self.spool.endpoint,
+                "hostname": socket.gethostname()[:255],
+                "operating_system": {
+                    "Windows": "windows",
+                    "Linux": "linux",
+                    "Darwin": "macos",
+                }.get(platform.system(), "other"),
+                "occurred_at": dt.datetime.now(dt.UTC).isoformat(),
+                "event_type": "network_connection",
+                "network_action": "blocked"
+                if record["outcome"] == "policy_denied"
+                else "allowed",
+                "destination_sha256": record.get("destination_sha256"),
+                "destination_port": 443,
+            }
+            try:
+                record["audit_delivery"] = (
+                    "queued" if self.spool.enqueue(payload) else "queue_full"
+                )
+            except sqlite3.Error:
+                record["audit_delivery"] = "storage_error"
+        self.emit(record)
 
 
 def public_address(records) -> tuple[int, str]:
@@ -244,26 +312,34 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--state-dir",
+        type=Path,
+        help="Queue audit events for a running cynux-endpoint collector using this same directory",
+    )
     args = parser.parse_args()
     if not 1024 <= args.port <= 65535:
         parser.error("port must be between 1024 and 65535")
     try:
-        with args.policy.open("rb") as stream:
-            raw = stream.read(65537)
-        if len(raw) > 65536:
-            raise ValueError("Policy exceeds 64 KiB")
         gateway = Gateway(
-            Policy(json.loads(raw)), os.environ.get("CYNUX_PROXY_TOKEN", "")
+            ReloadingPolicy(args.policy), os.environ.get("CYNUX_PROXY_TOKEN", "")
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
     async def serve():
-        server = await asyncio.start_server(
-            gateway.handle, "127.0.0.1", args.port, limit=8192
-        )
-        async with server:
-            await server.serve_forever()
+        spool = Spool(args.state_dir / "events.sqlite3") if args.state_dir else None
+        if spool:
+            gateway.emit = AuditSink(spool)
+        try:
+            server = await asyncio.start_server(
+                gateway.handle, "127.0.0.1", args.port, limit=8192
+            )
+            async with server:
+                await server.serve_forever()
+        finally:
+            if spool:
+                spool.db.close()
 
     try:
         asyncio.run(serve())

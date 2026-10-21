@@ -176,7 +176,9 @@ def evaluate_native_endpoint_event(event: Mapping[str, Any]) -> dict[str, Any]:
         "detections": detections,
         "attack_techniques": sorted(techniques),
         "command_digest": canonical_digest(command) if command else None,
-        "destination_digest": canonical_digest(destination) if destination else None,
+        "destination_digest": canonical_digest(destination)
+        if destination
+        else event.get("destination_sha256"),
     }
 
 
@@ -824,6 +826,7 @@ async def ingest_native_endpoint_event(
                 "file_sha256": payload.file_sha256,
                 "malware_signature": payload.malware_signature,
                 "scanner_engine": payload.scanner_engine,
+                "network_action": payload.network_action,
             },
         ),
     )
