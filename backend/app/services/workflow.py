@@ -622,12 +622,16 @@ async def queue_finding_workflows(
     if finding.organization_id != asset.organization_id:
         raise ValueError("finding and asset belong to different organizations")
     definitions = (
-        await session.execute(
-            tenant_select(WorkflowDefinition, finding.organization_id).where(
-                WorkflowDefinition.is_enabled.is_(True)
+        (
+            await session.execute(
+                tenant_select(WorkflowDefinition, finding.organization_id).where(
+                    WorkflowDefinition.is_enabled.is_(True)
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     principal = Principal.for_system(organization_id=finding.organization_id)
     event_key = f"{trigger}:{finding.id}{event_key_suffix}"
     context = {
@@ -635,7 +639,7 @@ async def queue_finding_workflows(
         "asset_id": str(asset.id),
         "severity": finding.severity,
         "risk_score": float(finding.risk_score or 0),
-        "in_kev": bool(finding.custom_fields.get("in_kev", False)),
+        "in_kev": bool((finding.custom_fields or {}).get("in_kev", False)),
         "asset_environment": asset.environment,
         "asset_criticality": asset.criticality,
         "asset_groups": list(asset.groups or []),
@@ -651,9 +655,7 @@ async def queue_finding_workflows(
             is_enabled=workflow.is_enabled,
             dry_run=workflow.dry_run,
         )
-        trigger_node = next(
-            (node for node in definition.nodes if node.type == "trigger"), None
-        )
+        trigger_node = next((node for node in definition.nodes if node.type == "trigger"), None)
         if trigger_node is None or trigger_node.config.get("event") != trigger:
             continue
         existed = (

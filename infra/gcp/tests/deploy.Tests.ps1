@@ -163,12 +163,12 @@ Describe "Cynux production release orchestration" {
         $verify | Should Match 'networkInterfaces\[0\].networkIP'
     }
 
-    It "keeps private hosts running by default and makes cleanup explicit" {
+    It "rejects shutdown after verification before running deployment commands" {
         $deploy = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "deploy.ps1")
         $compute = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $here) "terraform\compute.tf")
 
         $deploy | Should Match '\[switch\]\$StopPrivateHostsAfterDeploy'
-        $deploy | Should Match 'if \(\$StopPrivateHostsAfterDeploy -and \$releaseState\.PrivateHostsStarted\)'
+        { Invoke-CynuxDeploy -StopPrivateHostsAfterDeploy } | Should Throw 'invalidates readiness'
         ([regex]::Matches($compute, 'desired_status\s*=\s*"RUNNING"')).Count | Should Be 2
     }
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,6 +13,36 @@ from app.db.models.workflow import WorkflowDefinition, WorkflowRun, WorkflowStep
 from app.schemas.workflow import WorkflowDefinitionIn
 from app.services.context import Principal
 from app.services.workflow import resume_workflow, step_idempotency_key, validate_workflow_graph
+
+
+@pytest.mark.asyncio
+async def test_new_finding_without_flushed_defaults_can_queue_workflows() -> None:
+    from app.db.models.asset import Asset
+    from app.db.models.canonical import CanonicalFinding
+    from app.services.workflow import queue_finding_workflows
+
+    organization_id = uuid.uuid4()
+    asset = Asset(id=uuid.uuid4(), organization_id=organization_id)
+    finding = CanonicalFinding(
+        id=uuid.uuid4(),
+        organization_id=organization_id,
+        asset_id=asset.id,
+        severity="high",
+    )
+    session = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: []),
+            )
+        )
+    )
+    assert finding.custom_fields is None
+    assert (
+        await queue_finding_workflows(
+            session, finding=finding, asset=asset, trigger="finding.created"
+        )
+        == 0
+    )
 
 
 def _definition(*, nodes: list[dict], edges: list[dict]) -> WorkflowDefinitionIn:

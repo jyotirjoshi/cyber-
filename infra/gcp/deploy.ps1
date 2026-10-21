@@ -146,6 +146,9 @@ function Invoke-CynuxDeploy {
         [string]$DeploymentFile = "",
         [string]$LastDeploymentFile = ""
     )
+    if ($StopPrivateHostsAfterDeploy) {
+        throw "Stopping production workers after verification invalidates readiness. Deploy with workers running; use a separate maintenance shutdown when required."
+    }
     if (-not $DeploymentFile) { $DeploymentFile = Join-Path $PSScriptRoot ".deployment.env" }
     if (-not $LastDeploymentFile) { $LastDeploymentFile = Join-Path $PSScriptRoot ".last-deployment.json" }
 

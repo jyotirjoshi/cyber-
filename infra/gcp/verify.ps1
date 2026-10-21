@@ -62,7 +62,7 @@ function Invoke-CynuxVerification {
     }
     Add-Check "api-data-connectivity" {
         $snapshot = Invoke-RestMethod -Uri "$base/readyz" -TimeoutSec 60
-        foreach ($name in @("database", "redis", "pgvector")) {
+        foreach ($name in @("database", "redis", "pgvector", "worker")) {
             $dependency = @($snapshot.dependencies | Where-Object name -eq $name)
             if ($dependency.Count -ne 1 -or -not $dependency[0].healthy) { throw "$name is unreachable from the API" }
         }
