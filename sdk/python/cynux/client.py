@@ -242,6 +242,11 @@ class CynuxClient:
 
         return self.request("POST", "/control-plane/private-access/evaluate", json=payload)
 
+    def evaluate_casb(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate and audit a transient SaaS data action."""
+
+        return self.request("POST", "/control-plane/casb/evaluate", json=payload)
+
     def graphql(
         self,
         query: str,

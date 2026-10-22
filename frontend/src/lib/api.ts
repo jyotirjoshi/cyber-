@@ -203,6 +203,8 @@ import type {
   AIGatewayDecision,
   AssuranceSummary,
   DataClassification,
+  CasbDecision,
+  CasbEvaluateInput,
   NativeAIPostureAssessment,
   NativeEndpointEventInput,
   NativeEndpointEventResult,
@@ -1061,6 +1063,8 @@ export const api = {
       request<DataClassification>("POST", "/control-plane/data-security/classify", {
         body: { content, resource_key: resourceKey },
       }),
+    evaluateCasb: (body: CasbEvaluateInput) =>
+      request<CasbDecision>("POST", "/control-plane/casb/evaluate", { body }),
   },
 
   integrations: {

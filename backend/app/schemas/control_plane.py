@@ -492,11 +492,39 @@ class DataClassificationOut(BaseModel):
     match_counts: dict[str, int]
 
 
+class CasbEvaluateIn(BaseModel):
+    """Transient SaaS action and content context; raw content is never persisted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["upload", "download", "share", "external_share", "copy", "paste", "print"]
+    content: str = Field(min_length=1, max_length=100_000, repr=False)
+    policy_id: uuid.UUID | None = None
+    identity_ref: str = Field(min_length=1, max_length=512)
+    groups: list[str] = Field(default_factory=list, max_length=100)
+    application_key: str = Field(min_length=1, max_length=512)
+    device_managed: bool
+    mfa: bool
+    destination_domain: str | None = Field(default=None, max_length=253)
+
+
+class CasbDecisionOut(BaseModel):
+    decision: Literal["allow", "block", "redact", "require_approval"]
+    severity: Severity
+    score: Decimal
+    reasons: list[str]
+    content_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    redacted_content: str | None = Field(default=None, repr=False)
+    approval_required: bool
+
+
 __all__ = [
     "AIGatewayEvaluateIn",
     "AIGatewayEvaluateOut",
     "CanaryInteractionIn",
     "CanaryInteractionOut",
+    "CasbDecisionOut",
+    "CasbEvaluateIn",
     "DataClassificationIn",
     "DataClassificationOut",
     "DeceptionCanaryCreateIn",

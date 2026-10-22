@@ -23,6 +23,8 @@ from app.db.repository import tenant_select
 from app.schemas.control_plane import (
     AIGatewayEvaluateIn,
     AIGatewayEvaluateOut,
+    CasbDecisionOut,
+    CasbEvaluateIn,
     DataClassificationOut,
     Severity,
 )
@@ -201,6 +203,82 @@ def evaluate_ai_content(
     )
 
 
+def evaluate_casb_action(
+    payload: CasbEvaluateIn, *, policy_rules: dict[str, Any]
+) -> CasbDecisionOut:
+    """Evaluate one SaaS data action without persisting or forwarding raw content."""
+
+    classification = classify_sensitive_data(payload.content)
+    reasons = list(classification.labels)
+    score = Decimal("0")
+    application = payload.application_key.casefold()
+    action = payload.action
+    denied_apps = {str(value).casefold() for value in policy_rules.get("denied_saas_applications", [])}
+    allowed_apps = {str(value).casefold() for value in policy_rules.get("allowed_saas_applications", [])}
+    blocking = False
+    approval = False
+
+    if application in denied_apps or (allowed_apps and application not in allowed_apps):
+        reasons.append("saas_application_not_allowed")
+        score += Decimal("90")
+        blocking = True
+    restricted_actions = set(policy_rules.get("block_restricted_actions", []))
+    confidential_actions = set(policy_rules.get("block_confidential_actions", []))
+    if classification.highest_sensitivity == "restricted" and action in restricted_actions:
+        reasons.append("restricted_data_action_blocked")
+        score += Decimal("90")
+        blocking = True
+    elif classification.highest_sensitivity in {"restricted", "confidential"} and action in confidential_actions:
+        reasons.append("confidential_data_action_blocked")
+        score += Decimal("70")
+        blocking = True
+
+    if action == "external_share" and payload.destination_domain:
+        allowed_domains = {
+            str(value).strip().casefold()
+            for value in policy_rules.get("allowed_external_domains", [])
+        }
+        if allowed_domains and payload.destination_domain.casefold() not in allowed_domains:
+            reasons.append("external_domain_not_allowed")
+            score += Decimal("70")
+            blocking = True
+    if action in set(policy_rules.get("require_managed_device_for", [])) and not payload.device_managed:
+        reasons.append("managed_device_required")
+        score += Decimal("45")
+        approval = True
+    if action in set(policy_rules.get("require_mfa_for", [])) and not payload.mfa:
+        reasons.append("mfa_required")
+        score += Decimal("45")
+        approval = True
+    if action in set(policy_rules.get("require_approval_for_actions", [])):
+        reasons.append("action_requires_approval")
+        score += Decimal("30")
+        approval = True
+
+    if blocking:
+        decision: Literal["allow", "block", "redact", "require_approval"] = "block"
+    elif approval:
+        decision = "require_approval"
+    elif classification.labels and policy_rules.get("redact_sensitive_data", True):
+        decision = "redact"
+        score += Decimal("20")
+    else:
+        decision = "allow"
+    score = min(Decimal("100"), score).quantize(Decimal("0.01"))
+    severity: Severity = (
+        "critical" if score >= 80 else "high" if score >= 50 else "medium" if score >= 20 else "info"
+    )
+    return CasbDecisionOut(
+        decision=decision,
+        severity=severity,
+        score=score,
+        reasons=list(dict.fromkeys(reasons)),
+        content_digest=classification.content_digest,
+        redacted_content=classification.redacted_content if decision == "redact" else None,
+        approval_required=decision == "require_approval",
+    )
+
+
 async def _resolve_policy(
     session: AsyncSession, principal: Principal, policy_id: uuid.UUID | None
 ) -> SecurityPolicy | None:
@@ -213,6 +291,21 @@ async def _resolve_policy(
     policy = await session.scalar(query.order_by(SecurityPolicy.updated_at.desc()).limit(1))
     if policy_id is not None and policy is None:
         raise ResourceNotFoundError("AI security policy not found")
+    return policy
+
+
+async def _resolve_casb_policy(
+    session: AsyncSession, principal: Principal, policy_id: uuid.UUID | None
+) -> SecurityPolicy | None:
+    query = tenant_select(SecurityPolicy, principal.organization_id).where(
+        SecurityPolicy.kind.in_(("casb", "dlp")),
+        SecurityPolicy.status == "active",
+    )
+    if policy_id is not None:
+        query = query.where(SecurityPolicy.id == policy_id)
+    policy = await session.scalar(query.order_by(SecurityPolicy.updated_at.desc()).limit(1))
+    if policy_id is not None and policy is None:
+        raise ResourceNotFoundError("CASB or DLP policy not found")
     return policy
 
 
@@ -256,6 +349,69 @@ async def evaluate_and_record(
     await record(
         session,
         action="control_plane.ai_gateway.evaluate",
+        principal=principal,
+        resource_type="security_event",
+        resource_id=event.id,
+        detail={
+            "decision": result.decision,
+            "severity": result.severity,
+            "content_digest": result.content_digest,
+            "reason_codes": result.reasons,
+        },
+    )
+    return result
+
+
+async def evaluate_casb_and_record(
+    session: AsyncSession, principal: Principal, payload: CasbEvaluateIn
+) -> CasbDecisionOut:
+    principal.require(Permission.ORG_READ)
+    policy = await _resolve_casb_policy(session, principal, payload.policy_id)
+    result = evaluate_casb_action(payload, policy_rules=policy.rules if policy else {})
+    occurred_at = dt.datetime.now(dt.UTC)
+    event = SecurityEvent(
+        organization_id=principal.organization_id,
+        event_key=f"casb:{uuid.uuid4()}",
+        category="dlp",
+        event_type=f"{payload.action}_{result.decision}",
+        source_kind="cynux_casb",
+        occurred_at=occurred_at,
+        severity=result.severity,
+        summary=f"SaaS {payload.action} {result.decision} decision",
+        content_digest=result.content_digest,
+        identity_ref=payload.identity_ref,
+        metrics={"content_length": len(payload.content), "score": str(result.score)},
+        evidence={
+            "application_key": payload.application_key,
+            "action": payload.action,
+            "device_managed": payload.device_managed,
+            "reason_codes": result.reasons,
+        },
+    )
+    session.add(event)
+    await session.flush()
+    if policy is not None:
+        session.add(
+            SecurityPolicyEvaluation(
+                organization_id=principal.organization_id,
+                policy_id=policy.id,
+                event_id=event.id,
+                decision=result.decision,
+                severity=result.severity,
+                score=result.score,
+                findings=[{"code": reason} for reason in result.reasons],
+                evidence={
+                    "action": payload.action,
+                    "application_key": payload.application_key,
+                    "device_managed": payload.device_managed,
+                },
+                content_digest=result.content_digest,
+                evaluated_at=occurred_at,
+            )
+        )
+    await record(
+        session,
+        action="control_plane.casb.evaluate",
         principal=principal,
         resource_type="security_event",
         resource_id=event.id,

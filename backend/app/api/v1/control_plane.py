@@ -54,6 +54,8 @@ from app.schemas.control_plane import (
     AIGatewayEvaluateOut,
     CanaryInteractionIn,
     CanaryInteractionOut,
+    CasbDecisionOut,
+    CasbEvaluateIn,
     DataClassificationIn,
     DataClassificationOut,
     DeceptionCanaryCreateIn,
@@ -603,6 +605,15 @@ async def classify_data(
     result = await ai_security.classify_and_record(
         session, principal, payload.content, resource_key=payload.resource_key
     )
+    await session.commit()
+    return result
+
+
+@router.post("/casb/evaluate", response_model=CasbDecisionOut)
+async def evaluate_casb(
+    payload: CasbEvaluateIn, principal: PrincipalDep, session: DbSession
+) -> CasbDecisionOut:
+    result = await ai_security.evaluate_casb_and_record(session, principal, payload)
     await session.commit()
     return result
 

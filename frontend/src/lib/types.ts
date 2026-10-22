@@ -3049,6 +3049,28 @@ export interface PrivateAccessDecision {
   reason_codes: string[];
 }
 
+export interface CasbEvaluateInput {
+  action: "upload" | "download" | "share" | "external_share" | "copy" | "paste" | "print";
+  content: string;
+  policy_id?: Uuid | null;
+  identity_ref: string;
+  groups?: string[];
+  application_key: string;
+  device_managed: boolean;
+  mfa: boolean;
+  destination_domain?: string | null;
+}
+
+export interface CasbDecision {
+  decision: "allow" | "block" | "redact" | "require_approval";
+  severity: Severity;
+  score: string;
+  reasons: string[];
+  content_digest: string;
+  redacted_content: string | null;
+  approval_required: boolean;
+}
+
 export type SecurityRecommendationStatus =
   | "proposed" | "approved" | "applying" | "applied" | "rejected" | "failed" | "superseded";
 

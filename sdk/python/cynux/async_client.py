@@ -105,6 +105,11 @@ class AsyncCynuxClient:
             "POST", "/control-plane/private-access/evaluate", json=payload
         )
 
+    async def evaluate_casb(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate and audit a transient SaaS data action."""
+
+        return await self._rest("POST", "/control-plane/casb/evaluate", json=payload)
+
     async def import_assets_csv(
         self, content: bytes, *, filename: str = "assets.csv", dry_run: bool = True
     ) -> dict[str, Any]:

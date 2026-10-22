@@ -110,3 +110,39 @@ def test_private_access_evaluation_uses_native_control_plane_route():
 
     assert result["decision"] == "allow"
     assert seen[0][0:2] == ("POST", "/api/v1/control-plane/private-access/evaluate")
+
+
+def test_casb_evaluation_uses_native_control_plane_route():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(
+            200,
+            json={
+                "decision": "block",
+                "severity": "critical",
+                "score": "100.00",
+                "reasons": ["restricted_data_action_blocked"],
+                "content_digest": "a" * 64,
+                "redacted_content": None,
+                "approval_required": False,
+            },
+        )
+
+    client = CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    )
+    result = client.evaluate_casb(
+        {
+            "action": "external_share",
+            "content": "Customer data",
+            "identity_ref": "user:alice@example.com",
+            "application_key": "saas:drive",
+            "device_managed": True,
+            "mfa": True,
+        }
+    )
+
+    assert result["decision"] == "block"
+    assert seen == [("POST", "/api/v1/control-plane/casb/evaluate")]
