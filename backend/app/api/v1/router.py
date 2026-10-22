@@ -46,6 +46,7 @@ from app.api.v1 import (
     saved_views,
     scan_auth,
     scim,
+    soc,
     threat_intelligence,
     webhooks,
     workflows,
@@ -67,6 +68,7 @@ api_router.include_router(exposures.router)
 api_router.include_router(canonical.router)
 api_router.include_router(compliance.router)
 api_router.include_router(control_plane.router)
+api_router.include_router(soc.router)
 api_router.include_router(jobs.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(reports.router)

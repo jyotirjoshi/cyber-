@@ -348,6 +348,12 @@ UNBACKED_CHECKS: frozenset[tuple[str, str]] = frozenset(
         ("compliance_evidence_requests", "status"),
         ("compliance_export_packages", "oscal_model"),
         ("compliance_export_packages", "status"),
+        ("soc_incident_cases", "severity"),
+        ("soc_incident_cases", "status"),
+        ("soc_case_tasks", "status"),
+        ("detection_rules", "status"),
+        ("detection_rules", "severity"),
+        ("detection_rules", "minimum_event_severity"),
     }
 )
 

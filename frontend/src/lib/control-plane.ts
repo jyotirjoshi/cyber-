@@ -45,6 +45,18 @@ export function endpointFleetSummary(
   };
 }
 
+export function socOperationsSummary(
+  cases: Array<{ status: string; severity: string }>,
+): { active: number; critical: number; investigating: number; contained: number } {
+  const active = cases.filter((item) => !["resolved", "dismissed"].includes(item.status));
+  return {
+    active: active.length,
+    critical: active.filter((item) => item.severity === "critical").length,
+    investigating: active.filter((item) => item.status === "investigating").length,
+    contained: active.filter((item) => item.status === "contained").length,
+  };
+}
+
 export function buildDemoEndpointEvent(eventId: string, occurredAt: string): NativeEndpointEventInput {
   return {
     event_key: `demo-${eventId}`,

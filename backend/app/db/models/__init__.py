@@ -161,6 +161,7 @@ from app.db.models.report import (
 )
 from app.db.models.scan_auth import ScanAuthProfile
 from app.db.models.scanner import ScannerArtifact, ScannerJob
+from app.db.models.soc import DetectionRule, DetectionRuleMatch, SocCaseTask, SocIncidentCase
 from app.db.models.threat_intelligence import (
     RansomwareAssociation,
     ThreatActor,
@@ -242,6 +243,10 @@ __all__ = [
     "SecurityResourceObservation",
     "SecurityRiskSimulation",
     "SecurityThreatStory",
+    "SocIncidentCase",
+    "SocCaseTask",
+    "DetectionRule",
+    "DetectionRuleMatch",
     "RiskSimulationTrial",
     "ThreatResponseAction",
     "ValidationRecipe",

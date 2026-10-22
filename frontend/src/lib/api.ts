@@ -222,6 +222,10 @@ import type {
   SecurityResource,
   SecurityRiskSimulation,
   SecurityThreatStory,
+  Severity,
+  SocIncidentCase,
+  DetectionRule,
+  DetectionDryRun,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1027,29 @@ export const api = {
     threatStories: (status?: string) =>
       request<SecurityThreatStory[]>("GET", "/control-plane/threat-stories", {
         query: status ? { status } : undefined,
+      }),
+    socCases: () => request<Page<SocIncidentCase>>("GET", "/control-plane/soc/cases"),
+    transitionSocCase: (id: string, status: SocIncidentCase["status"], note: string) =>
+      request<SocIncidentCase>("POST", `/control-plane/soc/cases/${id}/transition`, {
+        body: { status, note },
+      }),
+    detectionRules: () => request<Page<DetectionRule>>("GET", "/control-plane/soc/detection-rules"),
+    createDetectionRule: (body: {
+      rule_key: string;
+      name: string;
+      description?: string | null;
+      severity: Severity;
+      minimum_event_severity: Severity;
+      categories: string[];
+      event_types: string[];
+      conditions: Array<{ source: "event" | "metrics" | "evidence"; path: string; operator: "eq" | "ne" | "in" | "contains" | "gte" | "lte" | "exists"; value: unknown }>;
+      group_by: string[];
+      status: "draft" | "active" | "disabled";
+      auto_create_case: boolean;
+    }) => request<DetectionRule>("POST", "/control-plane/soc/detection-rules", { body }),
+    evaluateDetectionRule: (id: string, persist = false) =>
+      request<DetectionDryRun>("POST", `/control-plane/soc/detection-rules/${id}/${persist ? "evaluate" : "dry-run"}`, {
+        body: { limit: 200, event_ids: [] },
       }),
     events: (category?: string, limit = 200) =>
       request<SecurityEvent[]>("GET", "/control-plane/events", {

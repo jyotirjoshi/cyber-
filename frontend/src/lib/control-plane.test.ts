@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildDemoEndpointEvent, endpointFleetSummary, projectPostureCards, recommendationDecisionLabel, riskTone } from "./control-plane";
+import { buildDemoEndpointEvent, endpointFleetSummary, projectPostureCards, recommendationDecisionLabel, riskTone, socOperationsSummary } from "./control-plane";
 import type { SecurityPosture } from "./types";
 
 const posture: SecurityPosture = {
@@ -19,6 +19,15 @@ const posture: SecurityPosture = {
 };
 
 describe("control-plane projections", () => {
+  it("summarizes active SOC work without counting terminal cases", () => {
+    expect(socOperationsSummary([
+      { status: "open", severity: "critical" },
+      { status: "investigating", severity: "high" },
+      { status: "contained", severity: "medium" },
+      { status: "resolved", severity: "critical" },
+      { status: "dismissed", severity: "low" },
+    ])).toEqual({ active: 3, critical: 1, investigating: 1, contained: 1 });
+  });
   it("projects posture into stable operator cards", () => {
     expect(projectPostureCards(posture)).toEqual([
       { label: "Resources", value: "125", tone: "neutral" },

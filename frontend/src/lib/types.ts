@@ -3132,6 +3132,69 @@ export interface SecurityThreatStory {
   resolution: string | null;
 }
 
+export interface SocIncidentCase {
+  id: Uuid;
+  case_key: string;
+  title: string;
+  summary: string;
+  severity: Severity;
+  status: "open" | "investigating" | "contained" | "resolved" | "dismissed";
+  priority: number;
+  threat_story_id: Uuid | null;
+  assigned_user_id: Uuid | null;
+  owner_team: string | null;
+  event_ids: string[];
+  asset_ids: string[];
+  finding_ids: string[];
+  evidence_refs: Array<Record<string, unknown>>;
+  timeline: Array<Record<string, unknown>>;
+  resolution: string | null;
+  opened_at: IsoDateTime;
+  contained_at: IsoDateTime | null;
+  resolved_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface DetectionCondition {
+  source: "event" | "metrics" | "evidence";
+  path: string;
+  operator: "eq" | "ne" | "in" | "contains" | "gte" | "lte" | "exists";
+  value: unknown;
+}
+
+export interface DetectionRule {
+  id: Uuid;
+  rule_key: string;
+  name: string;
+  description: string | null;
+  status: "draft" | "active" | "disabled";
+  severity: Severity;
+  minimum_event_severity: Severity;
+  categories: string[];
+  event_types: string[];
+  conditions: DetectionCondition[];
+  group_by: string[];
+  auto_create_case: boolean;
+  version: number;
+  last_matched_at: IsoDateTime | null;
+  created_at: IsoDateTime;
+  updated_at: IsoDateTime;
+}
+
+export interface DetectionDryRun {
+  rule_id: Uuid;
+  evaluated: number;
+  matched: number;
+  evaluations: Array<{
+    event_id: Uuid;
+    matched: boolean;
+    matched_conditions: number;
+    total_conditions: number;
+    reason_codes: string[];
+  }>;
+}
+
 export interface SecurityEvent {
   id: Uuid;
   event_key: string;
