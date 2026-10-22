@@ -247,6 +247,11 @@ class CynuxClient:
 
         return self.request("POST", "/control-plane/casb/evaluate", json=payload)
 
+    def ingest_experience_probe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ingest an opaque synthetic journey observation."""
+
+        return self.request("POST", "/control-plane/experience/probes", json=payload)
+
     def graphql(
         self,
         query: str,

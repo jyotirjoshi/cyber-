@@ -409,6 +409,34 @@ class ExperienceSummaryOut(BaseModel):
     latest_at: dt.datetime | None
 
 
+class ExperienceProbeIn(BaseModel):
+    """Privacy-preserving synthetic journey observation from a Cynux probe."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_key: str = Field(min_length=1, max_length=512)
+    journey_key: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    journey_name: str = Field(min_length=1, max_length=200)
+    location: str = Field(min_length=1, max_length=120)
+    occurred_at: dt.datetime
+    available: bool
+    status_code: int | None = Field(default=None, ge=100, le=599)
+    dns_ms: float = Field(ge=0, le=300_000)
+    connect_ms: float = Field(ge=0, le=300_000)
+    tls_ms: float = Field(ge=0, le=300_000)
+    ttfb_ms: float = Field(ge=0, le=300_000)
+    total_ms: float = Field(ge=0, le=300_000)
+    certificate_days_remaining: int | None = Field(default=None, ge=-3650, le=36500)
+    target_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    error_code: str | None = Field(default=None, max_length=80, pattern=r"^[a-z0-9_.:-]+$")
+
+
+class ExperienceProbeOut(BaseModel):
+    event: SecurityEventOut
+    score: Decimal
+    degraded: bool
+
+
 class RiskSimulationCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -530,6 +558,8 @@ __all__ = [
     "DeceptionCanaryCreateIn",
     "DeceptionCanaryOut",
     "ExperienceSummaryOut",
+    "ExperienceProbeIn",
+    "ExperienceProbeOut",
     "RiskSimulationCreateIn",
     "RiskSimulationOut",
     "SecurityEventIn",

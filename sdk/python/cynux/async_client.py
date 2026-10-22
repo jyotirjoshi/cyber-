@@ -110,6 +110,13 @@ class AsyncCynuxClient:
 
         return await self._rest("POST", "/control-plane/casb/evaluate", json=payload)
 
+    async def ingest_experience_probe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ingest an opaque synthetic journey observation."""
+
+        return await self._rest(
+            "POST", "/control-plane/experience/probes", json=payload
+        )
+
     async def import_assets_csv(
         self, content: bytes, *, filename: str = "assets.csv", dry_run: bool = True
     ) -> dict[str, Any]:

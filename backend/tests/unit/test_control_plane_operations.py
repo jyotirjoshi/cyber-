@@ -109,6 +109,52 @@ def test_experience_score_blends_availability_latency_and_errors() -> None:
     assert degraded < Decimal("60")
 
 
+def test_native_experience_probe_contract_is_bounded_and_private() -> None:
+    from app.schemas.control_plane import ExperienceProbeIn
+
+    payload = ExperienceProbeIn(
+        event_key="journey:checkout:1",
+        journey_key="checkout",
+        journey_name="Customer checkout",
+        location="branch-mumbai",
+        occurred_at=dt.datetime(2026, 10, 22, tzinfo=dt.UTC),
+        available=True,
+        status_code=200,
+        dns_ms=12.1,
+        connect_ms=18.2,
+        tls_ms=24.3,
+        ttfb_ms=95.4,
+        total_ms=120.5,
+        certificate_days_remaining=48,
+        target_digest="a" * 64,
+    )
+    assert payload.total_ms == 120.5
+    assert "https://" not in repr(payload)
+
+    with pytest.raises(ValidationError):
+        ExperienceProbeIn(**{**payload.model_dump(), "total_ms": -1})
+    with pytest.raises(ValidationError):
+        ExperienceProbeIn(**{**payload.model_dump(), "url": "https://secret.example"})
+
+
+def test_experience_probe_score_accounts_for_certificate_and_outage() -> None:
+    from app.services.control_plane import calculate_probe_score
+
+    healthy = calculate_probe_score(
+        available=True, status_code=200, total_ms=150, certificate_days_remaining=60
+    )
+    expiring = calculate_probe_score(
+        available=True, status_code=200, total_ms=150, certificate_days_remaining=3
+    )
+    outage = calculate_probe_score(
+        available=False, status_code=None, total_ms=0, certificate_days_remaining=None
+    )
+
+    assert healthy > Decimal("90")
+    assert expiring < healthy
+    assert outage == Decimal("0.00")
+
+
 def test_deception_digests_are_stable_and_non_reversible() -> None:
     from app.services.control_plane import canary_digest, source_address_digest
 
@@ -131,6 +177,7 @@ def test_control_plane_operational_routes_are_mounted() -> None:
     assert "/control-plane/canaries/{canary_id}/interactions" in paths
     assert "/control-plane/risk-simulations" in paths
     assert "/control-plane/endpoint/events" in paths
+    assert "/control-plane/experience/probes" in paths
 
 
 def test_native_endpoint_contract_bounds_and_hides_sensitive_telemetry() -> None:

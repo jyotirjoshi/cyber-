@@ -60,6 +60,8 @@ from app.schemas.control_plane import (
     DataClassificationOut,
     DeceptionCanaryCreateIn,
     DeceptionCanaryOut,
+    ExperienceProbeIn,
+    ExperienceProbeOut,
     ExperienceSummaryOut,
     NativeAIPostureAssessmentOut,
     NativeEndpointEventIn,
@@ -641,6 +643,21 @@ async def ingest_event(
 @router.get("/experience", response_model=ExperienceSummaryOut)
 async def experience(principal: PrincipalDep, session: DbSession) -> ExperienceSummaryOut:
     return ExperienceSummaryOut.model_validate(await service.experience_summary(session, principal))
+
+
+@router.post(
+    "/experience/probes",
+    response_model=ExperienceProbeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def ingest_experience_probe(
+    payload: ExperienceProbeIn, principal: PrincipalDep, session: DbSession
+) -> ExperienceProbeOut:
+    event, score = await service.ingest_experience_probe(session, principal, payload)
+    await session.commit()
+    return ExperienceProbeOut(
+        event=SecurityEventOut.model_validate(event), score=score, degraded=score < 70
+    )
 
 
 @router.get("/threat-stories", response_model=list[ThreatStoryOut])

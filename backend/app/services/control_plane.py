@@ -33,6 +33,7 @@ from app.db.repository import tenant_select
 from app.schemas.control_plane import (
     CanaryInteractionIn,
     DeceptionCanaryCreateIn,
+    ExperienceProbeIn,
     PrivateAccessEvaluateIn,
     RiskSimulationCreateIn,
     SecurityEventIn,
@@ -486,6 +487,86 @@ def calculate_experience_score(
     return (availability_score + latency_score + error_score).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
+
+
+def calculate_probe_score(
+    *,
+    available: bool,
+    status_code: int | None,
+    total_ms: float,
+    certificate_days_remaining: int | None,
+) -> Decimal:
+    if not available:
+        return Decimal("0.00")
+    score = Decimal("100")
+    score -= min(Decimal("55"), Decimal(str(max(0.0, total_ms))) / Decimal("100"))
+    if status_code is None or status_code >= 500:
+        score -= Decimal("30")
+    elif status_code >= 400:
+        score -= Decimal("20")
+    elif status_code >= 300:
+        score -= Decimal("5")
+    if certificate_days_remaining is not None:
+        if certificate_days_remaining < 0:
+            score -= Decimal("40")
+        elif certificate_days_remaining <= 7:
+            score -= Decimal("25")
+        elif certificate_days_remaining <= 30:
+            score -= Decimal("10")
+    return max(Decimal("0"), score).quantize(_MONEY, rounding=ROUND_HALF_UP)
+
+
+async def ingest_experience_probe(
+    session: AsyncSession, principal: Principal, payload: ExperienceProbeIn
+) -> tuple[SecurityEvent, Decimal]:
+    principal.require(Permission.ENDPOINT_INGEST)
+    score = calculate_probe_score(
+        available=payload.available,
+        status_code=payload.status_code,
+        total_ms=payload.total_ms,
+        certificate_days_remaining=payload.certificate_days_remaining,
+    )
+    severity = (
+        "critical" if score < 30 else "high" if score < 50 else "medium" if score < 70 else "info"
+    )
+    event = await _ingest_event(
+        session,
+        principal,
+        SecurityEventIn(
+            event_key=payload.event_key,
+            category="experience",
+            event_type="journey_probe",
+            source_kind="cynux_experience_probe",
+            occurred_at=payload.occurred_at,
+            severity=severity,
+            summary=f"Synthetic journey observation: {payload.journey_name}",
+            content_digest=payload.target_digest,
+            metrics={
+                "journey_key": payload.journey_key,
+                "availability": 1 if payload.available else 0,
+                "latency_ms": payload.total_ms,
+                "error_rate": 0 if payload.available else 1,
+                "experience_score": str(score),
+                "dns_ms": payload.dns_ms,
+                "connect_ms": payload.connect_ms,
+                "tls_ms": payload.tls_ms,
+                "ttfb_ms": payload.ttfb_ms,
+                "status_code": payload.status_code,
+                "certificate_days_remaining": payload.certificate_days_remaining,
+            },
+            evidence={
+                "journey_key": payload.journey_key,
+                "journey_name": payload.journey_name,
+                "location": payload.location,
+                "target_digest": payload.target_digest,
+                "error_code": payload.error_code,
+            },
+        ),
+    )
+    persisted_score = Decimal(str(event.metrics.get("experience_score", score))).quantize(
+        _MONEY, rounding=ROUND_HALF_UP
+    )
+    return event, persisted_score
 
 
 def canary_digest(token: str) -> str:
@@ -1324,10 +1405,15 @@ async def experience_summary(session: AsyncSession, principal: Principal) -> dic
     degraded: set[str] = set()
     for event in events:
         metrics = event.metrics
-        score = calculate_experience_score(
-            availability=float(metrics.get("availability", 0)),
-            latency_ms=float(metrics.get("latency_ms", 0)),
-            error_rate=float(metrics.get("error_rate", 0)),
+        stored_score = metrics.get("experience_score")
+        score = (
+            Decimal(str(stored_score)).quantize(_MONEY, rounding=ROUND_HALF_UP)
+            if stored_score is not None
+            else calculate_experience_score(
+                availability=float(metrics.get("availability", 0)),
+                latency_ms=float(metrics.get("latency_ms", 0)),
+                error_rate=float(metrics.get("error_rate", 0)),
+            )
         )
         scores.append(score)
         journey = str(metrics.get("journey_key", event.event_type))
@@ -1519,6 +1605,7 @@ async def list_risk_simulations(
 
 
 __all__ = [
+    "calculate_probe_score",
     "calculate_experience_score",
     "calculate_identity_confidence",
     "canary_digest",
@@ -1531,6 +1618,7 @@ __all__ = [
     "evaluate_resource_policy",
     "experience_summary",
     "ingest_event",
+    "ingest_experience_probe",
     "list_canaries",
     "list_events",
     "list_policies",

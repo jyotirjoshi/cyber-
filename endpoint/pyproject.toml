@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cynux-endpoint"
-version = "0.6.0"
+version = "0.7.0"
 description = "Native Cynux process telemetry collector"
 requires-python = ">=3.11"
 dependencies = ["psutil>=6.1,<8"]
@@ -14,6 +14,7 @@ cynux-endpoint = "cynux_endpoint.agent:main"
 cynux-scan = "cynux_endpoint.scanner:main"
 cynux-quarantine = "cynux_endpoint.quarantine:main"
 cynux-proxy = "cynux_endpoint.proxy:main"
+cynux-journey = "cynux_endpoint.journey:main"
 
 [tool.setuptools.packages.find]
 include = ["cynux_endpoint*"]

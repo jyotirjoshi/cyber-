@@ -146,3 +146,19 @@ def test_casb_evaluation_uses_native_control_plane_route():
 
     assert result["decision"] == "block"
     assert seen == [("POST", "/api/v1/control-plane/casb/evaluate")]
+
+
+def test_experience_probe_uses_native_ingestion_route():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(201, json={"score": "98.00", "degraded": False})
+
+    client = CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    )
+    result = client.ingest_experience_probe({"event_key": "journey:checkout:1"})
+
+    assert result["degraded"] is False
+    assert seen == [("POST", "/api/v1/control-plane/experience/probes")]

@@ -98,7 +98,7 @@ def process_event(endpoint: str, info: dict, hostname: str, os_name: str) -> dic
     }
 
 
-def transport(base_url: str, token: str):
+def json_transport(base_url: str, token: str, path: str):
     url = urlsplit(base_url)
     if (
         url.scheme != "https"
@@ -116,7 +116,9 @@ def transport(base_url: str, token: str):
     if not token.startswith("cynux_"):
         raise ValueError("A scoped Cynux platform API key is required")
     opener = build_opener(NoRedirect())
-    endpoint = base_url.rstrip("/") + "/api/v1/control-plane/endpoint/events"
+    if not path.startswith("/api/v1/") or "?" in path or "#" in path:
+        raise ValueError("Ingestion path must be a bounded API v1 path")
+    endpoint = base_url.rstrip("/") + path
 
     def send(body: bytes):
         request = Request(
@@ -133,6 +135,10 @@ def transport(base_url: str, token: str):
                 raise OSError(f"Unexpected ingestion status {response.status}")
 
     return send
+
+
+def transport(base_url: str, token: str):
+    return json_transport(base_url, token, "/api/v1/control-plane/endpoint/events")
 
 
 def collect(spool: Spool, seen: set, psutil) -> set:
