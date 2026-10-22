@@ -29,6 +29,16 @@ def test_onboarding_progress_uses_real_completion_and_one_next_action() -> None:
     assert [step.status for step in result.steps[4:6]] == ["blocked", "blocked"]
     assert result.steps[6].status == "complete"
     assert result.steps[7].status == "blocked"
+    assert result.first_value_score == 50
+    assert [area.key for area in result.first_value_areas if area.achieved] == [
+        "sources",
+        "inventory",
+        "continuous_operations",
+    ]
+    assert (
+        next(area for area in result.first_value_areas if area.key == "exposure").gap
+        == "Complete an authorized assessment"
+    )
 
 
 def test_onboarding_is_complete_only_with_operational_and_recovery_evidence() -> None:

@@ -462,7 +462,7 @@ function IntegrationCard({
   };
 
   return (
-    <Card className="flex flex-col">
+    <Card id={`integration-${integration.kind}`} className="flex flex-col">
       <CardHeader>
         <div className="min-w-0">
           <CardTitle className="truncate">{humanize(integration.kind)}</CardTitle>
@@ -764,6 +764,24 @@ function IntegrationCard({
   );
 }
 
+function ConnectorTroubleshooting({ certifications }: { certifications: ConnectorCertificationOut[] }) {
+  const needsHelp = certifications
+    .filter((item) => item.grade !== "certified")
+    .sort((left, right) => left.score - right.score);
+  return <Card>
+    <CardHeader><div><CardTitle>Connector troubleshooting wizard</CardTitle><p className="mt-0.5 text-xs text-muted">Work from authentication to contract, scheduling, and source coverage. Every step is backed by live assurance checks.</p></div></CardHeader>
+    <CardBody>
+      {needsHelp.length === 0 ? <p className="text-sm text-ok">All configured connectors currently pass certification.</p> : <div className="space-y-3">{needsHelp.map((item) => <div key={item.kind} className="rounded-lg border border-line p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-fg">{item.name}</span><Badge tone={certificationTone(item.grade)}>{item.score}%</Badge></div>
+        <ol className="mt-3 grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
+          {item.checks.map((check, index) => <li key={check.key} className={`rounded-md border px-2 py-2 ${check.passed ? "border-line text-muted" : "border-warn/40 bg-warn/5 text-fg"}`}><span className="font-semibold">{index + 1}. {humanize(check.key)}</span><br />{check.detail}</li>)}
+        </ol>
+        <a href={`#integration-${item.kind}`} className="mt-3 inline-flex text-xs font-medium text-primary hover:underline">Open connector actions →</a>
+      </div>)}</div>}
+    </CardBody>
+  </Card>;
+}
+
 export default function IntegrationsPage() {
   const { can } = useAuth();
   const canRead = can("integration:read");
@@ -843,6 +861,7 @@ export default function IntegrationsPage() {
       {canManage && !hasByok && <ByokSetupCard onChanged={refresh} />}
       {canManage && data && <AddIntegrationCard existing={data} onChanged={refresh} />}
       {can("assessment:create") && <ScanImportCard />}
+      {certifications.data && <ConnectorTroubleshooting certifications={certifications.data} />}
       <Card>
         <CardHeader><div><CardTitle>Connector operational assurance</CardTitle><p className="mt-0.5 text-xs text-muted">Certification combines enabled state, required credentials, a recent live authentication test, circuit health, and current scheduled coverage.</p></div></CardHeader>
         <CardBody>

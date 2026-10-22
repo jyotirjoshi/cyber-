@@ -2705,6 +2705,15 @@ export interface PlatformOnboardingOut {
   completed: number;
   total: number;
   next_step: string | null;
+  first_value_score: number;
+  first_value_areas: Array<{
+    key: string;
+    label: string;
+    achieved: boolean;
+    evidence: string;
+    gap: string | null;
+    action_path: string;
+  }>;
   evaluated_at: IsoDateTime;
   steps: Array<{
     key: string;
@@ -2715,6 +2724,26 @@ export interface PlatformOnboardingOut {
     action_path: string;
     evidence: string;
   }>;
+}
+
+export interface PlatformSearchResultOut {
+  kind: "asset" | "finding" | "case" | "ticket" | "agent" | "report";
+  id: Uuid;
+  title: string;
+  subtitle: string;
+  href: string;
+}
+
+export interface DemoWorkspaceOut {
+  assessment_id: Uuid;
+  report_id: Uuid | null;
+  reused: boolean;
+  assets: number;
+  findings: number;
+  incidents: number;
+  tickets: number;
+  attack_paths: number;
+  ai_resources: number;
 }
 
 // ---------------------------------------------------------------------------

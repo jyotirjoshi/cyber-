@@ -90,6 +90,7 @@ import type {
   ComplianceOverviewOut,
   ChangePasswordIn,
   DashboardOut,
+  DemoWorkspaceOut,
   DashboardLayoutIn,
   DashboardLayoutOut,
   EngagementCreateIn,
@@ -147,6 +148,7 @@ import type {
   PlatformApiKeyCreatedOut,
   PlatformApiKeyOut,
   PlatformOnboardingOut,
+  PlatformSearchResultOut,
   PlatformReadinessOut,
   PolicyGateOut,
   Problem,
@@ -1281,6 +1283,8 @@ export const api = {
 
   platform: {
     onboarding: () => request<PlatformOnboardingOut>("GET", "/platform/onboarding"),
+    search: (q: string, limitPerKind = 5) => request<PlatformSearchResultOut[]>("GET", "/platform/search", { query: { q, limit_per_kind: limitPerKind } }),
+    createDemoWorkspace: () => request<DemoWorkspaceOut>("POST", "/platform/demo-workspace"),
     readiness: () => request<PlatformReadinessOut>("GET", "/platform/readiness"),
     listApiKeys: () => request<PlatformApiKeyOut[]>("GET", "/platform/api-keys"),
     createApiKey: (body: PlatformApiKeyCreateIn) =>

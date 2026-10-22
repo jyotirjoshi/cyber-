@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -78,6 +79,15 @@ class OnboardingStepOut(BaseModel):
     evidence: str
 
 
+class FirstValueAreaOut(BaseModel):
+    key: str
+    label: str
+    achieved: bool
+    evidence: str
+    gap: str | None = None
+    action_path: str
+
+
 class PlatformOnboardingOut(BaseModel):
     complete: bool
     percent: int = Field(ge=0, le=100)
@@ -85,15 +95,40 @@ class PlatformOnboardingOut(BaseModel):
     total: int = Field(ge=1)
     next_step: str | None = None
     steps: list[OnboardingStepOut]
+    first_value_score: int = Field(ge=0, le=100)
+    first_value_areas: list[FirstValueAreaOut]
     evaluated_at: dt.datetime
+
+
+class PlatformSearchResultOut(BaseModel):
+    kind: Literal["asset", "finding", "case", "ticket", "agent", "report"]
+    id: uuid.UUID
+    title: str
+    subtitle: str
+    href: str
+
+
+class DemoWorkspaceOut(BaseModel):
+    assessment_id: uuid.UUID
+    report_id: uuid.UUID | None
+    reused: bool
+    assets: int = Field(ge=0)
+    findings: int = Field(ge=0)
+    incidents: int = Field(ge=0)
+    tickets: int = Field(ge=0)
+    attack_paths: int = Field(ge=0)
+    ai_resources: int = Field(ge=0)
 
 
 __all__ = [
     "PlatformApiKeyCreateIn",
+    "FirstValueAreaOut",
+    "DemoWorkspaceOut",
     "PlatformApiKeyIssuedOut",
     "PlatformApiKeyOut",
     "PlatformOnboardingOut",
     "PlatformReadinessOut",
+    "PlatformSearchResultOut",
     "OnboardingStepOut",
     "ReadinessCheckOut",
 ]

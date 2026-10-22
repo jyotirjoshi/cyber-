@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/cn";
 import { useAuth } from "@/lib/auth";
 import { humanize } from "@/lib/format";
-import type { Permission } from "@/lib/types";
+import { api } from "@/lib/api";
+import { groupSearchResults } from "@/lib/global-search";
+import type { Permission, PlatformSearchResultOut } from "@/lib/types";
 
 /**
  * App shell — the persistent frame (sidebar nav + topbar) around every authenticated screen.
@@ -129,7 +131,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           >
             <IconMenu />
           </button>
-          <div className="flex-1" />
+          <div className="flex-1"><GlobalSearch /></div>
           <OrgSwitcher />
           <SignOutButton />
         </header>
@@ -140,6 +142,69 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
     </div>
   );
+}
+
+function GlobalSearch() {
+  const [query, setQuery] = React.useState("");
+  const [results, setResults] = React.useState<PlatformSearchResultOut[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+  const requestSequence = React.useRef(0);
+
+  React.useEffect(() => {
+    const normalized = query.trim();
+    const sequence = ++requestSequence.current;
+    if (normalized.length < 2) {
+      setResults([]);
+      setError("");
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    const timer = window.setTimeout(() => {
+      void api.platform.search(normalized).then((items) => {
+        if (requestSequence.current !== sequence) return;
+        setResults(items);
+        setError("");
+      }).catch(() => {
+        if (requestSequence.current !== sequence) return;
+        setResults([]);
+        setError("Search is temporarily unavailable.");
+      }).finally(() => {
+        if (requestSequence.current === sequence) setLoading(false);
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  const groups = groupSearchResults(results);
+  return <div className="relative max-w-xl">
+    <label className="sr-only" htmlFor="global-product-search">Search across Cynux</label>
+    <input
+      id="global-product-search"
+      type="search"
+      value={query}
+      onChange={(event) => { setQuery(event.target.value); setOpen(true); }}
+      onFocus={() => setOpen(true)}
+      onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}
+      placeholder="Search assets, findings, cases, tickets, agents…"
+      className="h-9 w-full rounded-lg border border-line bg-surface-2 px-3 text-sm text-fg outline-none placeholder:text-muted focus:border-primary sm:max-w-md"
+      autoComplete="off"
+    />
+    {open && query.trim().length >= 2 && <div className="absolute left-0 top-11 z-50 max-h-[70vh] w-[min(36rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-line bg-surface p-2 shadow-xl">
+      {loading && <p className="px-3 py-4 text-sm text-muted">Searching permitted records…</p>}
+      {!loading && error && <p role="alert" className="px-3 py-4 text-sm text-danger">{error}</p>}
+      {!loading && !error && groups.length === 0 && <p className="px-3 py-4 text-sm text-muted">No permitted records match this search.</p>}
+      {!loading && !error && groups.map(([kind, items]) => <section key={kind} className="py-1">
+        <p className="px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted">{humanize(kind)}</p>
+        {items.map((item) => <Link key={`${item.kind}:${item.id}`} href={item.href} onClick={() => { setOpen(false); setQuery(""); }} className="block rounded-lg px-3 py-2 hover:bg-surface-2">
+          <p className="truncate text-sm font-medium text-fg">{item.title}</p>
+          <p className="truncate text-xs text-muted">{item.subtitle}</p>
+        </Link>)}
+      </section>)}
+    </div>}
+  </div>;
 }
 
 function IdentityCard() {

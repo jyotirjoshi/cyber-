@@ -4,23 +4,27 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
-from app.api.deps import DbSession, PrincipalDep
+from app.api.deps import DbSession, PrincipalDep, StorageDep
 from app.db.enums import Permission
 from app.db.models.platform import PlatformApiKey
 from app.db.repository import tenant_select
 from app.schemas.platform import (
+    DemoWorkspaceOut,
     PlatformApiKeyCreateIn,
     PlatformApiKeyIssuedOut,
     PlatformApiKeyOut,
     PlatformOnboardingOut,
     PlatformReadinessOut,
+    PlatformSearchResultOut,
 )
 from app.services.audit import AuditAction, record
+from app.services.demo_workspace import create_demo_workspace
 from app.services.platform_api_key import create_platform_api_key, revoke_platform_api_key
 from app.services.platform_onboarding import get_onboarding
 from app.services.platform_readiness import get_readiness
+from app.services.platform_search import global_search
 
 router = APIRouter(prefix="/platform", tags=["platform"])
 
@@ -33,6 +37,29 @@ async def platform_onboarding(principal: PrincipalDep, session: DbSession) -> Pl
 @router.get("/readiness", response_model=PlatformReadinessOut)
 async def platform_readiness(principal: PrincipalDep, session: DbSession) -> PlatformReadinessOut:
     return await get_readiness(session, principal)
+
+
+@router.get("/search", response_model=list[PlatformSearchResultOut])
+async def platform_search(
+    principal: PrincipalDep,
+    session: DbSession,
+    q: str = Query(min_length=2, max_length=200),
+    limit_per_kind: int = Query(default=5, ge=1, le=10),
+) -> list[PlatformSearchResultOut]:
+    """Search records without widening the caller's existing permissions."""
+    return await global_search(session, principal, query=q, limit_per_kind=limit_per_kind)
+
+
+@router.post(
+    "/demo-workspace", response_model=DemoWorkspaceOut, status_code=status.HTTP_201_CREATED
+)
+async def provision_demo_workspace(
+    principal: PrincipalDep, session: DbSession, storage: StorageDep
+) -> DemoWorkspaceOut:
+    """Create a labeled synthetic company without network or provider side effects."""
+    result = await create_demo_workspace(session, principal, storage=storage)
+    await session.commit()
+    return result
 
 
 @router.get("/api-keys", response_model=list[PlatformApiKeyOut])
@@ -52,7 +79,9 @@ async def list_platform_api_keys(
     )
 
 
-@router.post("/api-keys", response_model=PlatformApiKeyIssuedOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/api-keys", response_model=PlatformApiKeyIssuedOut, status_code=status.HTTP_201_CREATED
+)
 async def issue_platform_api_key(
     payload: PlatformApiKeyCreateIn, principal: PrincipalDep, session: DbSession
 ) -> PlatformApiKeyIssuedOut:
