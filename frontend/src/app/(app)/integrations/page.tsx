@@ -23,6 +23,7 @@ import type {
   IntegrationKind,
   IntegrationOut,
   IntegrationSyncOut,
+  IntegrationSyncRunOut,
   IntegrationStatus,
   IntegrationTestOut,
   IntegrationUpsertIn,
@@ -783,11 +784,17 @@ export default function IntegrationsPage() {
     [],
     { enabled: canRead },
   );
+  const syncRuns = useApiResource(
+    () => api.integrations.syncRuns(30),
+    [],
+    { enabled: canRead },
+  );
   const refresh = React.useCallback(() => {
     refetch();
     coverage.refetch();
     certifications.refetch();
-  }, [refetch, coverage, certifications]);
+    syncRuns.refetch();
+  }, [refetch, coverage, certifications, syncRuns]);
 
   if (!canRead) {
     return (
@@ -860,6 +867,17 @@ export default function IntegrationsPage() {
               <p className="mt-2 text-xs text-muted">{source.coverage_reason}</p>
             </div>)}</div>
           ) : <p className="text-sm text-muted">No connector coverage has been recorded yet.</p>}
+        </CardBody>
+      </Card>
+      <Card>
+        <CardHeader><div><CardTitle>Connector execution history</CardTitle><p className="mt-0.5 text-xs text-muted">Append-only scheduled-sync receipts show timing, bounded checkpoints, staged records, absence candidates and safe failure classifications.</p></div></CardHeader>
+        <CardBody>
+          {syncRuns.loading && !syncRuns.data ? <LoadingState label="Loading connector execution history…" /> : syncRuns.error ? <ErrorState message={syncRuns.error} onRetry={syncRuns.refetch} /> : syncRuns.data?.length ? (
+            <div className="space-y-2">{syncRuns.data.map((run: IntegrationSyncRunOut) => <div key={run.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line p-3">
+              <div><div className="flex flex-wrap items-center gap-2"><span className="font-medium text-fg">{run.name}</span><Badge tone={run.status === "succeeded" ? "ok" : run.status === "failed" ? "danger" : "warn"}>{humanize(run.status)}</Badge><Badge tone="neutral">{run.mode}</Badge></div><p className="mt-1 text-xs text-muted">{formatRelative(run.started_at)} · {run.duration_ms === null ? "in progress" : `${(run.duration_ms / 1000).toFixed(1)}s`} · {run.items_staged} staged · {run.absence_candidates} absence candidates</p>{run.error_summary && <p className="mt-1 text-xs text-danger">{run.error_code ? `${humanize(run.error_code)}: ` : ""}{run.error_summary}</p>}</div>
+              <p className="text-xs text-faint">{humanize(run.kind)}</p>
+            </div>)}</div>
+          ) : <p className="text-sm text-muted">No scheduled connector execution has completed since run receipts were enabled.</p>}
         </CardBody>
       </Card>
       {body}

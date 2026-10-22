@@ -122,6 +122,7 @@ import type {
   IntegrationKind,
   IntegrationOut,
   IntegrationSyncOut,
+  IntegrationSyncRunOut,
   TenableScanLaunchOut,
   TenableScanStatusOut,
   IntegrationTestOut,
@@ -1103,6 +1104,8 @@ export const api = {
     health: () => request<IntegrationHealthOut[]>("GET", "/integrations/health"),
     certifications: () => request<ConnectorCertificationOut[]>("GET", "/integrations/certifications"),
     coverage: () => request<SourceCoverageOut[]>("GET", "/integrations/coverage"),
+    syncRuns: (limit = 50) =>
+      request<IntegrationSyncRunOut[]>("GET", "/integrations/sync-runs", { query: { limit } }),
     upsert: (body: IntegrationUpsertIn) =>
       request<IntegrationOut>("POST", "/integrations", { body }),
     get: (kind: IntegrationKind) => request<IntegrationOut>("GET", `/integrations/${kind}`),

@@ -179,6 +179,27 @@ class ConnectorContractTestOut(BaseModel):
     checked_at: dt.datetime
 
 
+class IntegrationSyncRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    integration_id: uuid.UUID
+    kind: IntegrationKind
+    name: str
+    mode: Literal["scheduled", "manual", "contract"]
+    status: Literal["running", "succeeded", "failed"]
+    started_at: dt.datetime
+    completed_at: dt.datetime | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    items_seen: int = Field(ge=0)
+    items_staged: int = Field(ge=0)
+    absence_candidates: int = Field(ge=0)
+    checkpoint_before: dict[str, Any]
+    checkpoint_after: dict[str, Any]
+    error_code: str | None = None
+    error_summary: str | None = None
+
+
 class SourceCoverageOut(BaseModel):
     provider: str
     observations_total: int = Field(ge=0)
@@ -200,6 +221,7 @@ __all__ = [
     "IntegrationOut",
     "SourceCoverageOut",
     "IntegrationSyncOut",
+    "IntegrationSyncRunOut",
     "IntegrationTestOut",
     "IntegrationUpsertIn",
 ]

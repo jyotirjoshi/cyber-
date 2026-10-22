@@ -134,7 +134,12 @@ from app.db.models.identity import (
     ScimProvisioningToken,
     User,
 )
-from app.db.models.integration import InboundTicketEvent, Integration, IntegrationCredential
+from app.db.models.integration import (
+    InboundTicketEvent,
+    Integration,
+    IntegrationCredential,
+    IntegrationSyncRun,
+)
 from app.db.models.knowledge import (
     AgentMemoryCandidate,
     KnowledgeChunk,
@@ -281,6 +286,7 @@ __all__ = [
     "FindingEnrichment",
     "Integration",
     "IntegrationCredential",
+    "IntegrationSyncRun",
     "InboundTicketEvent",
     "KnowledgeChunk",
     "KnowledgeCollection",

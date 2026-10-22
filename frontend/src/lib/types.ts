@@ -1653,6 +1653,25 @@ export interface IntegrationSyncOut {
   missing_source_records: number;
 }
 
+export interface IntegrationSyncRunOut {
+  id: Uuid;
+  integration_id: Uuid;
+  kind: IntegrationKind;
+  name: string;
+  mode: "scheduled" | "manual" | "contract";
+  status: "running" | "succeeded" | "failed";
+  started_at: IsoDateTime;
+  completed_at: IsoDateTime | null;
+  duration_ms: number | null;
+  items_seen: number;
+  items_staged: number;
+  absence_candidates: number;
+  checkpoint_before: Record<string, unknown>;
+  checkpoint_after: Record<string, unknown>;
+  error_code: string | null;
+  error_summary: string | null;
+}
+
 export interface TenableScanStatusOut {
   scan_id: string;
   status: string;

@@ -167,6 +167,49 @@ class IntegrationCredential(Base, TenantMixin, TimestampMixin):
         return f"<IntegrationCredential {self.name} [REDACTED]>"
 
 
+class IntegrationSyncRun(Base, TenantMixin, TimestampMixin):
+    """Append-only operational receipt for one provider synchronization attempt."""
+
+    __tablename__ = "integration_sync_runs"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    integration_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("integrations.id", ondelete="CASCADE"), nullable=False
+    )
+    run_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    items_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    items_staged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    absence_candidates: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    checkpoint_before: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    checkpoint_after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_summary: Mapped[str | None] = mapped_column(String(500))
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "run_key", name="unique_integration_sync_run_key"),
+        CheckConstraint("mode IN ('scheduled','manual','contract')", name="valid_sync_run_mode"),
+        CheckConstraint(
+            "status IN ('running','succeeded','failed')", name="valid_sync_run_status"
+        ),
+        CheckConstraint(
+            "items_seen >= 0 AND items_staged >= 0 AND absence_candidates >= 0",
+            name="valid_sync_run_counts",
+        ),
+        CheckConstraint("duration_ms IS NULL OR duration_ms >= 0", name="valid_sync_run_duration"),
+        Index(
+            "ix_integration_sync_runs_org_started",
+            "organization_id",
+            "started_at",
+        ),
+        Index("ix_integration_sync_runs_integration", "integration_id", "started_at"),
+    )
+
+
 class InboundTicketEvent(Base, TenantMixin, TimestampMixin):
     """Authenticated provider event receipt and replay boundary."""
 
@@ -218,4 +261,9 @@ class InboundTicketEvent(Base, TenantMixin, TimestampMixin):
     )
 
 
-__all__ = ["InboundTicketEvent", "Integration", "IntegrationCredential"]
+__all__ = [
+    "InboundTicketEvent",
+    "Integration",
+    "IntegrationCredential",
+    "IntegrationSyncRun",
+]

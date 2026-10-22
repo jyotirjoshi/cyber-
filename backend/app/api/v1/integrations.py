@@ -37,6 +37,7 @@ from app.schemas.integration import (
     IntegrationHealthOut,
     IntegrationOut,
     IntegrationSyncOut,
+    IntegrationSyncRunOut,
     IntegrationTestOut,
     IntegrationUpsertIn,
     SourceCoverageOut,
@@ -48,6 +49,40 @@ from app.services import file_intake
 from app.services import integration as integration_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+@router.get("/sync-runs", response_model=list[IntegrationSyncRunOut])
+async def integration_sync_runs(
+    principal: PrincipalDep,
+    session: DbSession,
+    limit: int = 50,
+) -> list[IntegrationSyncRunOut]:
+    """Return bounded append-only connector execution receipts for this tenant."""
+
+    from sqlalchemy import select
+
+    from app.db.models.integration import Integration, IntegrationSyncRun
+
+    principal.require(Permission.INTEGRATION_READ)
+    bounded = max(1, min(limit, 200))
+    rows = (
+        await session.execute(
+            select(IntegrationSyncRun, Integration.kind, Integration.name)
+            .join(Integration, Integration.id == IntegrationSyncRun.integration_id)
+            .where(
+                IntegrationSyncRun.organization_id == principal.organization_id,
+                Integration.organization_id == principal.organization_id,
+            )
+            .order_by(IntegrationSyncRun.started_at.desc(), IntegrationSyncRun.id.desc())
+            .limit(bounded)
+        )
+    ).all()
+    return [
+        IntegrationSyncRunOut.model_validate(
+            {**receipt.__dict__, "kind": kind, "name": name}
+        )
+        for receipt, kind, name in rows
+    ]
 
 
 @router.post("/imports/scan", response_model=dict[str, int])

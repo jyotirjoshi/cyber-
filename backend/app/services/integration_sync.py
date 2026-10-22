@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -13,7 +14,7 @@ from app.core.config import Settings
 from app.core.errors import CynuxError
 from app.db.base import utcnow
 from app.db.enums import IntegrationKind
-from app.db.models.integration import Integration
+from app.db.models.integration import Integration, IntegrationSyncRun
 from app.services import audit as audit_service
 from app.services import external_alert as external_alert_service
 from app.services.audit import AuditAction
@@ -54,6 +55,32 @@ def _retry_minutes(interval: int, failures: int) -> int:
     return min(interval, 5 * (2 ** min(max(failures - 1, 0), 10)))
 
 
+def settle_sync_run(
+    row: IntegrationSyncRun,
+    *,
+    status: str,
+    completed_at: dt.datetime,
+    items_seen: int = 0,
+    items_staged: int = 0,
+    absence_candidates: int = 0,
+    error_code: str | None = None,
+    error_summary: str | None = None,
+) -> None:
+    """Settle a receipt with bounded operational evidence, never provider payloads."""
+
+    row.status = status
+    row.completed_at = completed_at
+    row.duration_ms = max(0, int((completed_at - row.started_at).total_seconds() * 1000))
+    row.items_seen = max(0, int(items_seen))
+    row.items_staged = max(0, int(items_staged))
+    row.absence_candidates = max(0, int(absence_candidates))
+    row.error_code = error_code[:80] if error_code else None
+    row.error_summary = error_summary[:500] if error_summary else None
+    row.checkpoint_after = (
+        {"completed_at": completed_at.isoformat()} if status == "succeeded" else {}
+    )
+
+
 async def run_due_integration_syncs(
     session: AsyncSession,
     *,
@@ -92,6 +119,23 @@ async def run_due_integration_syncs(
         principal = Principal.for_system(organization_id=integration.organization_id)
         kind = IntegrationKind(integration.kind)
         handler = _SYNC_HANDLERS[kind]
+        receipt = IntegrationSyncRun(
+            organization_id=integration.organization_id,
+            integration_id=integration.id,
+            run_key=f"scheduled:{integration.id}:{started_at.isoformat()}:{uuid.uuid4().hex[:12]}",
+            mode="scheduled",
+            status="running",
+            started_at=started_at,
+            checkpoint_before={
+                "last_completed_at": integration.last_sync_at.isoformat()
+                if integration.last_sync_at
+                else None,
+                "failure_count": int(integration.sync_failure_count or 0),
+            },
+            checkpoint_after={},
+        )
+        session.add(receipt)
+        await session.flush()
         # Move the due time before opening the savepoint. A rollback of provider
         # writes must not immediately hot-loop the same broken connection.
         integration.next_sync_at = started_at + dt.timedelta(minutes=interval)
@@ -121,6 +165,13 @@ async def run_due_integration_syncs(
             )
             integration.next_sync_at = integration.last_sync_at + dt.timedelta(
                 minutes=_retry_minutes(interval, failures)
+            )
+            settle_sync_run(
+                receipt,
+                status="failed",
+                completed_at=integration.last_sync_at,
+                error_code=exc.code if isinstance(exc, CynuxError) else "unexpected_error",
+                error_summary="Provider sync failed; retry scheduled.",
             )
             await audit_service.record(
                 session,
@@ -169,8 +220,17 @@ async def run_due_integration_syncs(
                 "continuous": True,
             },
         )
+        total = int(getattr(result, "total", 0))
+        settle_sync_run(
+            receipt,
+            status="succeeded",
+            completed_at=integration.last_sync_at or utcnow(),
+            items_seen=total,
+            items_staged=total,
+            absence_candidates=int(getattr(result, "absence_candidates", 0)),
+        )
 
     return len(due)
 
 
-__all__ = ["run_due_integration_syncs"]
+__all__ = ["run_due_integration_syncs", "settle_sync_run"]
