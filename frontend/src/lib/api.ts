@@ -145,6 +145,7 @@ import type {
   PlatformApiKeyCreateIn,
   PlatformApiKeyCreatedOut,
   PlatformApiKeyOut,
+  PlatformOnboardingOut,
   PlatformReadinessOut,
   PolicyGateOut,
   Problem,
@@ -1276,6 +1277,7 @@ export const api = {
   },
 
   platform: {
+    onboarding: () => request<PlatformOnboardingOut>("GET", "/platform/onboarding"),
     readiness: () => request<PlatformReadinessOut>("GET", "/platform/readiness"),
     listApiKeys: () => request<PlatformApiKeyOut[]>("GET", "/platform/api-keys"),
     createApiKey: (body: PlatformApiKeyCreateIn) =>

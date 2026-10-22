@@ -25,6 +25,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: <IconDashboard /> },
+  { href: "/onboarding", label: "Get started", icon: <IconSettings />, permission: "org:read" },
   { href: "/agent", label: "Agent", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/agent/agents", label: "Custom agents", icon: <IconAgent />, permission: "agent:chat" },
   { href: "/agent/learning", label: "Learning review", icon: <IconAgent />, permission: "org:manage" },

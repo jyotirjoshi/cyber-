@@ -14,13 +14,20 @@ from app.schemas.platform import (
     PlatformApiKeyCreateIn,
     PlatformApiKeyIssuedOut,
     PlatformApiKeyOut,
+    PlatformOnboardingOut,
     PlatformReadinessOut,
 )
 from app.services.audit import AuditAction, record
 from app.services.platform_api_key import create_platform_api_key, revoke_platform_api_key
+from app.services.platform_onboarding import get_onboarding
 from app.services.platform_readiness import get_readiness
 
 router = APIRouter(prefix="/platform", tags=["platform"])
+
+
+@router.get("/onboarding", response_model=PlatformOnboardingOut)
+async def platform_onboarding(principal: PrincipalDep, session: DbSession) -> PlatformOnboardingOut:
+    return await get_onboarding(session, principal)
 
 
 @router.get("/readiness", response_model=PlatformReadinessOut)

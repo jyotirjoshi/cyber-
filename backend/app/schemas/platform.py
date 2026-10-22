@@ -68,10 +68,32 @@ class PlatformReadinessOut(BaseModel):
     evaluated_at: dt.datetime
 
 
+class OnboardingStepOut(BaseModel):
+    key: str
+    title: str
+    description: str
+    status: str
+    action_label: str
+    action_path: str
+    evidence: str
+
+
+class PlatformOnboardingOut(BaseModel):
+    complete: bool
+    percent: int = Field(ge=0, le=100)
+    completed: int = Field(ge=0)
+    total: int = Field(ge=1)
+    next_step: str | None = None
+    steps: list[OnboardingStepOut]
+    evaluated_at: dt.datetime
+
+
 __all__ = [
     "PlatformApiKeyCreateIn",
     "PlatformApiKeyIssuedOut",
     "PlatformApiKeyOut",
+    "PlatformOnboardingOut",
     "PlatformReadinessOut",
+    "OnboardingStepOut",
     "ReadinessCheckOut",
 ]

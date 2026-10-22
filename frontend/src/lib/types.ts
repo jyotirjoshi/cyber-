@@ -2655,6 +2655,24 @@ export interface PlatformReadinessOut {
   }>;
 }
 
+export interface PlatformOnboardingOut {
+  complete: boolean;
+  percent: number;
+  completed: number;
+  total: number;
+  next_step: string | null;
+  evaluated_at: IsoDateTime;
+  steps: Array<{
+    key: string;
+    title: string;
+    description: string;
+    status: "complete" | "ready" | "blocked";
+    action_label: string;
+    action_path: string;
+    evidence: string;
+  }>;
+}
+
 // ---------------------------------------------------------------------------
 // Saved views (app/schemas/saved_view.py).
 // ---------------------------------------------------------------------------
