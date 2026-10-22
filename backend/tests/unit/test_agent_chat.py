@@ -14,7 +14,12 @@ from app.db.models.asset import Asset
 from app.db.models.external_alert import ExternalSecurityAlert
 from app.db.models.finding import Finding
 from app.llm.base import LLMMessage, LLMResponse, Usage
-from app.services.agent_chat import build_chat_messages, create_reply, load_security_snapshot
+from app.services.agent_chat import (
+    build_chat_messages,
+    create_reply,
+    extract_record_citations,
+    load_security_snapshot,
+)
 from app.services.context import Principal
 
 
@@ -65,6 +70,55 @@ def test_build_chat_messages_omits_empty_summary() -> None:
 
     assert len(messages) == 2
     assert messages[-1].content == "What can you help with?"
+
+
+def test_extract_record_citations_is_bounded_deduplicated_and_typed() -> None:
+    finding_id = str(uuid.uuid4())
+    asset_id = str(uuid.uuid4())
+    citations = extract_record_citations(
+        security_snapshot=json.dumps(
+            {
+                "findings": [
+                    {"id": finding_id, "title": "SQL injection", "severity": "critical"},
+                    {"id": finding_id, "title": "SQL injection", "severity": "critical"},
+                ],
+                "assets": [{"id": asset_id, "name": "payments-api", "type": "api"}],
+            }
+        ),
+        canonical_result=None,
+        exposure_result=None,
+        duplicate_result=None,
+        asset_result=None,
+    )
+
+    assert citations == [
+        {
+            "record_type": "finding",
+            "record_id": finding_id,
+            "label": "SQL injection",
+            "provenance": "cynux_security_snapshot",
+            "cached": True,
+        },
+        {
+            "record_type": "asset",
+            "record_id": asset_id,
+            "label": "payments-api",
+            "provenance": "cynux_security_snapshot",
+            "cached": True,
+        },
+    ]
+
+
+def test_extract_record_citations_ignores_malformed_or_identifier_free_data() -> None:
+    citations = extract_record_citations(
+        security_snapshot="not-json",
+        canonical_result=json.dumps({"sample": [{"title": "No identifier"}]}),
+        exposure_result=json.dumps({"sample": "wrong-shape"}),
+        duplicate_result=None,
+        asset_result=None,
+    )
+
+    assert citations == []
 
 
 class _Rows:
@@ -587,10 +641,10 @@ async def test_reply_uses_read_tool_result_in_final_model_prompt(monkeypatch) ->
             )
 
     async def snapshot(*args, **kwargs):
-        return '{"external_alerts":[]}'
+        return '{"external_alerts":[{"id":"alert-1","provider":"github","title":"Secret detected"}]}'
 
     async def read_tool(*args, **kwargs):
-        return '{"source_filter":"github","total":17,"sample":[]}'
+        return '{"source_filter":"github","total":17,"sample":[{"id":"alert-1","source":"github","title":"Secret detected"}]}'
 
     async def canonical_tool(*args, **kwargs):
         return '{"total":2,"filters":{"mine":true},"sample":[]}'
@@ -598,6 +652,10 @@ async def test_reply_uses_read_tool_result_in_final_model_prompt(monkeypatch) ->
     monkeypatch.setattr("app.services.agent_chat.load_security_snapshot", snapshot)
     monkeypatch.setattr("app.services.agent_chat.maybe_read_exposures", read_tool)
     monkeypatch.setattr("app.services.agent_chat.maybe_read_canonical_findings", canonical_tool)
+    async def no_memory(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.agent_memory.prompt_context", no_memory)
     gateway = _Gateway()
     message = await create_reply(
         _Session(),
@@ -609,6 +667,24 @@ async def test_reply_uses_read_tool_result_in_final_model_prompt(monkeypatch) ->
     assert message.content == "17 matching alerts."
     assert any('"total":17' in item.content for item in gateway.messages)
     assert any('"total":2' in item.content for item in gateway.messages)
+    assert message.citations == [
+        {
+            "record_type": "external_alert",
+            "record_id": "alert-1",
+            "label": "Secret detected",
+            "provider": "github",
+            "provenance": "cynux_security_snapshot",
+            "cached": True,
+        },
+        {
+            "record_type": "exposure",
+            "record_id": "alert-1",
+            "label": "Secret detected",
+            "provider": "github",
+            "provenance": "cynux_exposure_lookup",
+            "cached": True,
+        },
+    ]
 
 
 @pytest.mark.asyncio

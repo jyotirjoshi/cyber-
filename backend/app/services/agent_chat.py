@@ -39,6 +39,7 @@ from app.services.context import Principal
 _RECENT_TURNS = 12
 _MAX_SEQ_RETRIES = 3
 _SNAPSHOT_LIMIT = 5
+_CITATION_LIMIT = 25
 _WORK_STATUS_QUESTION = re.compile(
     r"\b(?:status|progress|finish(?:ed)?|done|complet(?:e|ed)|did you|what happened|"
     r"results?|worked|failed|approved?|executed?)\b",
@@ -312,6 +313,100 @@ def build_chat_messages(
             )
         )
     return [*messages, *transcript[-_RECENT_TURNS:]]
+
+
+def extract_record_citations(
+    *,
+    security_snapshot: str | None,
+    canonical_result: str | None,
+    exposure_result: str | None,
+    duplicate_result: str | None,
+    asset_result: str | None,
+) -> list[dict[str, object]]:
+    """Project deterministic record provenance into the persisted chat citation field.
+
+    The model is never trusted to manufacture record identifiers.  Every citation comes
+    from a tenant-scoped read performed by this service, is bounded, and deliberately
+    excludes raw provider payloads and secrets.
+    """
+    citations: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def parse(raw: str | None) -> dict[str, object]:
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def add(record: object, record_type: str, provenance: str) -> None:
+        if len(citations) >= _CITATION_LIMIT or not isinstance(record, dict):
+            return
+        identifier = record.get("id") or record.get("finding_id")
+        if not isinstance(identifier, str) or not identifier or len(identifier) > 128:
+            return
+        key = (record_type, identifier)
+        if key in seen:
+            return
+        seen.add(key)
+        citation: dict[str, object] = {
+            "record_type": record_type,
+            "record_id": identifier,
+            "provenance": provenance,
+            "cached": True,
+        }
+        label = record.get("title") or record.get("name") or record.get("resource")
+        if isinstance(label, str) and label:
+            citation["label"] = redact_text(label[:200])
+        provider = record.get("provider") or record.get("source")
+        if isinstance(provider, str) and provider:
+            citation["provider"] = provider[:80]
+        # Keep a stable display order while emitting the more useful label before
+        # provenance; JSON objects remain semantically unordered.
+        if "label" in citation:
+            citation = {
+                "record_type": citation["record_type"],
+                "record_id": citation["record_id"],
+                "label": citation["label"],
+                **({"provider": citation["provider"]} if "provider" in citation else {}),
+                "provenance": citation["provenance"],
+                "cached": citation["cached"],
+            }
+        citations.append(citation)
+
+    snapshot = parse(security_snapshot)
+    for key, record_type in (
+        ("findings", "finding"),
+        ("assets", "asset"),
+        ("external_alerts", "external_alert"),
+        ("cve_matching_findings", "finding"),
+        ("cve_matching_alerts", "external_alert"),
+    ):
+        rows = snapshot.get(key)
+        if isinstance(rows, list):
+            for row in rows:
+                add(row, record_type, "cynux_security_snapshot")
+
+    canonical = parse(canonical_result)
+    add(canonical.get("finding"), "canonical_finding", "cynux_canonical_findings")
+    rows = canonical.get("sample")
+    if isinstance(rows, list):
+        for row in rows:
+            add(row, "canonical_finding", "cynux_canonical_findings")
+
+    for raw, record_type, provenance in (
+        (exposure_result, "exposure", "cynux_exposure_lookup"),
+        (duplicate_result, "finding", "cynux_duplicate_correlation"),
+        (asset_result, "asset", "cynux_asset_inventory"),
+    ):
+        rows = parse(raw).get("sample")
+        if isinstance(rows, list):
+            for row in rows:
+                add(row, record_type, provenance)
+
+    return citations
 
 
 async def load_recent_work_status(
@@ -630,14 +725,25 @@ async def create_reply(
     read_tool_result = "\n\n".join(
         result for result in (exposure_result, duplicate_result, asset_result) if result
     ) or None
+    citations = extract_record_citations(
+        security_snapshot=security_snapshot,
+        canonical_result=canonical_result,
+        exposure_result=exposure_result,
+        duplicate_result=duplicate_result,
+        asset_result=asset_result,
+    )
     recent_work = (
         await load_recent_work_status(session, principal, conversation_id)
         if question and _WORK_STATUS_QUESTION.search(question)
         else None
     )
     from app.services.agent_memory import prompt_context
-    tenant_memory = await prompt_context(session, principal) if not action_status else None
     work_status = format_recent_work_status(recent_work)
+    tenant_memory = (
+        await prompt_context(session, principal)
+        if not action_status and not work_status
+        else None
+    )
     if action_status:
         # The model must not turn a queued proposal into a claim of completed work.
         response = LLMResponse(text="", model="deterministic", provider="cynux", usage=Usage())
@@ -686,6 +792,7 @@ async def create_reply(
             seq=seq,
             role=MessageRole.ASSISTANT.value,
             content=content,
+            citations=citations,
             model=response.model,
             provider=response.provider,
             input_tokens=response.usage.input_tokens,
@@ -824,4 +931,10 @@ async def create_custom_reply(
         .where(AgentMessage.id == message_id))).scalar_one()
 
 
-__all__ = ["build_chat_messages", "create_custom_reply", "create_reply", "load_security_snapshot"]
+__all__ = [
+    "build_chat_messages",
+    "create_custom_reply",
+    "create_reply",
+    "extract_record_citations",
+    "load_security_snapshot",
+]

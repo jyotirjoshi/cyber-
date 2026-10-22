@@ -252,6 +252,7 @@ async def test_canonical_lookup_is_tenant_scoped_and_grounded_in_remediation_que
         "severity": "critical",
         "cve": "CVE-2026-1234",
         "status": "active",
+            "source": None,
     }
     assert payload["sample"][0]["asset"] == "api.example.org"
     assert payload["sample"][0]["risk_score"] == 94.0
