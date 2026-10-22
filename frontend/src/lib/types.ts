@@ -1679,6 +1679,24 @@ export interface IntegrationHealthOut {
   circuit_open: boolean;
 }
 
+export interface ConnectorAssuranceCheckOut {
+  key: string;
+  passed: boolean;
+  weight: number;
+  detail: string;
+}
+
+export interface ConnectorCertificationOut {
+  kind: IntegrationKind;
+  name: string;
+  grade: "certified" | "operational" | "degraded" | "failed";
+  score: number;
+  capabilities: string[];
+  checks: ConnectorAssuranceCheckOut[];
+  blockers: string[];
+  checked_at: IsoDateTime;
+}
+
 export interface SourceCoverageOut {
   provider: string;
   observations_total: number;

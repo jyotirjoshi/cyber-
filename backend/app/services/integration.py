@@ -116,6 +116,8 @@ from app.llm.gateway import LLMGateway
 from app.scanners.base import ScannerRequest
 from app.scanners.prowler import AWS_ADAPTER, AZURE_ADAPTER, GCP_ADAPTER
 from app.schemas.integration import (
+    ConnectorAssuranceCheckOut,
+    ConnectorCertificationOut,
     CredentialOut,
     IntegrationHealthOut,
     IntegrationOut,
@@ -1075,6 +1077,135 @@ class SyncQuality:
     reason: str
 
 
+_WEBHOOK_KINDS = frozenset(
+    {
+        IntegrationKind.GITHUB,
+        IntegrationKind.GITLAB,
+        IntegrationKind.JIRA,
+        IntegrationKind.SERVICENOW,
+        IntegrationKind.AZURE_DEVOPS,
+    }
+)
+_TICKET_PUSH_KINDS = frozenset(
+    {
+        IntegrationKind.JIRA,
+        IntegrationKind.SERVICENOW,
+        IntegrationKind.AZURE_DEVOPS,
+        IntegrationKind.GITLAB,
+        IntegrationKind.LINEAR,
+    }
+)
+_NOTIFICATION_KINDS = frozenset(
+    {IntegrationKind.SLACK, IntegrationKind.EMAIL, IntegrationKind.PAGERDUTY}
+)
+
+
+def connector_capabilities(kind: IntegrationKind) -> list[str]:
+    capabilities = ["connectivity_test"]
+    if kind in CONTINUOUS_SYNC_KINDS:
+        capabilities.extend(("finding_ingestion", "scheduled_sync"))
+    if kind in _WEBHOOK_KINDS:
+        capabilities.append("webhook_ingestion")
+    if kind in _TICKET_PUSH_KINDS:
+        capabilities.append("ticket_or_work_item_push")
+    if kind in _NOTIFICATION_KINDS:
+        capabilities.append("notification_delivery")
+    if kind is IntegrationKind.LLM:
+        capabilities.append("ai_inference")
+    if kind in {IntegrationKind.MISP, IntegrationKind.NVD}:
+        capabilities.append("threat_intelligence")
+    return capabilities
+
+
+def certify_connector(
+    *,
+    kind: IntegrationKind,
+    name: str,
+    is_enabled: bool,
+    configured_credentials: set[str],
+    required_credentials: set[str],
+    last_verified_at: dt.datetime | None,
+    status: str,
+    quality: SyncQuality,
+    circuit_open: bool,
+    now: dt.datetime | None = None,
+) -> ConnectorCertificationOut:
+    """Produce an explainable operational certification without contacting the provider."""
+
+    checked_at = now or utcnow()
+    missing = sorted(required_credentials - configured_credentials)
+    if last_verified_at is not None and last_verified_at.tzinfo is None:
+        last_verified_at = last_verified_at.replace(tzinfo=dt.UTC)
+    verification_current = bool(
+        last_verified_at and checked_at - last_verified_at <= dt.timedelta(days=7)
+    )
+    operational = status == IntegrationStatus.CONFIGURED.value
+    coverage_passed = (
+        quality.coverage_state == "current"
+        if kind in CONTINUOUS_SYNC_KINDS
+        else operational
+    )
+    checks = [
+        ConnectorAssuranceCheckOut(
+            key="enabled", passed=is_enabled, weight=10,
+            detail="Connector is enabled." if is_enabled else "Connector is disabled.",
+        ),
+        ConnectorAssuranceCheckOut(
+            key="credentials", passed=not missing, weight=20,
+            detail=(
+                "All required credentials are configured."
+                if not missing
+                else f"Missing required credentials: {', '.join(missing)}."
+            ),
+        ),
+        ConnectorAssuranceCheckOut(
+            key="verification", passed=verification_current, weight=30,
+            detail=(
+                "Provider authentication was verified within seven days."
+                if verification_current
+                else "Provider authentication has not been verified within seven days."
+            ),
+        ),
+        ConnectorAssuranceCheckOut(
+            key="circuit", passed=not circuit_open, weight=15,
+            detail=(
+                "Provider circuit is closed."
+                if not circuit_open
+                else "Provider circuit breaker is open."
+            ),
+        ),
+        ConnectorAssuranceCheckOut(
+            key="coverage", passed=coverage_passed, weight=25,
+            detail=(
+                quality.reason
+                if kind in CONTINUOUS_SYNC_KINDS
+                else "Connector is operational." if operational else "Connector is not operational."
+            ),
+        ),
+    ]
+    score = sum(check.weight for check in checks if check.passed)
+    blockers = [check.detail for check in checks if not check.passed]
+    grade = (
+        "certified"
+        if score >= 90 and not blockers
+        else "operational"
+        if score >= 70
+        else "degraded"
+        if score >= 40
+        else "failed"
+    )
+    return ConnectorCertificationOut(
+        kind=kind,
+        name=name,
+        grade=grade,
+        score=score,
+        capabilities=connector_capabilities(kind),
+        checks=checks,
+        blockers=blockers,
+        checked_at=checked_at,
+    )
+
+
 def integration_sync_quality(
     integration: Integration,
     *,
@@ -1186,6 +1317,41 @@ async def integration_health(
             )
         )
     return out
+
+
+async def connector_certifications(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    redis: Redis | None = None,
+) -> list[ConnectorCertificationOut]:
+    principal.require(Permission.INTEGRATION_READ)
+    rows = await list_integrations(session, principal)
+    checked_at = utcnow()
+    output: list[ConnectorCertificationOut] = []
+    for integration in rows:
+        circuit_open = False
+        if redis is not None:
+            breaker = await CircuitBreaker(redis, provider=integration.kind).status()
+            circuit_open = breaker.is_open
+        quality = integration_sync_quality(
+            integration, now=checked_at, circuit_open=circuit_open
+        )
+        output.append(
+            certify_connector(
+                kind=integration.kind_enum,
+                name=integration.name,
+                is_enabled=integration.is_enabled,
+                configured_credentials={item.name for item in integration.credentials},
+                required_credentials=set(_spec_for(integration.kind_enum).required),
+                last_verified_at=integration.last_verified_at,
+                status=integration.status,
+                quality=quality,
+                circuit_open=circuit_open,
+                now=checked_at,
+            )
+        )
+    return output
 
 
 async def source_coverage(
@@ -2267,6 +2433,9 @@ async def record_failure(
 
 
 __all__ = [
+    "certify_connector",
+    "connector_capabilities",
+    "connector_certifications",
     "credentials_for",
     "disable_integration",
     "find_integration",

@@ -32,6 +32,7 @@ from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
 from app.core.errors import InvalidConfigurationError
 from app.db.enums import IntegrationKind, Permission
 from app.schemas.integration import (
+    ConnectorCertificationOut,
     IntegrationHealthOut,
     IntegrationOut,
     IntegrationSyncOut,
@@ -125,6 +126,19 @@ async def integration_source_coverage(
 ) -> list[SourceCoverageOut]:
     """Show source volume, freshness, missing records, and connector confidence."""
     return await integration_service.source_coverage(session, principal, redis=redis)
+
+
+@router.get("/certifications", response_model=list[ConnectorCertificationOut])
+async def connector_certifications(
+    principal: PrincipalDep,
+    session: DbSession,
+    redis: RedisDep,
+) -> list[ConnectorCertificationOut]:
+    """Explain whether each configured connector is genuinely operational."""
+
+    return await integration_service.connector_certifications(
+        session, principal, redis=redis
+    )
 
 
 @router.post("", response_model=IntegrationOut)

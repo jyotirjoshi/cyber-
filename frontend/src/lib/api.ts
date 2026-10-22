@@ -116,6 +116,7 @@ import type {
   FindingOut,
   HealthOut,
   IntegrationHealthOut,
+  ConnectorCertificationOut,
   SourceCoverageOut,
   IntegrationKind,
   IntegrationOut,
@@ -1070,6 +1071,7 @@ export const api = {
   integrations: {
     list: () => request<IntegrationOut[]>("GET", "/integrations"),
     health: () => request<IntegrationHealthOut[]>("GET", "/integrations/health"),
+    certifications: () => request<ConnectorCertificationOut[]>("GET", "/integrations/certifications"),
     coverage: () => request<SourceCoverageOut[]>("GET", "/integrations/coverage"),
     upsert: (body: IntegrationUpsertIn) =>
       request<IntegrationOut>("POST", "/integrations", { body }),

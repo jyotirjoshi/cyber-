@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -141,9 +141,31 @@ class IntegrationHealthOut(BaseModel):
     last_sync_at: dt.datetime | None = None
     last_sync_status: str | None = None
     sync_failure_count: int = 0
+    freshness_seconds: int | None = Field(default=None, ge=0)
+    coverage_state: str = "not_scheduled"
+    sync_confidence: float = Field(default=0, ge=0, le=1)
+    coverage_reason: str = ""
     #: True while the circuit breaker is open, i.e. calls are being short-circuited
     #: rather than attempted (FR-020).
     circuit_open: bool = False
+
+
+class ConnectorAssuranceCheckOut(BaseModel):
+    key: str
+    passed: bool
+    weight: int = Field(ge=0, le=100)
+    detail: str
+
+
+class ConnectorCertificationOut(BaseModel):
+    kind: IntegrationKind
+    name: str
+    grade: Literal["certified", "operational", "degraded", "failed"]
+    score: int = Field(ge=0, le=100)
+    capabilities: list[str]
+    checks: list[ConnectorAssuranceCheckOut]
+    blockers: list[str]
+    checked_at: dt.datetime
 
 
 class SourceCoverageOut(BaseModel):
@@ -160,6 +182,8 @@ class SourceCoverageOut(BaseModel):
 
 __all__ = [
     "CredentialOut",
+    "ConnectorAssuranceCheckOut",
+    "ConnectorCertificationOut",
     "IntegrationHealthOut",
     "IntegrationOut",
     "SourceCoverageOut",

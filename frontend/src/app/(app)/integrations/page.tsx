@@ -16,8 +16,10 @@ import { useAuth } from "@/lib/auth";
 import { fieldError } from "@/lib/errors";
 import { formatDate, formatRelative, humanize } from "@/lib/format";
 import { configuredTenableScanIds, handleIntegrationSyncSuccess, handleIntegrationTestSuccess } from "@/lib/integration-actions";
+import { certificationTone, summarizeCertification } from "@/lib/integration-certification";
 import { ADDABLE_INTEGRATIONS, BYOK_PROVIDERS, INTEGRATION_SETUP_HINTS } from "@/lib/integration-catalog";
 import type {
+  ConnectorCertificationOut,
   IntegrationKind,
   IntegrationOut,
   IntegrationSyncOut,
@@ -767,6 +769,16 @@ export default function IntegrationsPage() {
     [],
     { enabled: canRead && can("finding:read") },
   );
+  const certifications = useApiResource(
+    () => api.integrations.certifications(),
+    [],
+    { enabled: canRead },
+  );
+  const refresh = React.useCallback(() => {
+    refetch();
+    coverage.refetch();
+    certifications.refetch();
+  }, [refetch, coverage, certifications]);
 
   if (!canRead) {
     return (
@@ -797,7 +809,7 @@ export default function IntegrationsPage() {
             key={integration.kind}
             integration={integration}
             canManage={canManage}
-            onChanged={refetch}
+            onChanged={refresh}
           />
         ))}
       </div>
@@ -812,9 +824,22 @@ export default function IntegrationsPage() {
         title="Integrations"
         description="Connected AI, security, ticketing, notification and threat-intelligence services."
       />
-      {canManage && !hasByok && <ByokSetupCard onChanged={refetch} />}
-      {canManage && data && <AddIntegrationCard existing={data} onChanged={refetch} />}
+      {canManage && !hasByok && <ByokSetupCard onChanged={refresh} />}
+      {canManage && data && <AddIntegrationCard existing={data} onChanged={refresh} />}
       {can("assessment:create") && <ScanImportCard />}
+      <Card>
+        <CardHeader><div><CardTitle>Connector operational assurance</CardTitle><p className="mt-0.5 text-xs text-muted">Certification combines enabled state, required credentials, a recent live authentication test, circuit health, and current scheduled coverage.</p></div></CardHeader>
+        <CardBody>
+          {certifications.loading && !certifications.data ? <LoadingState label="Evaluating connector assurance…" /> : certifications.error ? <ErrorState message={certifications.error} onRetry={certifications.refetch} /> : certifications.data?.length ? (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{certifications.data.map((item: ConnectorCertificationOut) => <div key={item.kind} className="rounded-lg border border-line p-3">
+              <div className="flex items-center justify-between gap-2"><span className="font-medium text-fg">{item.name}</span><Badge tone={certificationTone(item.grade)}>{item.score}% · {humanize(item.grade)}</Badge></div>
+              <p className="mt-2 text-xs text-muted">{summarizeCertification(item.blockers)}</p>
+              <div className="mt-3 flex flex-wrap gap-1">{item.capabilities.map((capability) => <Badge key={capability} tone="neutral">{humanize(capability)}</Badge>)}</div>
+              <p className="mt-3 text-xs text-faint">{item.checks.filter((check) => check.passed).length}/{item.checks.length} operational checks passed</p>
+            </div>)}</div>
+          ) : <p className="text-sm text-muted">Configure a connector to begin operational certification.</p>}
+        </CardBody>
+      </Card>
       <Card>
         <CardHeader><div><CardTitle>Source coverage and sync confidence</CardTitle><p className="mt-0.5 text-xs text-muted">Confidence combines connector health, schedule freshness, failed pulls, circuit state, and the source observations actually contributing to canonical findings.</p></div></CardHeader>
         <CardBody>
