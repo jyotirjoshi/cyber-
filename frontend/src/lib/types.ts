@@ -1110,11 +1110,34 @@ export interface RetestRequestIn {
   note?: string | null;
 }
 
+export type RemediationConvergenceState =
+  | "untracked"
+  | "ticket_active"
+  | "verification_required"
+  | "verification_pending"
+  | "verified_closed"
+  | "closed_unverified"
+  | "fix_not_verified"
+  | "verification_failed"
+  | "reopened"
+  | "accepted_risk"
+  | "false_positive";
+
+export interface RemediationConvergenceOut {
+  state: RemediationConvergenceState;
+  label: string;
+  detail: string;
+  next_action: string;
+  ticket_closed: boolean;
+  verification_evidence_complete: boolean;
+}
+
 export interface CanonicalRemediationOperationOut {
   finding: CanonicalFindingOut;
   tickets: TicketLinkOut[];
   latest_risk_acceptance: RiskAcceptanceOut | null;
   latest_retest: RetestRequestOut | null;
+  convergence: RemediationConvergenceOut;
   next_action: string;
   priority_reasons: string[];
   source_observations: number;

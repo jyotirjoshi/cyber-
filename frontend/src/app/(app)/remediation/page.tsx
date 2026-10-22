@@ -17,19 +17,12 @@ import { useMutation } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatRelative, humanize } from "@/lib/format";
+import { convergenceTone, summarizeConvergence } from "@/lib/remediation-convergence";
 import { useToast } from "@/components/ui/Toast";
 import type { CanonicalRemediationOperationOut } from "@/lib/types";
 
 const PAGE_SIZE = 25;
 const IN_PROGRESS_RETESTS = new Set(["requested", "scheduled", "running"]);
-
-function operationTone(operation: CanonicalRemediationOperationOut): "danger" | "warn" | "primary" | "neutral" {
-  const { finding } = operation;
-  if (finding.due_at && new Date(finding.due_at).getTime() < Date.now()) return "danger";
-  if (!finding.assignee_user_id || !finding.remediation_plan) return "warn";
-  if (operation.latest_retest && IN_PROGRESS_RETESTS.has(operation.latest_retest.status)) return "primary";
-  return "neutral";
-}
 
 export default function RemediationOperationsPage() {
   const { can } = useAuth();
@@ -82,8 +75,7 @@ export default function RemediationOperationsPage() {
   const summary = {
     overdue: operations.filter((item) => item.finding.due_at && new Date(item.finding.due_at).getTime() < Date.now()).length,
     unowned: operations.filter((item) => !item.finding.assignee_user_id).length,
-    waitingForRetest: operations.filter((item) => item.latest_retest && IN_PROGRESS_RETESTS.has(item.latest_retest.status)).length,
-    pendingExceptions: operations.filter((item) => item.latest_risk_acceptance?.status === "pending").length,
+    ...summarizeConvergence(operations.map((item) => item.convergence)),
   };
 
   return (
@@ -97,8 +89,8 @@ export default function RemediationOperationsPage() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="Overdue" value={summary.overdue} tone="danger" />
         <Metric label="Needs owner" value={summary.unowned} tone="warn" />
-        <Metric label="Retests in progress" value={summary.waitingForRetest} tone="primary" />
-        <Metric label="Pending exceptions" value={summary.pendingExceptions} tone="warn" />
+        <Metric label="Needs verification" value={summary.needsVerification} tone="primary" />
+        <Metric label="Failed or reopened" value={summary.failedVerification} tone="danger" />
       </div>
 
       <div className="flex flex-wrap items-end gap-5 text-sm">
@@ -139,7 +131,7 @@ export default function RemediationOperationsPage() {
       ) : (
         <div className="space-y-4">
           <Table>
-            <THead><TR>{canRemediate && <TH className="w-10" />}<TH>Risk</TH><TH>Finding</TH><TH>Owner & due date</TH><TH>Tickets</TH><TH>Governance</TH><TH>Next action & priority</TH></TR></THead>
+            <THead><TR>{canRemediate && <TH className="w-10" />}<TH>Risk</TH><TH>Finding</TH><TH>Owner & due date</TH><TH>Tickets</TH><TH>Governance</TH><TH>Convergence & priority</TH></TR></THead>
             <TBody>{operations.map((operation) => {
               const { finding } = operation;
               return <TR key={finding.id}>
@@ -149,7 +141,7 @@ export default function RemediationOperationsPage() {
                 <TD className="text-sm"><p className={finding.assignee_user_id ? "text-fg" : "font-medium text-warn"}>{finding.assignee_user_id ? "Assigned" : "Unassigned"}</p><p className={finding.due_at && new Date(finding.due_at).getTime() < Date.now() ? "mt-1 font-medium text-danger" : "mt-1 text-muted"}>{finding.due_at ? `Due ${formatRelative(finding.due_at)}` : "No due date"}</p></TD>
                 <TD><TicketSummary operation={operation} /></TD>
                 <TD><GovernanceSummary operation={operation} canApprove={canApproveExceptions} approving={approveExceptionMutation.loading} onApprove={(acceptanceId) => void approveExceptionMutation.run(acceptanceId)} /></TD>
-                <TD><div className="min-w-48 space-y-2"><Badge tone={operationTone(operation)}>{operation.next_action}</Badge><ul className="space-y-1 text-xs text-muted">{operation.priority_reasons.slice(0, 2).map((reason) => <li key={reason}>• {reason}</li>)}</ul></div></TD>
+                <TD><ConvergenceSummary operation={operation} /></TD>
               </TR>;
             })}</TBody>
           </Table>
@@ -168,7 +160,17 @@ function Metric({ label, value, tone }: { label: string; value: number; tone: "d
 
 function TicketSummary({ operation }: { operation: CanonicalRemediationOperationOut }) {
   if (!operation.tickets.length) return <span className="text-sm text-muted">No linked ticket</span>;
-  return <div className="space-y-1">{operation.tickets.map((ticket) => ticket.url ? <a key={ticket.id} href={ticket.url} target="_blank" rel="noreferrer" className="block text-sm text-primary hover:underline">{humanize(ticket.provider)} {ticket.external_key} ↗</a> : <p key={ticket.id} className="text-sm text-fg">{humanize(ticket.provider)} {ticket.external_key}</p>)}</div>;
+  return <div className="space-y-1">{operation.tickets.map((ticket) => <div key={ticket.id}>{ticket.url ? <a href={ticket.url} target="_blank" rel="noreferrer" className="block text-sm text-primary hover:underline">{humanize(ticket.provider)} {ticket.external_key} ↗</a> : <p className="text-sm text-fg">{humanize(ticket.provider)} {ticket.external_key}</p>}<p className="text-xs text-muted">{ticket.external_status ? humanize(ticket.external_status) : "Status not synced"}{ticket.closure_generation > 0 ? ` · closure cycle ${ticket.closure_generation}` : ""}</p></div>)}</div>;
+}
+
+function ConvergenceSummary({ operation }: { operation: CanonicalRemediationOperationOut }) {
+  const convergence = operation.convergence;
+  return <div className="min-w-56 space-y-2">
+    <div className="flex flex-wrap items-center gap-1.5"><Badge tone={convergenceTone(convergence.state)}>{convergence.label}</Badge>{convergence.verification_evidence_complete && <Badge tone="ok">Evidence complete</Badge>}</div>
+    <p className="text-xs text-fg">{convergence.detail}</p>
+    <p className="text-xs font-medium text-primary">Next: {convergence.next_action}</p>
+    <ul className="space-y-1 text-xs text-muted">{operation.priority_reasons.slice(0, 2).map((reason) => <li key={reason}>• {reason}</li>)}</ul>
+  </div>;
 }
 
 function GovernanceSummary({ operation, canApprove, approving, onApprove }: {

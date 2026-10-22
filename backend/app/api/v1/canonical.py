@@ -16,6 +16,7 @@ from app.schemas.canonical import (
     CanonicalWorkIn,
     FindingHistoryOut,
     FindingObservationOut,
+    RemediationConvergenceOut,
     RemediationGroupOut,
     RetestRequestIn,
     RetestRequestOut,
@@ -107,8 +108,11 @@ async def list_canonical_remediation_operations(
                 priority_reasons=priority_reasons,
                 source_observations=source_observations,
                 sla_escalation_level=sla_escalation_level,
+                convergence=RemediationConvergenceOut.model_validate(
+                    convergence, from_attributes=True
+                ),
             )
-            for finding, tickets, acceptance, retest, next_action, priority_reasons, source_observations, sla_escalation_level in rows
+            for finding, tickets, acceptance, retest, next_action, priority_reasons, source_observations, sla_escalation_level, convergence in rows
         ],
         total=total,
         limit=pagination.limit,

@@ -26,6 +26,10 @@ from app.db.repository import TenantRepository, tenant_select
 from app.schemas.canonical import FieldProvenanceOut
 from app.schemas.common import PaginationParams
 from app.services.context import Principal
+from app.services.remediation_convergence import (
+    RemediationConvergence,
+    derive_remediation_convergence,
+)
 
 
 def _intel_sources(value: Any) -> set[str]:
@@ -269,6 +273,7 @@ async def list_remediation_operations(
             list[str],
             int,
             int,
+            RemediationConvergence,
         ]
     ],
     int,
@@ -456,6 +461,19 @@ async def list_remediation_operations(
             ),
             observation_counts.get(finding.id, 0),
             escalation_levels.get(finding.id, 0),
+            derive_remediation_convergence(
+                finding_status=finding.status,
+                ticket_statuses=[
+                    ticket.external_status
+                    for ticket in tickets_by_finding.get(finding.id, [])
+                ],
+                retest_status=(
+                    latest_retest[finding.id].status if finding.id in latest_retest else None
+                ),
+                retest_evidence=(
+                    latest_retest[finding.id].evidence if finding.id in latest_retest else None
+                ),
+            ),
         )
         for finding in findings
     ], total

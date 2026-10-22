@@ -146,6 +146,29 @@ class RetestRequestOut(BaseModel):
     completed_at: dt.datetime | None = None
 
 
+class RemediationConvergenceOut(BaseModel):
+    """Evidence-conservative progress from tracker work to verified closure."""
+
+    state: Literal[
+        "untracked",
+        "ticket_active",
+        "verification_required",
+        "verification_pending",
+        "verified_closed",
+        "closed_unverified",
+        "fix_not_verified",
+        "verification_failed",
+        "reopened",
+        "accepted_risk",
+        "false_positive",
+    ]
+    label: str
+    detail: str
+    next_action: str
+    ticket_closed: bool
+    verification_evidence_complete: bool
+
+
 class CanonicalRemediationOperationOut(BaseModel):
     """The current operational state for one canonical finding.
 
@@ -158,6 +181,7 @@ class CanonicalRemediationOperationOut(BaseModel):
     tickets: list[TicketLinkOut] = Field(default_factory=list)
     latest_risk_acceptance: RiskAcceptanceOut | None = None
     latest_retest: RetestRequestOut | None = None
+    convergence: RemediationConvergenceOut
     next_action: str
     priority_reasons: list[str] = Field(default_factory=list)
     source_observations: int = Field(default=0, ge=0)
