@@ -78,6 +78,8 @@ async def _load_snapshot(
         raise ConflictError("multi-agent run is unavailable")
     if run.status in {
         AgentRunStatus.COMPLETED.value,
+        AgentRunStatus.PARTIALLY_COMPLETED.value,
+        AgentRunStatus.BLOCKED.value,
         AgentRunStatus.FAILED.value,
         AgentRunStatus.CANCELLED.value,
     }:
@@ -309,12 +311,20 @@ async def execute_supervisor_run(
             await session.rollback()
             return
         if plan is None:
-            run.status = AgentRunStatus.COMPLETED.value
             run.stop_reason = stop_reason or "no_valid_next_action"
+            run.status = (
+                AgentRunStatus.COMPLETED.value
+                if run.stop_reason == "objective_complete"
+                else AgentRunStatus.BLOCKED.value
+            )
             run.current_node = "finalize"
             run.completed_at = utcnow()
-            if rejections:
-                run.failure_category = "planner_rejection"
+            if run.status == AgentRunStatus.BLOCKED.value:
+                run.failure_category = "planner_rejection" if rejections else "policy"
+                run.failure_reason = (
+                    "The supervisor could not select another authorized action that advanced "
+                    "the objective."
+                )
             await session.commit()
             return
         request = BudgetRequest(
@@ -338,7 +348,7 @@ async def execute_supervisor_run(
             ttl_seconds=settings.agent.task_reservation_ttl_seconds,
         )
         if reservation is None:
-            run.status = AgentRunStatus.FAILED.value
+            run.status = AgentRunStatus.BLOCKED.value
             run.stop_reason = "budget_exhausted"
             run.failure_category = "budget"
             run.failure_reason = "The multi-agent plan exceeded its hard execution budget."

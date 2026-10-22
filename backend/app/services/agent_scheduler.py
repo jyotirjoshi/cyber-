@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import select, update
@@ -31,10 +32,30 @@ _TERMINAL = _SUCCESS | _FAILURE
 _RUN_TERMINAL = frozenset(
     {
         AgentRunStatus.COMPLETED.value,
+        AgentRunStatus.PARTIALLY_COMPLETED.value,
+        AgentRunStatus.BLOCKED.value,
         AgentRunStatus.FAILED.value,
         AgentRunStatus.CANCELLED.value,
     }
 )
+
+
+def classify_run_outcome(tasks: Iterable[AgentTask]) -> AgentRunStatus:
+    """Classify persisted task evidence into one exact terminal run outcome."""
+
+    settled = tuple(tasks)
+    required_failures = [task for task in settled if task.required and task.status in _FAILURE]
+    if any(task.status == AgentTaskStatus.REJECTED.value for task in required_failures):
+        return AgentRunStatus.BLOCKED
+    if required_failures:
+        return AgentRunStatus.FAILED
+    if any(
+        task.status == AgentTaskStatus.DEGRADED.value
+        or (not task.required and task.status in _FAILURE)
+        for task in settled
+    ):
+        return AgentRunStatus.PARTIALLY_COMPLETED
+    return AgentRunStatus.COMPLETED
 
 
 class PlanMaterializationConflict(RuntimeError):
@@ -373,25 +394,36 @@ async def finalize_run_if_settled(
     )
     if not tasks or any(task.status not in _TERMINAL for task in tasks):
         return run
+    outcome = classify_run_outcome(tasks)
     required_failures = [task for task in tasks if task.required and task.status in _FAILURE]
-    optional_failures = [task for task in tasks if not task.required and task.status in _FAILURE]
+    degraded_tasks = [
+        task
+        for task in tasks
+        if task.status == AgentTaskStatus.DEGRADED.value
+        or (not task.required and task.status in _FAILURE)
+    ]
     run.completed_at = utcnow()
     run.current_node = "finalize"
-    if required_failures:
-        run.status = AgentRunStatus.FAILED.value
+    run.status = outcome.value
+    if outcome is AgentRunStatus.BLOCKED:
         run.stop_reason = "policy_blocked"
+        run.failure_category = "policy"
+        run.failure_reason = (
+            f"{len(required_failures)} required agent task(s) were rejected by policy or approval."
+        )
+    elif outcome is AgentRunStatus.FAILED:
+        run.status = AgentRunStatus.FAILED.value
+        run.stop_reason = "task_failure"
         run.failure_category = "task_failure"
         run.failure_reason = (
             f"{len(required_failures)} required agent task(s) did not complete successfully."
         )
+    elif outcome is AgentRunStatus.PARTIALLY_COMPLETED:
+        run.stop_reason = "objective_partially_complete"
+        run.failure_category = "degraded"
+        run.failure_reason = f"Completed with {len(degraded_tasks)} degraded task outcome(s)."
     else:
-        run.status = AgentRunStatus.COMPLETED.value
         run.stop_reason = "objective_complete"
-        if optional_failures:
-            run.failure_category = "degraded"
-            run.failure_reason = (
-                f"Completed with {len(optional_failures)} optional task degradation(s)."
-            )
     reservation = (
         await session.execute(
             select(AgentBudgetReservation)
@@ -504,7 +536,7 @@ async def cancel_agent_run(
         return None
     if run.status == AgentRunStatus.CANCELLED.value:
         return run
-    if run.status in {AgentRunStatus.COMPLETED.value, AgentRunStatus.FAILED.value}:
+    if run.status in _RUN_TERMINAL:
         return run
     timestamp = requested_at or utcnow()
     run.status = AgentRunStatus.CANCELLED.value

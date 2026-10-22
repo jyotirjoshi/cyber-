@@ -231,6 +231,8 @@ export type AgentRunStatus =
   | "running"
   | "interrupted"
   | "completed"
+  | "partially_completed"
+  | "blocked"
   | "failed"
   | "cancelled";
 

@@ -116,7 +116,13 @@ log = structlog.get_logger(__name__)
 #: Run statuses with nothing left to drive. Mirrors the runner's own terminal set (kept local
 #: rather than imported: it is private there, and the worker's need for it is its own).
 _TERMINAL_RUN_STATUSES: frozenset[AgentRunStatus] = frozenset(
-    {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}
+    {
+        AgentRunStatus.COMPLETED,
+        AgentRunStatus.PARTIALLY_COMPLETED,
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+    }
 )
 
 #: How long ``XREADGROUP`` blocks waiting for a new message. Bounds shutdown latency when the
@@ -640,10 +646,12 @@ class AgentWorker:
                 run = await session.get(AgentRun, request.run_id)
                 if run is not None and run.status not in {
                     AgentRunStatus.COMPLETED.value,
+                    AgentRunStatus.PARTIALLY_COMPLETED.value,
+                    AgentRunStatus.BLOCKED.value,
                     AgentRunStatus.FAILED.value,
                     AgentRunStatus.CANCELLED.value,
                 }:
-                    run.status = AgentRunStatus.FAILED.value
+                    run.status = AgentRunStatus.BLOCKED.value
                     run.failure_category = "policy"
                     run.failure_reason = "The multi-agent supervisor could not authorize this run."
                     run.stop_reason = "policy_blocked"
@@ -806,10 +814,17 @@ class AgentWorker:
             self._current_advance = None
 
         log.info("worker.run_settled", run_id=str(run_id), status=outcome.status.value)
-        if outcome.status is AgentRunStatus.COMPLETED:
+        if outcome.status in {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.PARTIALLY_COMPLETED,
+        }:
             await self._record_completed_retest(ctx, run_id)
             await self._generate_completion_reports(ctx, run_id)
-        elif outcome.status in {AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
+        elif outcome.status in {
+            AgentRunStatus.BLOCKED,
+            AgentRunStatus.FAILED,
+            AgentRunStatus.CANCELLED,
+        }:
             await self._record_terminal_action_receipt(ctx, run_id, outcome.status.value)
             await self._record_terminal_retest_outcome(ctx, run_id, outcome.status.value)
         await self._ack(message_id)
@@ -1107,10 +1122,7 @@ class AgentWorker:
             run = await session.get(AgentRun, run_id)
             if run is None or run.organization_id != ctx.organization_id:
                 return
-            receipt_eligible = run.status_enum not in {
-                AgentRunStatus.COMPLETED,
-                AgentRunStatus.FAILED,
-            }
+            receipt_eligible = run.status_enum not in _TERMINAL_RUN_STATUSES
             assessment = None
             if ctx.assessment_id is not None:
                 assessment = await self._load_assessment(
@@ -1176,10 +1188,7 @@ class AgentWorker:
             run = await session.get(AgentRun, run_id)
             if run is None or run.organization_id != ctx.organization_id:
                 return
-            receipt_eligible = run.status_enum not in {
-                AgentRunStatus.COMPLETED,
-                AgentRunStatus.CANCELLED,
-            }
+            receipt_eligible = run.status_enum not in _TERMINAL_RUN_STATUSES
             if run.status_enum not in _TERMINAL_RUN_STATUSES:
                 now = _now()
                 run.status = AgentRunStatus.FAILED.value

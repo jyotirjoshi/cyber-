@@ -219,3 +219,22 @@ async def test_other_tenant_cannot_materialize_or_release_run(scheduler_session)
     assert await materialize_plan(scheduler_session, ORG_ID, run.id, plan) == []
     assert await release_ready_tasks(scheduler_session, ORG_ID, run.id) == []
     assert (await scheduler_session.execute(select(AgentTask))).scalars().all() == []
+
+
+def test_run_outcome_distinguishes_partial_blocked_and_failed() -> None:
+    from types import SimpleNamespace
+
+    from app.db.enums import AgentRunStatus
+    from app.services.agent_scheduler import classify_run_outcome
+
+    completed = SimpleNamespace(required=True, status="completed")
+    degraded = SimpleNamespace(required=False, status="degraded")
+    optional_failure = SimpleNamespace(required=False, status="failed")
+    rejected = SimpleNamespace(required=True, status="rejected")
+    failed = SimpleNamespace(required=True, status="failed")
+
+    assert classify_run_outcome([completed]) == AgentRunStatus.COMPLETED
+    assert classify_run_outcome([completed, degraded]) == AgentRunStatus.PARTIALLY_COMPLETED
+    assert classify_run_outcome([completed, optional_failure]) == AgentRunStatus.PARTIALLY_COMPLETED
+    assert classify_run_outcome([rejected]) == AgentRunStatus.BLOCKED
+    assert classify_run_outcome([failed]) == AgentRunStatus.FAILED

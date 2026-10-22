@@ -498,7 +498,8 @@ class AgentRun(Base, TenantMixin, TimestampMixin):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued','running','interrupted','completed','failed','cancelled')",
+            "status IN ('queued','running','interrupted','completed','partially_completed',"
+            "'blocked','failed','cancelled')",
             name="valid_run_status",
         ),
         Index("ix_agent_runs_organization_id_status", "organization_id", "status"),

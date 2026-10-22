@@ -23,11 +23,19 @@ const RUN_STATUS: Record<AgentRunStatus, { tone: BadgeTone; label: string; activ
   running: { tone: "primary", label: "Running", active: true },
   interrupted: { tone: "warn", label: "Needs attention", active: true },
   completed: { tone: "ok", label: "Completed" },
+  partially_completed: { tone: "warn", label: "Partially completed" },
+  blocked: { tone: "warn", label: "Blocked" },
   failed: { tone: "danger", label: "Failed" },
   cancelled: { tone: "neutral", label: "Cancelled" },
 };
 
-const TERMINAL = new Set<AgentRunStatus>(["completed", "failed", "cancelled"]);
+const TERMINAL = new Set<AgentRunStatus>([
+  "completed",
+  "partially_completed",
+  "blocked",
+  "failed",
+  "cancelled",
+]);
 
 export default function AgentRunPage() {
   const params = useParams<{ runId: string }>();

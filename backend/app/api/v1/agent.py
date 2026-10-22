@@ -105,6 +105,8 @@ _MAX_SEQ_RETRIES = 3
 _RUN_TERMINAL = frozenset(
     {
         AgentRunStatus.COMPLETED.value,
+        AgentRunStatus.PARTIALLY_COMPLETED.value,
+        AgentRunStatus.BLOCKED.value,
         AgentRunStatus.FAILED.value,
         AgentRunStatus.CANCELLED.value,
     }

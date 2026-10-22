@@ -315,7 +315,13 @@ async def execute_approved_task(
             )
         )
     ).scalar_one_or_none()
-    if run is None or run.status in {"completed", "failed", "cancelled"}:
+    if run is None or run.status in {
+        "completed",
+        "partially_completed",
+        "blocked",
+        "failed",
+        "cancelled",
+    }:
         raise ConflictError("approved agent run is no longer executable")
 
     membership = (

@@ -120,6 +120,8 @@ async def reserve_budget(
     ).scalar_one_or_none()
     if run is None or run.status in {
         AgentRunStatus.COMPLETED.value,
+        AgentRunStatus.PARTIALLY_COMPLETED.value,
+        AgentRunStatus.BLOCKED.value,
         AgentRunStatus.FAILED.value,
         AgentRunStatus.CANCELLED.value,
     }:

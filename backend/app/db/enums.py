@@ -588,6 +588,8 @@ class AgentRunStatus(StrEnum):
     RUNNING = "running"
     INTERRUPTED = "interrupted"  # paused on a human-approval interrupt
     COMPLETED = "completed"
+    PARTIALLY_COMPLETED = "partially_completed"
+    BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLED = "cancelled"
 

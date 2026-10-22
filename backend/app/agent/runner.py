@@ -109,7 +109,13 @@ _INTERRUPT_APPROVAL = "approval"
 #: event.  ``running`` is deliberately absent: a run left ``running`` by a dead worker is *not*
 #: settled, and reclaiming it is the whole point of :meth:`AgentRunner.advance`.
 _TERMINAL_RUN_STATUSES: frozenset[AgentRunStatus] = frozenset(
-    {AgentRunStatus.COMPLETED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}
+    {
+        AgentRunStatus.COMPLETED,
+        AgentRunStatus.PARTIALLY_COMPLETED,
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+    }
 )
 
 #: The checkpoint pool is separate from the SQLAlchemy engine pool and, because
@@ -132,7 +138,7 @@ _UNEXPECTED_USER_MESSAGE = (
 class RunOutcome:
     """The settled result of an :meth:`AgentRunner.advance` call.
 
-    ``status`` is always one of ``interrupted``, ``completed`` or ``failed`` -- never
+    ``status`` is always an interrupted or terminal status -- never
     ``running`` or ``queued``, because ``advance`` does not return until the graph has paused
     at the approval gate, reached ``END`` or raised.  (A re-dispatch of an already-terminal run
     also settles here, reporting the recorded outcome without re-running anything.)  Every
@@ -154,7 +160,10 @@ class RunOutcome:
     @property
     def completed(self) -> bool:
         """True when the run reached the end of the pipeline."""
-        return self.status is AgentRunStatus.COMPLETED
+        return self.status in {
+            AgentRunStatus.COMPLETED,
+            AgentRunStatus.PARTIALLY_COMPLETED,
+        }
 
     @property
     def failed(self) -> bool:
