@@ -118,6 +118,7 @@ from app.scanners.prowler import AWS_ADAPTER, AZURE_ADAPTER, GCP_ADAPTER
 from app.schemas.integration import (
     ConnectorAssuranceCheckOut,
     ConnectorCertificationOut,
+    ConnectorContractTestOut,
     CredentialOut,
     IntegrationHealthOut,
     IntegrationOut,
@@ -1203,6 +1204,33 @@ def certify_connector(
         checks=checks,
         blockers=blockers,
         checked_at=checked_at,
+    )
+
+
+def connector_contract_result(
+    live: IntegrationTestOut,
+    certification: ConnectorCertificationOut,
+) -> ConnectorContractTestOut:
+    """Combine a real provider probe with configuration and coverage assertions."""
+
+    live_check = ConnectorAssuranceCheckOut(
+        key="live_auth",
+        passed=live.healthy,
+        weight=50,
+        detail=live.detail or ("Provider authenticated." if live.healthy else "Provider probe failed."),
+    )
+    checks = [live_check, *certification.checks]
+    score = round(((100 if live.healthy else 0) + certification.score) / 2)
+    blockers = [check.detail for check in checks if not check.passed]
+    return ConnectorContractTestOut(
+        kind=live.kind,
+        passed=live.healthy and not certification.blockers,
+        score=score,
+        checks=checks,
+        capabilities=certification.capabilities,
+        blockers=blockers,
+        latency_ms=live.latency_ms,
+        checked_at=live.checked_at or certification.checked_at,
     )
 
 
@@ -2436,6 +2464,7 @@ __all__ = [
     "certify_connector",
     "connector_capabilities",
     "connector_certifications",
+    "connector_contract_result",
     "credentials_for",
     "disable_integration",
     "find_integration",

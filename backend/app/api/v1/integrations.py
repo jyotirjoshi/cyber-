@@ -29,10 +29,11 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, UploadFile
 
 from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
-from app.core.errors import InvalidConfigurationError
+from app.core.errors import InvalidConfigurationError, ResourceNotFoundError
 from app.db.enums import IntegrationKind, Permission
 from app.schemas.integration import (
     ConnectorCertificationOut,
+    ConnectorContractTestOut,
     IntegrationHealthOut,
     IntegrationOut,
     IntegrationSyncOut,
@@ -581,6 +582,29 @@ async def test_integration(
     result = await integration_service.test_integration(
         session, principal, kind, settings=settings, redis=redis
     )
+    await session.commit()
+    return result
+
+
+@router.post("/{kind}/contract-test", response_model=ConnectorContractTestOut)
+async def contract_test_integration(
+    kind: IntegrationKind,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> ConnectorContractTestOut:
+    integration = await integration_service.find_integration(session, principal, kind)
+    if integration is None:
+        raise ResourceNotFoundError("integration not configured")
+    live = await integration_service.test_integration(
+        session, principal, kind, settings=settings, redis=redis
+    )
+    certifications = await integration_service.connector_certifications(
+        session, principal, redis=redis
+    )
+    certification = next(item for item in certifications if item.kind == kind)
+    result = integration_service.connector_contract_result(live, certification)
     await session.commit()
     return result
 

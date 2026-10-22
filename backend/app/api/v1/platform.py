@@ -10,11 +10,22 @@ from app.api.deps import DbSession, PrincipalDep
 from app.db.enums import Permission
 from app.db.models.platform import PlatformApiKey
 from app.db.repository import tenant_select
-from app.schemas.platform import PlatformApiKeyCreateIn, PlatformApiKeyIssuedOut, PlatformApiKeyOut
+from app.schemas.platform import (
+    PlatformApiKeyCreateIn,
+    PlatformApiKeyIssuedOut,
+    PlatformApiKeyOut,
+    PlatformReadinessOut,
+)
 from app.services.audit import AuditAction, record
 from app.services.platform_api_key import create_platform_api_key, revoke_platform_api_key
+from app.services.platform_readiness import get_readiness
 
 router = APIRouter(prefix="/platform", tags=["platform"])
+
+
+@router.get("/readiness", response_model=PlatformReadinessOut)
+async def platform_readiness(principal: PrincipalDep, session: DbSession) -> PlatformReadinessOut:
+    return await get_readiness(session, principal)
 
 
 @router.get("/api-keys", response_model=list[PlatformApiKeyOut])

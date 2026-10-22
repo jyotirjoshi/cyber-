@@ -168,6 +168,17 @@ class ConnectorCertificationOut(BaseModel):
     checked_at: dt.datetime
 
 
+class ConnectorContractTestOut(BaseModel):
+    kind: IntegrationKind
+    passed: bool
+    score: int = Field(ge=0, le=100)
+    checks: list[ConnectorAssuranceCheckOut]
+    capabilities: list[str]
+    blockers: list[str]
+    latency_ms: int | None = None
+    checked_at: dt.datetime
+
+
 class SourceCoverageOut(BaseModel):
     provider: str
     observations_total: int = Field(ge=0)
@@ -184,6 +195,7 @@ __all__ = [
     "CredentialOut",
     "ConnectorAssuranceCheckOut",
     "ConnectorCertificationOut",
+    "ConnectorContractTestOut",
     "IntegrationHealthOut",
     "IntegrationOut",
     "SourceCoverageOut",

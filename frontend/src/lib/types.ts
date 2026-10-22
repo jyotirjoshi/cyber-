@@ -1697,6 +1697,17 @@ export interface ConnectorCertificationOut {
   checked_at: IsoDateTime;
 }
 
+export interface ConnectorContractTestOut {
+  kind: IntegrationKind;
+  passed: boolean;
+  score: number;
+  checks: ConnectorAssuranceCheckOut[];
+  capabilities: string[];
+  blockers: string[];
+  latency_ms: number | null;
+  checked_at: IsoDateTime;
+}
+
 export interface SourceCoverageOut {
   provider: string;
   observations_total: number;
@@ -2626,6 +2637,22 @@ export interface PlatformApiKeyCreateIn {
 export interface PlatformApiKeyCreatedOut extends PlatformApiKeyOut {
   /** Shown once; never stored in plaintext. */
   secret: string;
+}
+
+export interface PlatformReadinessOut {
+  ready: boolean;
+  score: number;
+  passed: number;
+  total: number;
+  evaluated_at: IsoDateTime;
+  checks: Array<{
+    key: string;
+    category: string;
+    label: string;
+    status: "passed" | "blocked";
+    detail: string;
+    action_path: string | null;
+  }>;
 }
 
 // ---------------------------------------------------------------------------

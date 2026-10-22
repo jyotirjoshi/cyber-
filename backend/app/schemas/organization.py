@@ -116,6 +116,15 @@ class OrgPolicy(BaseModel):
     )
     agent_max_tool_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     agent_max_calls_per_tool: int = Field(default=20, ge=0, le=10_000)
+    #: Recovery objectives and independently reviewable evidence used by the
+    #: production-readiness gate. Recording evidence is intentionally separate
+    #: from performing the backup or restore operation itself.
+    recovery_point_minutes: int | None = Field(default=None, ge=1, le=43_200)
+    recovery_time_minutes: int | None = Field(default=None, ge=1, le=43_200)
+    dr_backup_verified_at: dt.datetime | None = None
+    dr_backup_evidence_ref: str | None = Field(default=None, max_length=2_000)
+    dr_restore_tested_at: dt.datetime | None = None
+    dr_restore_evidence_ref: str | None = Field(default=None, max_length=2_000)
     risk_weights: RiskWeights = Field(default_factory=RiskWeights)
 
     @field_validator("sla_targets_days")

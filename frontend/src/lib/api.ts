@@ -117,6 +117,7 @@ import type {
   HealthOut,
   IntegrationHealthOut,
   ConnectorCertificationOut,
+  ConnectorContractTestOut,
   SourceCoverageOut,
   IntegrationKind,
   IntegrationOut,
@@ -144,6 +145,7 @@ import type {
   PlatformApiKeyCreateIn,
   PlatformApiKeyCreatedOut,
   PlatformApiKeyOut,
+  PlatformReadinessOut,
   PolicyGateOut,
   Problem,
   RegisterIn,
@@ -1107,6 +1109,8 @@ export const api = {
       request<IntegrationOut>("DELETE", `/integrations/${kind}`),
     test: (kind: IntegrationKind) =>
       request<IntegrationTestOut>("POST", `/integrations/${kind}/test`),
+    contractTest: (kind: IntegrationKind) =>
+      request<ConnectorContractTestOut>("POST", `/integrations/${kind}/contract-test`),
     sync: (kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable" | "qualys" | "rapid7" | "wiz" | "prisma_cloud" | "crowdstrike" | "aws_security_hub" | "aws_inspector" | "hackerone" | "bugcrowd" | "checkmarx" | "fortify" | "azure_defender" | "gcp_scc" | "burp_dast") =>
       request<IntegrationSyncOut>("POST", `/integrations/${kind}/sync`),
     importScanExport: (input: {
@@ -1272,6 +1276,7 @@ export const api = {
   },
 
   platform: {
+    readiness: () => request<PlatformReadinessOut>("GET", "/platform/readiness"),
     listApiKeys: () => request<PlatformApiKeyOut[]>("GET", "/platform/api-keys"),
     createApiKey: (body: PlatformApiKeyCreateIn) =>
       request<PlatformApiKeyCreatedOut>("POST", "/platform/api-keys", { body }),

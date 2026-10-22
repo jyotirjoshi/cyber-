@@ -11,11 +11,12 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { ErrorState, InlineError, LoadingState } from "@/components/ui/States";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import { useToast } from "@/components/ui/Toast";
-import { useApiResource, useMutation } from "@/hooks/useApi";
+import { useApiResource, useMutation, type UseApiResourceResult } from "@/hooks/useApi";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { fieldError } from "@/lib/errors";
 import { formatDateTime, formatNumber, humanize } from "@/lib/format";
+import { readinessProgress, readinessTone } from "@/lib/platform-readiness";
 import { RISK_WEIGHT_KEYS, totalRiskWeights } from "@/lib/risk-weights";
 import type {
   ClientOrganizationCreateIn,
@@ -28,9 +29,17 @@ import type {
   OidcConnectionUpsertIn,
   Role,
   RiskWeights,
+  PlatformReadinessOut,
   SamlConnectionUpsertIn,
   ScimProvisioningTokenIssuedOut,
 } from "@/lib/types";
+
+function ReadinessGuide({ resource }: { resource: UseApiResourceResult<PlatformReadinessOut> }) {
+  if (resource.loading && !resource.data) return <Card><CardBody><LoadingState label="Evaluating production readiness…" /></CardBody></Card>;
+  if (resource.error || !resource.data) return <Card><CardBody><ErrorState message={resource.error ?? "Readiness evaluation unavailable"} onRetry={resource.refetch} /></CardBody></Card>;
+  const result = resource.data;
+  return <Card><CardHeader><CardTitle>Production readiness guide</CardTitle></CardHeader><CardBody className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-3xl font-semibold text-fg">{result.score}%</p><p className="text-sm text-muted">{readinessProgress(result)}</p></div><Badge tone={readinessTone(result)}>{result.ready ? "Production ready" : "Action required"}</Badge></div><div className="grid gap-3 md:grid-cols-2">{result.checks.map((check) => <div key={check.key} className="rounded-lg border border-line p-3"><div className="flex items-center justify-between gap-2"><p className="font-medium text-fg">{check.label}</p><Badge tone={check.status === "passed" ? "ok" : "warn"}>{check.status}</Badge></div><p className="mt-1 text-xs uppercase tracking-wide text-muted">{humanize(check.category)}</p><p className="mt-2 text-sm text-muted">{check.detail}</p>{check.status === "blocked" && check.action_path && <a className="mt-2 inline-block text-sm text-primary hover:underline" href={check.action_path}>Resolve this requirement</a>}</div>)}</div><p className="text-xs text-muted">Disaster-recovery checks require recent backup and restore evidence. Cynux does not mark infrastructure recoverable from configuration alone.</p></CardBody></Card>;
+}
 
 const ROLES: readonly Role[] = [
   "owner",
@@ -648,6 +657,17 @@ function CodeownersRouting({ org, onUpdated }: { org: OrganizationOut; onUpdated
   return <Card><CardHeader><CardTitle>CODEOWNERS remediation routing</CardTitle></CardHeader><CardBody className="space-y-3"><p className="text-sm text-muted">Automation rules using “Assign codeowner” match a finding&apos;s <code>repository_path</code> or <code>path</code> custom field and assign the mapped tenant member.</p><form className="space-y-3" onSubmit={submit}><Field label="CODEOWNERS rules" htmlFor="org-codeowners" hint="Use standard path and owner-token lines, such as /services/payments/ @payments-team."><Textarea id="org-codeowners" rows={7} value={source} onChange={(event) => setSource(event.target.value)} maxLength={50000} /></Field><Field label="Owner-token to Cynux member mapping" htmlFor="org-codeowner-members" hint="JSON mapping; each value is a member UUID from the Members table."><Textarea id="org-codeowner-members" rows={5} value={mapping} onChange={(event) => setMapping(event.target.value)} maxLength={30000} /></Field><InlineError message={save.errorMessage} /><Button type="submit" loading={save.loading}>Save routing</Button></form></CardBody></Card>;
 }
 
+function ResilienceEvidence({ org, onUpdated }: { org: OrganizationOut; onUpdated: (next: OrganizationOut) => void }) {
+  const [rpo, setRpo] = React.useState(String(org.policy.recovery_point_minutes ?? 60));
+  const [rto, setRto] = React.useState(String(org.policy.recovery_time_minutes ?? 240));
+  const [backupAt, setBackupAt] = React.useState("");
+  const [backupRef, setBackupRef] = React.useState(String(org.policy.dr_backup_evidence_ref ?? ""));
+  const [restoreAt, setRestoreAt] = React.useState("");
+  const [restoreRef, setRestoreRef] = React.useState(String(org.policy.dr_restore_evidence_ref ?? ""));
+  const save = useMutation(api.organization.update, { onSuccess: onUpdated });
+  return <Card><CardHeader><CardTitle>Disaster-recovery evidence</CardTitle></CardHeader><CardBody className="space-y-3"><p className="text-sm text-muted">Record evidence only after a backup or restore operation succeeds. Readiness expires backup evidence after 24 hours and restore-drill evidence after 90 days.</p><form className="grid gap-3 md:grid-cols-2" onSubmit={(event) => { event.preventDefault(); void save.run({ policy: { ...org.policy, recovery_point_minutes: Number(rpo), recovery_time_minutes: Number(rto), dr_backup_verified_at: new Date(backupAt).toISOString(), dr_backup_evidence_ref: backupRef, dr_restore_tested_at: new Date(restoreAt).toISOString(), dr_restore_evidence_ref: restoreRef } }); }}><Field label="Recovery point objective (minutes)" htmlFor="dr-rpo"><Input id="dr-rpo" required type="number" min="1" value={rpo} onChange={(event) => setRpo(event.target.value)} /></Field><Field label="Recovery time objective (minutes)" htmlFor="dr-rto"><Input id="dr-rto" required type="number" min="1" value={rto} onChange={(event) => setRto(event.target.value)} /></Field><Field label="Backup verified at" htmlFor="dr-backup-at"><Input id="dr-backup-at" required type="datetime-local" value={backupAt} onChange={(event) => setBackupAt(event.target.value)} /></Field><Field label="Backup evidence reference" htmlFor="dr-backup-ref"><Input id="dr-backup-ref" required value={backupRef} onChange={(event) => setBackupRef(event.target.value)} placeholder="gcp-backup:123456" /></Field><Field label="Restore drill completed at" htmlFor="dr-restore-at"><Input id="dr-restore-at" required type="datetime-local" value={restoreAt} onChange={(event) => setRestoreAt(event.target.value)} /></Field><Field label="Restore evidence reference" htmlFor="dr-restore-ref"><Input id="dr-restore-ref" required value={restoreRef} onChange={(event) => setRestoreRef(event.target.value)} placeholder="drill:2026-q4" /></Field><InlineError message={save.errorMessage} /><div><Button type="submit" loading={save.loading}>Record verified evidence</Button></div></form></CardBody></Card>;
+}
+
 export default function OrganizationPage() {
   const { can } = useAuth();
   const canRead = can("org:read");
@@ -662,6 +682,7 @@ export default function OrganizationPage() {
     [canRead],
     { enabled: canRead },
   );
+  const readiness = useApiResource(() => api.platform.readiness(), [canRead], { enabled: canRead });
 
   if (!canRead) {
     return (
@@ -682,6 +703,8 @@ export default function OrganizationPage() {
         description="Manage your organization profile and team members."
       />
 
+      <ReadinessGuide resource={readiness} />
+
       <Card>
         <CardHeader>
           <CardTitle>Profile</CardTitle>
@@ -701,6 +724,7 @@ export default function OrganizationPage() {
       </Card>
 
       {canManageOrg && org.data && <RiskWeightsEditor org={org.data} onUpdated={org.setData} />}
+      {canManageOrg && org.data && <ResilienceEvidence org={org.data} onUpdated={(next) => { org.setData(next); readiness.refetch(); }} />}
       {canManageOrg && org.data && <CodeownersRouting org={org.data} onUpdated={org.setData} />}
       {canManageOrg && <AgentMemoryEditor />}
       {canManageOrg && org.data && <IdentityProvisioning organizationSlug={org.data.slug} />}

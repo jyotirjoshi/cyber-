@@ -342,6 +342,12 @@ function IntegrationCard({
     onSuccess: (r: IntegrationTestOut) =>
       handleIntegrationTestSuccess(r, { refresh: onChanged, toast }),
   });
+  const contractTest = useMutation((kind: IntegrationKind) => api.integrations.contractTest(kind), {
+    onSuccess: (result) => {
+      toast({ title: result.passed ? "Connector contract passed" : "Connector contract blocked", description: `${result.score}% · ${result.checks.filter((check) => check.passed).length}/${result.checks.length} checks passed`, tone: result.passed ? "ok" : "danger" });
+      onChanged();
+    },
+  });
 
   const sync = useMutation((kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable" | "qualys" | "rapid7" | "wiz" | "prisma_cloud" | "crowdstrike" | "aws_security_hub" | "aws_inspector" | "hackerone" | "bugcrowd" | "checkmarx" | "fortify" | "azure_defender" | "gcp_scc" | "burp_dast") => api.integrations.sync(kind), {
     onSuccess: (result: IntegrationSyncOut) => {
@@ -580,7 +586,7 @@ function IntegrationCard({
             <InlineError message={checkScan.errorMessage ?? launchScan.errorMessage} />
           </div>
         )}
-        <InlineError message={test.errorMessage ?? sync.errorMessage ?? remove.errorMessage} />
+        <InlineError message={contractTest.errorMessage ?? test.errorMessage ?? sync.errorMessage ?? remove.errorMessage} />
       </CardBody>
 
       {canManage && (
@@ -592,6 +598,9 @@ function IntegrationCard({
             onClick={() => void test.run(integration.kind)}
           >
             Test
+          </Button>
+          <Button size="sm" variant="secondary" loading={contractTest.loading} onClick={() => void contractTest.run(integration.kind)}>
+            Contract test
           </Button>
           {syncKind && (
             <Button

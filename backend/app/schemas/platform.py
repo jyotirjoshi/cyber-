@@ -50,4 +50,28 @@ class PlatformApiKeyOut(BaseModel):
     created_at: dt.datetime
 
 
-__all__ = ["PlatformApiKeyCreateIn", "PlatformApiKeyIssuedOut", "PlatformApiKeyOut"]
+class ReadinessCheckOut(BaseModel):
+    key: str
+    category: str
+    label: str
+    status: str
+    detail: str
+    action_path: str | None = None
+
+
+class PlatformReadinessOut(BaseModel):
+    ready: bool
+    score: int = Field(ge=0, le=100)
+    passed: int = Field(ge=0)
+    total: int = Field(ge=1)
+    checks: list[ReadinessCheckOut]
+    evaluated_at: dt.datetime
+
+
+__all__ = [
+    "PlatformApiKeyCreateIn",
+    "PlatformApiKeyIssuedOut",
+    "PlatformApiKeyOut",
+    "PlatformReadinessOut",
+    "ReadinessCheckOut",
+]
