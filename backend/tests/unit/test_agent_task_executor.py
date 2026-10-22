@@ -33,6 +33,48 @@ from app.worker.protocol import RunAction, RunRequest
 ORG_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
 
 
+def test_verify_task_result_requires_output_and_verified_evidence() -> None:
+    from app.services.agent_task_executor import verify_task_result
+
+    result = TaskExecutionResult(
+        status="completed",
+        output_summary={"fixed": True, "count": 3},
+        evidence=(
+            TaskEvidenceRecord(
+                key="retest",
+                kind="scan",
+                artifact_reference="gs://evidence/retest.json",
+                content_digest="a" * 64,
+                verified=True,
+            ),
+        ),
+    )
+    verdict = verify_task_result(
+        result,
+        [
+            {"source": "output", "path": "fixed", "operator": "eq", "value": True},
+            {"source": "output", "path": "count", "operator": "gte", "value": 1},
+            {"source": "evidence", "path": "kind", "operator": "eq", "value": "scan"},
+        ],
+    )
+
+    assert verdict.passed is True
+    assert verdict.failed_criteria == ()
+
+
+def test_verify_task_result_rejects_success_without_required_evidence() -> None:
+    from app.services.agent_task_executor import verify_task_result
+
+    result = TaskExecutionResult(status="completed", output_summary={"fixed": True})
+    verdict = verify_task_result(
+        result,
+        [{"source": "evidence", "path": "kind", "operator": "eq", "value": "scan"}],
+    )
+
+    assert verdict.passed is False
+    assert verdict.failed_criteria == ("evidence.kind:eq",)
+
+
 def test_task_request_round_trip_binds_the_task_id_without_a_principal() -> None:
     run_id = uuid.uuid4()
     task_id = uuid.uuid4()
@@ -153,6 +195,22 @@ async def test_old_lease_cannot_settle_after_reclaim(executor_store) -> None:
     async with executor_store() as session:
         assert await settle_task(session, second, result) is True
         await session.commit()
+
+
+def test_required_task_cannot_complete_when_postconditions_fail() -> None:
+    from app.services.agent_task_executor import enforce_task_postconditions
+
+    result = enforce_task_postconditions(
+        TaskExecutionResult(status="completed", output_summary={"reported": "success"}),
+        required=True,
+        criteria=[
+            {"source": "evidence", "path": "kind", "operator": "eq", "value": "scan"}
+        ],
+    )
+
+    assert result.status == "failed"
+    assert result.failure_code == "success_criteria_failed"
+    assert result.output_summary["success_criteria_passed"] is False
 
 
 @pytest.mark.asyncio

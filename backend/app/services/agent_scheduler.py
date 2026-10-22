@@ -62,6 +62,7 @@ def _orchestration_payload(task: Any) -> dict[str, Any]:
         "join_policy": task.join_policy,
         "quorum": task.quorum,
         "target_asset_ids": [str(asset_id) for asset_id in task.target_asset_ids],
+        "success_criteria": [item.model_dump(mode="json") for item in task.success_criteria],
     }
 
 

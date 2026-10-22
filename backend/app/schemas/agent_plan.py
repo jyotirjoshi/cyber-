@@ -11,6 +11,7 @@ from app.db.enums import AgentTaskKind
 
 JoinPolicy = Literal["all", "quorum", "best_effort"]
 ConditionOperator = Literal["eq", "ne", "exists", "truthy", "falsy"]
+SuccessOperator = Literal["eq", "ne", "exists", "truthy", "falsy", "gte", "lte"]
 
 
 class AgentPlanCondition(BaseModel):
@@ -21,6 +22,17 @@ class AgentPlanCondition(BaseModel):
     task_key: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")]
     path: Annotated[str, Field(min_length=1, max_length=300)]
     operator: ConditionOperator
+    value: JsonValue | None = None
+
+
+class AgentSuccessCriterion(BaseModel):
+    """A deterministic postcondition over bounded output or verified evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: Literal["output", "evidence"]
+    path: Annotated[str, Field(min_length=1, max_length=300, pattern=r"^[A-Za-z0-9_.-]+$")]
+    operator: SuccessOperator
     value: JsonValue | None = None
 
 
@@ -55,6 +67,7 @@ class AgentPlanTask(BaseModel):
     estimated_input_tokens: Annotated[int, Field(ge=0, le=2_000_000)] = 0
     estimated_output_tokens: Annotated[int, Field(ge=0, le=200_000)] = 0
     estimated_spend_micros: Annotated[int, Field(ge=0, le=10_000_000_000)] = 0
+    success_criteria: list[AgentSuccessCriterion] = Field(default_factory=list, max_length=20)
 
 
 class AgentPlan(BaseModel):
@@ -87,6 +100,7 @@ __all__ = [
     "AgentPlan",
     "AgentPlanCondition",
     "AgentPlanTask",
+    "AgentSuccessCriterion",
     "ConditionOperator",
     "JoinPolicy",
     "ValidatedAgentPlan",

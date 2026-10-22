@@ -47,6 +47,25 @@ def _plan(*tasks: AgentPlanTask) -> AgentPlan:
     return AgentPlan(objective="Investigate the scoped exposure", tasks=list(tasks))
 
 
+def test_task_success_criteria_are_bounded_and_schema_validated() -> None:
+    from pydantic import ValidationError
+
+    task = _task(
+        "verify",
+        success_criteria=[
+            {"source": "output", "path": "verified", "operator": "eq", "value": True},
+            {"source": "evidence", "path": "kind", "operator": "eq", "value": "scan"},
+        ],
+    )
+    assert len(task.success_criteria) == 2
+
+    with pytest.raises(ValidationError):
+        _task(
+            "invalid",
+            success_criteria=[{"source": "output", "path": "x", "operator": "shell"}],
+        )
+
+
 @pytest.mark.parametrize(
     ("plan", "code"),
     [

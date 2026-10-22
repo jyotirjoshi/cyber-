@@ -9,7 +9,7 @@ import json
 import secrets
 import uuid
 from collections.abc import Awaitable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Protocol
 
@@ -87,6 +87,102 @@ class TaskExecutionResult:
     def __post_init__(self) -> None:
         if self.status not in _SETTLEMENT_STATUSES:
             raise ValueError("task results must use a terminal settlement status")
+
+
+@dataclass(frozen=True, slots=True)
+class ResultVerification:
+    passed: bool
+    failed_criteria: tuple[str, ...]
+
+
+def _read_result_path(value: Any, path: str) -> tuple[bool, Any]:
+    current = value
+    for part in path.split("."):
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+        else:
+            if not hasattr(current, part):
+                return False, None
+            current = getattr(current, part)
+    return True, current
+
+
+def _criterion_matches(exists: bool, actual: Any, operator: str, expected: Any) -> bool:
+    if operator == "exists":
+        return exists
+    if operator == "truthy":
+        return exists and bool(actual)
+    if operator == "falsy":
+        return not exists or not bool(actual)
+    if not exists:
+        return False
+    if operator == "eq":
+        return actual == expected
+    if operator == "ne":
+        return actual != expected
+    if operator == "gte":
+        return isinstance(actual, int | float) and isinstance(expected, int | float) and actual >= expected
+    if operator == "lte":
+        return isinstance(actual, int | float) and isinstance(expected, int | float) and actual <= expected
+    return False
+
+
+def verify_task_result(
+    result: TaskExecutionResult, criteria: list[dict[str, Any]]
+) -> ResultVerification:
+    """Verify declared postconditions using only bounded output and verified evidence."""
+
+    failed: list[str] = []
+    verified_evidence = [item for item in result.evidence if item.verified]
+    for criterion in criteria:
+        source = str(criterion.get("source", ""))
+        path = str(criterion.get("path", ""))
+        operator = str(criterion.get("operator", ""))
+        expected = criterion.get("value")
+        matched = False
+        if source == "output":
+            exists, actual = _read_result_path(result.output_summary, path)
+            matched = _criterion_matches(exists, actual, operator, expected)
+        elif source == "evidence":
+            matched = any(
+                _criterion_matches(*_read_result_path(item, path), operator, expected)
+                for item in verified_evidence
+            )
+        if not matched:
+            failed.append(f"{source}.{path}:{operator}")
+    return ResultVerification(passed=not failed, failed_criteria=tuple(failed))
+
+
+def enforce_task_postconditions(
+    result: TaskExecutionResult,
+    *,
+    required: bool,
+    criteria: list[dict[str, Any]],
+) -> TaskExecutionResult:
+    if not criteria or result.status not in {
+        AgentTaskStatus.COMPLETED.value,
+        AgentTaskStatus.DEGRADED.value,
+    }:
+        return result
+    verification = verify_task_result(result, criteria)
+    if verification.passed:
+        return replace(
+            result,
+            output_summary={**result.output_summary, "success_criteria_passed": True},
+        )
+    return replace(
+        result,
+        status=(AgentTaskStatus.FAILED.value if required else AgentTaskStatus.DEGRADED.value),
+        output_summary={
+            **result.output_summary,
+            "success_criteria_passed": False,
+            "failed_criteria": list(verification.failed_criteria),
+        },
+        failure_code="success_criteria_failed",
+        failure_detail="Task output did not satisfy its declared postconditions.",
+    )
 
 
 class TaskHandler(Protocol):
@@ -463,6 +559,11 @@ async def settle_task(
         or attempt.status != AgentTaskAttemptStatus.RUNNING.value
     ):
         return False
+    result = enforce_task_postconditions(
+        result,
+        required=task.required,
+        criteria=list(task.orchestration.get("success_criteria") or []),
+    )
     now = utcnow()
     attempt.status = (
         AgentTaskAttemptStatus.COMPLETED.value
@@ -759,6 +860,8 @@ __all__ = [
     "TaskClaim",
     "TaskEvidenceRecord",
     "TaskExecutionResult",
+    "enforce_task_postconditions",
+    "ResultVerification",
     "TaskHandler",
     "claim_task",
     "execute_approved_task",
@@ -768,4 +871,5 @@ __all__ = [
     "recover_all_stale_tasks",
     "recover_stale_tasks",
     "settle_task",
+    "verify_task_result",
 ]
