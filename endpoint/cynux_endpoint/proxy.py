@@ -19,7 +19,10 @@ import platform
 import re
 import socket
 import sqlite3
+import threading
+import time
 import uuid
+import urllib.request
 from pathlib import Path
 
 from cynux_endpoint.agent import Spool
@@ -99,6 +102,64 @@ class ReloadingPolicy:
             return self.load().allows(host)
         except (OSError, ValueError):
             return False
+
+
+class RemotePolicy:
+    """Thread-safe cached control-plane policy with bounded fail-closed staleness."""
+
+    def __init__(self, fetch, *, clock=time.monotonic, max_staleness=300):
+        self.fetch = fetch
+        self.clock = clock
+        self.max_staleness = max_staleness
+        self._lock = threading.Lock()
+        self._policy = Policy({"allow": [], "deny": []})
+        self._last_success = None
+
+    def refresh(self):
+        try:
+            bundle = self.fetch()
+            signed = {
+                "allow": bundle["allow"],
+                "deny": bundle["deny"],
+                "policy_versions": bundle["policy_versions"],
+            }
+            canonical = json.dumps(signed, sort_keys=True, separators=(",", ":"))
+            expected = hashlib.sha256(canonical.encode()).hexdigest()
+            if not hmac.compare_digest(str(bundle.get("digest", "")), expected):
+                raise ValueError("Policy digest mismatch")
+            policy = Policy({"allow": signed["allow"], "deny": signed["deny"]})
+        except (KeyError, TypeError, ValueError, OSError):
+            return False
+        with self._lock:
+            self._policy = policy
+            self._last_success = self.clock()
+        return True
+
+    def allows(self, host):
+        with self._lock:
+            policy = self._policy
+            last_success = self._last_success
+        if last_success is None or self.clock() - last_success > self.max_staleness:
+            return False
+        return policy.allows(host)
+
+
+def fetch_policy_bundle(server, api_key, *, opener=urllib.request.urlopen):
+    server = str(server).rstrip("/")
+    if not server.startswith("https://") or not api_key:
+        raise ValueError("Remote policy requires an HTTPS server and endpoint API key")
+    request = urllib.request.Request(
+        server + "/api/v1/control-plane/secure-web/policy-bundle",
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+    )
+    with opener(request, timeout=10) as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("Remote policy exceeds 64 KiB")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("Remote policy must be an object")
+    return payload
 
 
 class AuditSink:
@@ -310,7 +371,9 @@ class Gateway:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--policy", type=Path)
+    source.add_argument("--server", help="Cynux HTTPS origin for centrally managed policy")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--state-dir",
@@ -321,16 +384,29 @@ def main():
     if not 1024 <= args.port <= 65535:
         parser.error("port must be between 1024 and 65535")
     try:
-        gateway = Gateway(
-            ReloadingPolicy(args.policy), os.environ.get("CYNUX_PROXY_TOKEN", "")
-        )
+        if args.server:
+            api_key = os.environ.get("CYNUX_ENDPOINT_API_KEY", "")
+            policy = RemotePolicy(lambda: fetch_policy_bundle(args.server, api_key))
+            if not policy.refresh():
+                raise ValueError("Unable to load an initial verified remote policy")
+        else:
+            policy = ReloadingPolicy(args.policy)
+        gateway = Gateway(policy, os.environ.get("CYNUX_PROXY_TOKEN", ""))
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
     async def serve():
         spool = Spool(args.state_dir / "events.sqlite3") if args.state_dir else None
+        refresh_task = None
         if spool:
             gateway.emit = AuditSink(spool)
+        if isinstance(gateway.policy, RemotePolicy):
+            async def refresh_remote_policy():
+                while True:
+                    await asyncio.sleep(60)
+                    await asyncio.to_thread(gateway.policy.refresh)
+
+            refresh_task = asyncio.create_task(refresh_remote_policy())
         try:
             server = await asyncio.start_server(
                 gateway.handle, "127.0.0.1", args.port, limit=8192
@@ -338,6 +414,9 @@ def main():
             async with server:
                 await server.serve_forever()
         finally:
+            if refresh_task:
+                refresh_task.cancel()
+                await asyncio.gather(refresh_task, return_exceptions=True)
             if spool:
                 spool.db.close()
 

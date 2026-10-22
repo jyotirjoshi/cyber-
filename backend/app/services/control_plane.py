@@ -216,6 +216,40 @@ def evaluate_private_access_policy(
     }
 
 
+def compile_secure_web_policy(policies: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compile active enforcement policies into a deterministic endpoint bundle."""
+
+    allowed: set[str] = set()
+    denied: set[str] = set()
+    versions: list[str] = []
+    for policy in policies:
+        if (
+            policy.get("kind") not in {"secure_web_gateway", "firewall"}
+            or policy.get("mode") != "enforce"
+            or policy.get("status") != "active"
+        ):
+            continue
+        rules = policy.get("rules") if isinstance(policy.get("rules"), dict) else {}
+        for target, key in ((allowed, "allow_domains"), (denied, "deny_domains")):
+            entries = rules.get(key, [])
+            if not isinstance(entries, list):
+                continue
+            target.update(
+                str(value).strip().casefold()
+                for value in entries[:1000]
+                if isinstance(value, str) and value.strip()
+            )
+        versions.append(f"{policy.get('id')}:{policy.get('version')}")
+    allowed.difference_update(denied)
+    content = {
+        "allow": sorted(allowed)[:5000],
+        "deny": sorted(denied)[:5000],
+        "policy_versions": sorted(versions),
+    }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
+    return {**content, "digest": hashlib.sha256(canonical.encode()).hexdigest()}
+
+
 _AI_RESOURCE_KINDS = frozenset({"ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"})
 
 
@@ -866,6 +900,22 @@ async def evaluate_private_access(
         "event_id": event.id,
         **decision,
     }
+
+
+async def secure_web_policy_bundle(
+    session: AsyncSession, principal: Principal
+) -> dict[str, Any]:
+    """Return the tenant's compiled fail-closed policy for native endpoint gateways."""
+
+    principal.require(Permission.ENDPOINT_INGEST)
+    rows = await session.scalars(
+        tenant_select(SecurityPolicy, principal.organization_id).where(
+            SecurityPolicy.kind.in_(("secure_web_gateway", "firewall")),
+            SecurityPolicy.status == "active",
+        )
+    )
+    bundle = compile_secure_web_policy([row.as_dict() for row in rows.all()])
+    return {**bundle, "generated_at": dt.datetime.now(dt.UTC)}
 
 
 _NATIVE_AI_POLICY_NAME = "Cynux Native AI Security Baseline"

@@ -66,6 +66,7 @@ from app.schemas.control_plane import (
     PrivateAccessEvaluateIn,
     RiskSimulationCreateIn,
     RiskSimulationOut,
+    SecureWebPolicyBundleOut,
     SecurityEventIn,
     SecurityEventOut,
     SecurityPolicyCreateIn,
@@ -765,6 +766,15 @@ async def evaluate_private_access(
     result = await service.evaluate_private_access(session, principal, payload)
     await session.commit()
     return PrivateAccessDecisionOut.model_validate(result)
+
+
+@router.get("/secure-web/policy-bundle", response_model=SecureWebPolicyBundleOut)
+async def secure_web_policy_bundle(
+    principal: PrincipalDep, session: DbSession
+) -> SecureWebPolicyBundleOut:
+    return SecureWebPolicyBundleOut.model_validate(
+        await service.secure_web_policy_bundle(session, principal)
+    )
 
 
 @router.get("/recommendations", response_model=list[SecurityRecommendationOut])

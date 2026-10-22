@@ -185,6 +185,50 @@ def test_private_access_monitor_mode_records_would_block_without_denying() -> No
     }
 
 
+def test_secure_web_policy_bundle_combines_enforced_rules_and_deny_wins() -> None:
+    from app.services.control_plane import compile_secure_web_policy
+
+    bundle = compile_secure_web_policy(
+        [
+            {
+                "id": "policy-1",
+                "version": 2,
+                "kind": "secure_web_gateway",
+                "mode": "enforce",
+                "status": "active",
+                "rules": {
+                    "allow_domains": ["example.com", "*.corp.example"],
+                    "deny_domains": ["bad.example.com"],
+                },
+            },
+            {
+                "id": "policy-2",
+                "version": 1,
+                "kind": "firewall",
+                "mode": "enforce",
+                "status": "active",
+                "rules": {
+                    "allow_domains": ["updates.example.com", "bad.example.com"],
+                    "deny_domains": ["malware.example"],
+                },
+            },
+            {
+                "id": "ignored",
+                "version": 1,
+                "kind": "secure_web_gateway",
+                "mode": "monitor",
+                "status": "active",
+                "rules": {"allow_domains": ["monitor-only.example"]},
+            },
+        ]
+    )
+
+    assert bundle["allow"] == ["*.corp.example", "example.com", "updates.example.com"]
+    assert bundle["deny"] == ["bad.example.com", "malware.example"]
+    assert bundle["policy_versions"] == ["policy-1:2", "policy-2:1"]
+    assert len(bundle["digest"]) == 64
+
+
 def test_native_ai_posture_detects_toxic_access_without_an_external_connector() -> None:
     from app.services.control_plane import evaluate_native_ai_posture
 
@@ -283,6 +327,7 @@ def test_control_plane_routes_are_mounted() -> None:
     assert "/control-plane/native-posture/assess" in paths
     assert "/control-plane/recommendations/{recommendation_id}/decision" in paths
     assert "/control-plane/private-access/evaluate" in paths
+    assert "/control-plane/secure-web/policy-bundle" in paths
 
 
 def test_private_access_request_rejects_unbounded_session_duration() -> None:

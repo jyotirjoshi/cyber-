@@ -164,6 +164,14 @@ class PrivateAccessDecisionOut(BaseModel):
     reason_codes: list[str]
 
 
+class SecureWebPolicyBundleOut(BaseModel):
+    allow: list[str]
+    deny: list[str]
+    policy_versions: list[str]
+    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    generated_at: dt.datetime
+
+
 class SecurityRecommendationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
