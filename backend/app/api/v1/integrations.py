@@ -24,6 +24,7 @@ bodies are logged, never echoed (SEC-002).
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -47,6 +48,7 @@ from app.schemas.integration import (
 from app.services import external_alert as external_alert_service
 from app.services import file_intake
 from app.services import integration as integration_service
+from app.services import integration_sync as integration_sync_service
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -78,11 +80,59 @@ async def integration_sync_runs(
         )
     ).all()
     return [
-        IntegrationSyncRunOut.model_validate(
-            {**receipt.__dict__, "kind": kind, "name": name}
-        )
+        IntegrationSyncRunOut.model_validate({**receipt.__dict__, "kind": kind, "name": name})
         for receipt, kind, name in rows
     ]
+
+
+@router.post("/{kind}/sync-now", response_model=IntegrationSyncOut)
+async def run_connector_sync(
+    kind: IntegrationKind,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Run a manual pull with a durable, replayable execution receipt."""
+    try:
+        result = await integration_sync_service.run_manual_integration_sync(
+            session, principal, kind, settings=settings, redis=redis
+        )
+    except Exception:
+        await session.commit()
+        raise
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=kind,
+        alerts_staged=int(getattr(result, "total", 0)),
+        absence_candidates=int(getattr(result, "absence_candidates", 0)),
+        missing_source_records=int(getattr(result, "missing_source_records", 0)),
+    )
+
+
+@router.post("/sync-runs/{run_id}/replay", response_model=IntegrationSyncOut)
+async def replay_connector_sync(
+    run_id: uuid.UUID,
+    principal: PrincipalDep,
+    session: DbSession,
+    settings: SettingsDep,
+    redis: RedisDep,
+) -> IntegrationSyncOut:
+    """Replay one failed connector pull and retain its lineage in the new receipt."""
+    try:
+        kind, result = await integration_sync_service.replay_failed_sync(
+            session, principal, run_id, settings=settings, redis=redis
+        )
+    except Exception:
+        await session.commit()
+        raise
+    await session.commit()
+    return IntegrationSyncOut(
+        kind=kind,
+        alerts_staged=int(getattr(result, "total", 0)),
+        absence_candidates=int(getattr(result, "absence_candidates", 0)),
+        missing_source_records=int(getattr(result, "missing_source_records", 0)),
+    )
 
 
 @router.post("/imports/scan", response_model=dict[str, int])
@@ -172,9 +222,7 @@ async def connector_certifications(
 ) -> list[ConnectorCertificationOut]:
     """Explain whether each configured connector is genuinely operational."""
 
-    return await integration_service.connector_certifications(
-        session, principal, redis=redis
-    )
+    return await integration_service.connector_certifications(session, principal, redis=redis)
 
 
 @router.post("", response_model=IntegrationOut)
@@ -462,24 +510,48 @@ async def sync_hackerone_reports(
 
 
 @router.post("/bugcrowd/sync", response_model=IntegrationSyncOut)
-async def sync_bugcrowd_submissions(principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep) -> IntegrationSyncOut:
-    result = await external_alert_service.sync_bugcrowd_submissions(session, principal, settings=settings, redis=redis)
+async def sync_bugcrowd_submissions(
+    principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep
+) -> IntegrationSyncOut:
+    result = await external_alert_service.sync_bugcrowd_submissions(
+        session, principal, settings=settings, redis=redis
+    )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.BUGCROWD, alerts_staged=result.total, absence_candidates=result.absence_candidates)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.BUGCROWD,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
 
 
 @router.post("/checkmarx/sync", response_model=IntegrationSyncOut)
-async def sync_checkmarx_results(principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep) -> IntegrationSyncOut:
-    result = await external_alert_service.sync_checkmarx_results(session, principal, settings=settings, redis=redis)
+async def sync_checkmarx_results(
+    principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep
+) -> IntegrationSyncOut:
+    result = await external_alert_service.sync_checkmarx_results(
+        session, principal, settings=settings, redis=redis
+    )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.CHECKMARX, alerts_staged=result.total, absence_candidates=result.absence_candidates)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.CHECKMARX,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
 
 
 @router.post("/fortify/sync", response_model=IntegrationSyncOut)
-async def sync_fortify_issues(principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep) -> IntegrationSyncOut:
-    result = await external_alert_service.sync_fortify_issues(session, principal, settings=settings, redis=redis)
+async def sync_fortify_issues(
+    principal: PrincipalDep, session: DbSession, settings: SettingsDep, redis: RedisDep
+) -> IntegrationSyncOut:
+    result = await external_alert_service.sync_fortify_issues(
+        session, principal, settings=settings, redis=redis
+    )
     await session.commit()
-    return IntegrationSyncOut(kind=IntegrationKind.FORTIFY, alerts_staged=result.total, absence_candidates=result.absence_candidates)
+    return IntegrationSyncOut(
+        kind=IntegrationKind.FORTIFY,
+        alerts_staged=result.total,
+        absence_candidates=result.absence_candidates,
+    )
 
 
 @router.post("/azure_defender/sync", response_model=IntegrationSyncOut)

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { configuredTenableScanIds, handleIntegrationSyncSuccess, handleIntegrationTestSuccess } from "./integration-actions";
+import { canReplaySyncRun, configuredTenableScanIds, handleIntegrationSyncSuccess, handleIntegrationTestSuccess } from "./integration-actions";
 
 describe("handleIntegrationTestSuccess", () => {
   it("refreshes the integration list after a healthy test", () => {
@@ -32,6 +32,14 @@ describe("handleIntegrationSyncSuccess", () => {
       description: "12 alerts are available in Findings → External alerts.",
       tone: "ok",
     });
+  });
+});
+
+describe("canReplaySyncRun", () => {
+  it("allows replay only for failed executions", () => {
+    expect(canReplaySyncRun("failed")).toBe(true);
+    expect(canReplaySyncRun("running")).toBe(false);
+    expect(canReplaySyncRun("succeeded")).toBe(false);
   });
 });
 

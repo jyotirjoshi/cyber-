@@ -15,7 +15,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { fieldError } from "@/lib/errors";
 import { formatDate, formatRelative, humanize } from "@/lib/format";
-import { configuredTenableScanIds, handleIntegrationSyncSuccess, handleIntegrationTestSuccess } from "@/lib/integration-actions";
+import { canReplaySyncRun, configuredTenableScanIds, handleIntegrationSyncSuccess, handleIntegrationTestSuccess } from "@/lib/integration-actions";
 import { certificationTone, summarizeCertification } from "@/lib/integration-certification";
 import { ADDABLE_INTEGRATIONS, BYOK_PROVIDERS, INTEGRATION_SETUP_HINTS } from "@/lib/integration-catalog";
 import type {
@@ -784,6 +784,7 @@ function ConnectorTroubleshooting({ certifications }: { certifications: Connecto
 
 export default function IntegrationsPage() {
   const { can } = useAuth();
+  const { toast } = useToast();
   const canRead = can("integration:read");
   const canManage = can("integration:manage");
 
@@ -807,6 +808,14 @@ export default function IntegrationsPage() {
     [],
     { enabled: canRead },
   );
+  const replaySync = useMutation((runId: string) => api.integrations.replaySync(runId), {
+    onSuccess: (result) => {
+      handleIntegrationSyncSuccess(result, { toast });
+      void syncRuns.refetch();
+      void coverage.refetch();
+      void refetch();
+    },
+  });
   const refresh = React.useCallback(() => {
     refetch();
     coverage.refetch();
@@ -894,7 +903,7 @@ export default function IntegrationsPage() {
           {syncRuns.loading && !syncRuns.data ? <LoadingState label="Loading connector execution history…" /> : syncRuns.error ? <ErrorState message={syncRuns.error} onRetry={syncRuns.refetch} /> : syncRuns.data?.length ? (
             <div className="space-y-2">{syncRuns.data.map((run: IntegrationSyncRunOut) => <div key={run.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line p-3">
               <div><div className="flex flex-wrap items-center gap-2"><span className="font-medium text-fg">{run.name}</span><Badge tone={run.status === "succeeded" ? "ok" : run.status === "failed" ? "danger" : "warn"}>{humanize(run.status)}</Badge><Badge tone="neutral">{run.mode}</Badge></div><p className="mt-1 text-xs text-muted">{formatRelative(run.started_at)} · {run.duration_ms === null ? "in progress" : `${(run.duration_ms / 1000).toFixed(1)}s`} · {run.items_staged} staged · {run.absence_candidates} absence candidates</p>{run.error_summary && <p className="mt-1 text-xs text-danger">{run.error_code ? `${humanize(run.error_code)}: ` : ""}{run.error_summary}</p>}</div>
-              <p className="text-xs text-faint">{humanize(run.kind)}</p>
+              <div className="flex items-center gap-2"><p className="text-xs text-faint">{humanize(run.kind)}</p>{canManage && canReplaySyncRun(run.status) && <Button size="sm" variant="secondary" loading={replaySync.loading} onClick={() => void replaySync.run(run.id)}>Replay</Button>}</div>
             </div>)}</div>
           ) : <p className="text-sm text-muted">No scheduled connector execution has completed since run receipts were enabled.</p>}
         </CardBody>

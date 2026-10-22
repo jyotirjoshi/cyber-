@@ -117,6 +117,8 @@ async def test_wazuh_sync_accepts_indexer_only_tenant_connection(monkeypatch) ->
         id=uuid.uuid4(),
         kind_enum=IntegrationKind.WAZUH,
         is_usable=True,
+        is_enabled=True,
+        sync_interval_minutes=None,
         name="Wazuh Indexer",
         base_url=None,
         config={"indexer_base_url": "https://wazuh-indexer.example:9200"},

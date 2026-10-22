@@ -1118,7 +1118,9 @@ export const api = {
     contractTest: (kind: IntegrationKind) =>
       request<ConnectorContractTestOut>("POST", `/integrations/${kind}/contract-test`),
     sync: (kind: "github" | "gitlab" | "wazuh" | "sonarqube" | "snyk" | "tenable" | "qualys" | "rapid7" | "wiz" | "prisma_cloud" | "crowdstrike" | "aws_security_hub" | "aws_inspector" | "hackerone" | "bugcrowd" | "checkmarx" | "fortify" | "azure_defender" | "gcp_scc" | "burp_dast") =>
-      request<IntegrationSyncOut>("POST", `/integrations/${kind}/sync`),
+      request<IntegrationSyncOut>("POST", `/integrations/${kind}/sync-now`),
+    replaySync: (runId: string) =>
+      request<IntegrationSyncOut>("POST", `/integrations/sync-runs/${runId}/replay`),
     importScanExport: (input: {
       file: File;
       formatName: "sarif" | "nuclei_jsonl" | "nessus_xml" | "burp_xml" | "qualys_host_detection_xml" | "rapid7_csv" | "aws_inspector_csv" | "azure_defender_json" | "gcp_scc_json" | "prowler_ocsf" | "hackerone_json" | "bugcrowd_json" | "trivy" | "gitleaks" | "cyclonedx" | "spdx" | "generic_csv" | "generic_json" | "wiz_json" | "prisma_cloud_json" | "sonarqube_json" | "defectdojo_json" | "checkmarx_xml" | "fortify_fvdl" | "fortify_fpr";

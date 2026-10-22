@@ -11,7 +11,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.errors import CynuxError
+from app.core.errors import (
+    ConflictError,
+    CynuxError,
+    InvalidConfigurationError,
+    ResourceNotFoundError,
+)
 from app.db.base import utcnow
 from app.db.enums import IntegrationKind
 from app.db.models.integration import Integration, IntegrationSyncRun
@@ -53,6 +58,34 @@ if frozenset(_SYNC_HANDLERS) != CONTINUOUS_SYNC_KINDS:  # pragma: no cover - imp
 def _retry_minutes(interval: int, failures: int) -> int:
     """Retry quickly, then cap backoff at the connector's normal cadence."""
     return min(interval, 5 * (2 ** min(max(failures - 1, 0), 10)))
+
+
+def new_sync_run(
+    integration: Integration,
+    *,
+    mode: str,
+    started_at: dt.datetime,
+    replay_of_id: uuid.UUID | None = None,
+) -> IntegrationSyncRun:
+    """Create a bounded execution receipt without copying provider payloads or secrets."""
+    checkpoint = {
+        "last_completed_at": (
+            integration.last_sync_at.isoformat() if integration.last_sync_at else None
+        ),
+        "failure_count": int(integration.sync_failure_count or 0),
+    }
+    if replay_of_id is not None:
+        checkpoint["replay_of_id"] = str(replay_of_id)
+    return IntegrationSyncRun(
+        organization_id=integration.organization_id,
+        integration_id=integration.id,
+        run_key=(f"{mode}:{integration.id}:{started_at.isoformat()}:{uuid.uuid4().hex[:12]}"),
+        mode=mode,
+        status="running",
+        started_at=started_at,
+        checkpoint_before=checkpoint,
+        checkpoint_after={},
+    )
 
 
 def settle_sync_run(
@@ -119,21 +152,7 @@ async def run_due_integration_syncs(
         principal = Principal.for_system(organization_id=integration.organization_id)
         kind = IntegrationKind(integration.kind)
         handler = _SYNC_HANDLERS[kind]
-        receipt = IntegrationSyncRun(
-            organization_id=integration.organization_id,
-            integration_id=integration.id,
-            run_key=f"scheduled:{integration.id}:{started_at.isoformat()}:{uuid.uuid4().hex[:12]}",
-            mode="scheduled",
-            status="running",
-            started_at=started_at,
-            checkpoint_before={
-                "last_completed_at": integration.last_sync_at.isoformat()
-                if integration.last_sync_at
-                else None,
-                "failure_count": int(integration.sync_failure_count or 0),
-            },
-            checkpoint_after={},
-        )
+        receipt = new_sync_run(integration, mode="scheduled", started_at=started_at)
         session.add(receipt)
         await session.flush()
         # Move the due time before opening the savepoint. A rollback of provider
@@ -198,9 +217,7 @@ async def run_due_integration_syncs(
                     "source": kind.value,
                     "status": "failed",
                     "attempt": failures,
-                    "error_code": (
-                        exc.code if isinstance(exc, CynuxError) else "unexpected_error"
-                    ),
+                    "error_code": (exc.code if isinstance(exc, CynuxError) else "unexpected_error"),
                 },
             )
             continue
@@ -233,4 +250,171 @@ async def run_due_integration_syncs(
     return len(due)
 
 
-__all__ = ["run_due_integration_syncs", "settle_sync_run"]
+async def run_manual_integration_sync(
+    session: AsyncSession,
+    principal: Principal,
+    kind: IntegrationKind,
+    *,
+    settings: Settings,
+    redis: Any | None,
+    replay_of_id: uuid.UUID | None = None,
+) -> Any:
+    """Run one connector under the same durable receipt boundary as the scheduler.
+
+    Provider writes live in a savepoint. A failure rolls those writes back while retaining
+    the redacted execution receipt and connector health transition for the route to commit.
+    """
+    from app.db.enums import Permission
+
+    principal.require(Permission.INTEGRATION_MANAGE)
+    handler = _SYNC_HANDLERS.get(kind)
+    if handler is None:
+        raise InvalidConfigurationError(
+            "continuous sync is unavailable for this integration",
+            user_message=f"{kind.value} does not provide a synchronized finding feed.",
+        )
+    integration = await session.scalar(
+        select(Integration)
+        .where(
+            Integration.organization_id == principal.organization_id,
+            Integration.kind == kind.value,
+            Integration.is_enabled.is_(True),
+        )
+        .with_for_update()
+    )
+    if integration is None:
+        raise ResourceNotFoundError(
+            "integration not found",
+            user_message=f"Configure and enable the {kind.value} integration first.",
+        )
+
+    started_at = utcnow()
+    receipt = new_sync_run(
+        integration,
+        mode="manual",
+        started_at=started_at,
+        replay_of_id=replay_of_id,
+    )
+    session.add(receipt)
+    await session.flush()
+    prior_failures = int(integration.sync_failure_count or 0)
+    sync_interval = integration.sync_interval_minutes
+    try:
+        async with session.begin_nested():
+            result = await handler(session, principal, settings=settings, redis=redis)
+    except Exception as exc:
+        completed_at = utcnow()
+        integration = await session.scalar(
+            select(Integration)
+            .where(
+                Integration.id == receipt.integration_id,
+                Integration.organization_id == principal.organization_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if integration is None:  # pragma: no cover - protected by the receipt FK
+            raise ResourceNotFoundError("integration disappeared during synchronization") from exc
+        failures = prior_failures + 1
+        integration.last_sync_at = completed_at
+        integration.last_sync_status = "failed"
+        integration.last_sync_error = (
+            exc.user_message
+            if isinstance(exc, CynuxError)
+            else "The provider sync failed unexpectedly. Review the execution receipt."
+        )
+        integration.sync_failure_count = failures
+        if sync_interval is not None:
+            interval = max(5, min(int(sync_interval), 10080))
+            integration.next_sync_at = completed_at + dt.timedelta(
+                minutes=_retry_minutes(interval, failures)
+            )
+        settle_sync_run(
+            receipt,
+            status="failed",
+            completed_at=completed_at,
+            error_code=exc.code if isinstance(exc, CynuxError) else "unexpected_error",
+            error_summary="Provider sync failed; the failed attempt can be replayed.",
+        )
+        await audit_service.record(
+            session,
+            action=AuditAction.INTEGRATION_SYNC,
+            principal=principal,
+            resource_type="integration_sync_run",
+            resource_id=receipt.id,
+            outcome=audit_service.AuditOutcome.FAILURE,
+            detail={
+                "provider": kind.value,
+                "mode": "manual",
+                "replay_of_id": str(replay_of_id) if replay_of_id else None,
+                "error_code": exc.code if isinstance(exc, CynuxError) else "unexpected_error",
+            },
+            reason=integration.last_sync_error,
+        )
+        raise
+
+    completed_at = utcnow()
+    total = int(getattr(result, "total", 0))
+    settle_sync_run(
+        receipt,
+        status="succeeded",
+        completed_at=completed_at,
+        items_seen=total,
+        items_staged=total,
+        absence_candidates=int(getattr(result, "absence_candidates", 0)),
+    )
+    return result
+
+
+async def replay_failed_sync(
+    session: AsyncSession,
+    principal: Principal,
+    run_id: uuid.UUID,
+    *,
+    settings: Settings,
+    redis: Any | None,
+) -> tuple[IntegrationKind, Any]:
+    """Replay a failed tenant-owned attempt against the provider's current source state."""
+    from app.db.enums import Permission
+
+    principal.require(Permission.INTEGRATION_MANAGE)
+    previous = await session.scalar(
+        select(IntegrationSyncRun).where(
+            IntegrationSyncRun.id == run_id,
+            IntegrationSyncRun.organization_id == principal.organization_id,
+        )
+    )
+    if previous is None:
+        raise ResourceNotFoundError("integration sync run not found")
+    if previous.status != "failed":
+        raise ConflictError(
+            "only failed connector runs can be replayed",
+            user_message="Only a failed connector execution can be replayed.",
+        )
+    integration = await session.scalar(
+        select(Integration).where(
+            Integration.id == previous.integration_id,
+            Integration.organization_id == principal.organization_id,
+        )
+    )
+    if integration is None:
+        raise ResourceNotFoundError("integration for sync run not found")
+    kind = IntegrationKind(integration.kind)
+    result = await run_manual_integration_sync(
+        session,
+        principal,
+        kind,
+        settings=settings,
+        redis=redis,
+        replay_of_id=previous.id,
+    )
+    return kind, result
+
+
+__all__ = [
+    "new_sync_run",
+    "replay_failed_sync",
+    "run_due_integration_syncs",
+    "run_manual_integration_sync",
+    "settle_sync_run",
+]

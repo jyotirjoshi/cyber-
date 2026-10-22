@@ -9,6 +9,10 @@ export type IntegrationSyncResult = {
   missing_source_records?: number;
 };
 
+export function canReplaySyncRun(status: "running" | "succeeded" | "failed") {
+  return status === "failed";
+}
+
 type Toast = (options: {
   title: string;
   description?: string;
