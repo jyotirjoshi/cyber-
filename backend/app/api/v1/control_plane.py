@@ -62,6 +62,8 @@ from app.schemas.control_plane import (
     NativeAIPostureAssessmentOut,
     NativeEndpointEventIn,
     NativeEndpointEventOut,
+    PrivateAccessDecisionOut,
+    PrivateAccessEvaluateIn,
     RiskSimulationCreateIn,
     RiskSimulationOut,
     SecurityEventIn,
@@ -754,6 +756,15 @@ async def evaluate_policy(
     rows = await service.evaluate_policy(session, principal, policy_id)
     await session.commit()
     return [SecurityPolicyEvaluationOut.model_validate(row) for row in rows]
+
+
+@router.post("/private-access/evaluate", response_model=PrivateAccessDecisionOut)
+async def evaluate_private_access(
+    payload: PrivateAccessEvaluateIn, principal: PrincipalDep, session: DbSession
+) -> PrivateAccessDecisionOut:
+    result = await service.evaluate_private_access(session, principal, payload)
+    await session.commit()
+    return PrivateAccessDecisionOut.model_validate(result)
 
 
 @router.get("/recommendations", response_model=list[SecurityRecommendationOut])

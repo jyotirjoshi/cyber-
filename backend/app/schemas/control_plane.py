@@ -133,6 +133,37 @@ class SecurityPolicyEvaluationOut(BaseModel):
     evaluated_at: dt.datetime
 
 
+class PrivateAccessEvaluateIn(BaseModel):
+    """Attested identity/device context for a private-application access request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy_id: uuid.UUID
+    request_id: str = Field(min_length=1, max_length=256)
+    identity_ref: str = Field(min_length=1, max_length=512)
+    groups: list[str] = Field(default_factory=list, max_length=100)
+    application_ref: str = Field(min_length=1, max_length=512)
+    application_tags: list[str] = Field(default_factory=list, max_length=100)
+    device_posture: list[str] = Field(default_factory=list, max_length=100)
+    mfa: bool = False
+    source_country: str | None = Field(default=None, min_length=2, max_length=2)
+    identity_risk_score: Decimal = Field(
+        default=Decimal("0"), ge=0, le=100, max_digits=5, decimal_places=2
+    )
+    requested_session_minutes: int = Field(default=15, ge=1, le=10_080)
+
+
+class PrivateAccessDecisionOut(BaseModel):
+    policy_id: uuid.UUID
+    policy_version: int
+    event_id: uuid.UUID
+    decision: Literal["allow", "deny"]
+    enforced: bool
+    would_block: bool
+    session_minutes: int = Field(ge=1, le=10_080)
+    reason_codes: list[str]
+
+
 class SecurityRecommendationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -33,6 +33,7 @@ from app.db.repository import tenant_select
 from app.schemas.control_plane import (
     CanaryInteractionIn,
     DeceptionCanaryCreateIn,
+    PrivateAccessEvaluateIn,
     RiskSimulationCreateIn,
     SecurityEventIn,
     SecurityPolicyCreateIn,
@@ -137,6 +138,82 @@ def evaluate_resource_policy(*, resource: dict[str, Any], rules: dict[str, Any])
     else:
         severity, decision = "info", "allow"
     return {"decision": decision, "severity": severity, "score": score, "findings": findings}
+
+
+def evaluate_private_access_policy(
+    *, request: dict[str, Any], rules: dict[str, Any], policy_mode: str
+) -> dict[str, Any]:
+    """Make a deterministic, default-deny private-application access decision.
+
+    Identity and device claims are expected to have been attested by the caller. The
+    evaluator is deliberately pure so the API, endpoint gateway, and connector agents
+    all apply exactly the same policy semantics.
+    """
+
+    def values(name: str, source: dict[str, Any]) -> set[str]:
+        raw = source.get(name, [])
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return set()
+        return {str(value).strip().casefold() for value in raw if str(value).strip()}
+
+    identity = str(request.get("identity_ref", "")).strip().casefold()
+    groups = values("groups", request)
+    application_tags = values("application_tags", request)
+    posture = values("device_posture", request)
+    country = str(request.get("source_country", "")).strip().upper()
+    denied_identities = values("denied_identities", rules)
+    denied_groups = values("denied_groups", rules)
+    allowed_identities = values("allowed_identities", rules)
+    allowed_groups = values("allowed_groups", rules)
+    required_tags = values("required_application_tags", rules)
+    required_posture = values("required_device_posture", rules)
+    allowed_countries = {value.upper() for value in values("allowed_countries", rules)}
+    denied_countries = {value.upper() for value in values("denied_countries", rules)}
+
+    violations: list[str] = []
+    if identity and identity in denied_identities:
+        violations.append("identity_denied")
+    if groups & denied_groups:
+        violations.append("group_denied")
+    if country and country in denied_countries:
+        violations.append("country_denied")
+    if allowed_countries and country not in allowed_countries:
+        violations.append("country_not_allowed")
+    for tag in sorted(required_tags - application_tags):
+        violations.append(f"application_tag_missing:{tag}")
+    for signal in sorted(required_posture - posture):
+        violations.append(f"device_posture_failed:{signal}")
+    if rules.get("require_mfa") is True and request.get("mfa") is not True:
+        violations.append("mfa_required")
+
+    max_risk = rules.get("max_identity_risk_score")
+    if max_risk is not None:
+        risk = Decimal(str(request.get("identity_risk_score", 100)))
+        if risk > Decimal(str(max_risk)):
+            violations.append("identity_risk_exceeded")
+
+    allow_reason: str | None = None
+    if identity and identity in allowed_identities:
+        allow_reason = "explicit_identity_allow"
+    elif groups & allowed_groups:
+        allow_reason = "explicit_group_allow"
+    elif str(rules.get("default_action", "deny")).casefold() == "allow":
+        allow_reason = "default_allow"
+
+    would_block = bool(violations) or allow_reason is None
+    reason_codes = violations or (["no_explicit_allow"] if allow_reason is None else [allow_reason])
+    enforced = policy_mode == "enforce"
+    requested_minutes = max(1, int(request.get("requested_session_minutes", 15)))
+    maximum_minutes = max(1, int(rules.get("max_session_minutes", requested_minutes)))
+    return {
+        "decision": "deny" if would_block and enforced else "allow",
+        "enforced": enforced,
+        "would_block": would_block,
+        "session_minutes": min(requested_minutes, maximum_minutes),
+        "reason_codes": reason_codes,
+    }
 
 
 _AI_RESOURCE_KINDS = frozenset({"ai_application", "ai_model", "ai_agent", "mcp_server", "ai_tool"})
@@ -724,6 +801,71 @@ async def evaluate_policy(
         detail={"evaluated_resources": len(results)},
     )
     return results
+
+
+async def evaluate_private_access(
+    session: AsyncSession, principal: Principal, payload: PrivateAccessEvaluateIn
+) -> dict[str, Any]:
+    """Evaluate and durably audit one native private-application access request."""
+
+    principal.require(Permission.INTEGRATION_MANAGE)
+    policy = await session.scalar(
+        tenant_select(SecurityPolicy, principal.organization_id).where(
+            SecurityPolicy.id == payload.policy_id
+        )
+    )
+    if policy is None or policy.kind != "ztna":
+        raise ResourceNotFoundError("Private access policy not found")
+    if policy.status != "active":
+        raise ConflictError("Private access policy is not active")
+
+    decision = evaluate_private_access_policy(
+        request=payload.model_dump(exclude={"policy_id", "request_id"}),
+        rules=policy.rules,
+        policy_mode=policy.mode,
+    )
+    now = dt.datetime.now(dt.UTC)
+    event = await _ingest_event(
+        session,
+        principal,
+        SecurityEventIn(
+            event_key=f"private-access:{policy.id}:{policy.version}:{payload.request_id}",
+            category="access",
+            event_type=f"private_access_{decision['decision']}",
+            source_kind="cynux_private_access",
+            occurred_at=now,
+            severity="info" if decision["decision"] == "allow" else "high",
+            summary=f"Private application access {decision['decision']}",
+            identity_ref=payload.identity_ref,
+            metrics={"session_minutes": decision["session_minutes"]},
+            evidence={
+                "policy_id": str(policy.id),
+                "policy_version": policy.version,
+                "application_ref": payload.application_ref,
+                "reason_codes": decision["reason_codes"],
+                "would_block": decision["would_block"],
+                "enforced": decision["enforced"],
+            },
+        ),
+    )
+    await record(
+        session,
+        action="control_plane.private_access.evaluate",
+        principal=principal,
+        resource_type="security_policy",
+        resource_id=policy.id,
+        detail={
+            "decision": decision["decision"],
+            "event_id": str(event.id),
+            "request_id": payload.request_id,
+        },
+    )
+    return {
+        "policy_id": policy.id,
+        "policy_version": policy.version,
+        "event_id": event.id,
+        **decision,
+    }
 
 
 _NATIVE_AI_POLICY_NAME = "Cynux Native AI Security Baseline"

@@ -21,6 +21,7 @@ import type {
   AssuranceSummary,
   DataClassification,
   NativeAIPostureAssessment,
+  PrivateAccessDecision,
   SecurityCanary,
   SecurityEvent,
   SecurityExperienceSummary,
@@ -33,12 +34,13 @@ import type {
   SecurityThreatStory,
 } from "@/lib/types";
 
-type Workspace = "overview" | "assurance" | "resources" | "endpoint" | "policies" | "ai-data" | "soc" | "deception" | "risk";
+type Workspace = "overview" | "assurance" | "resources" | "endpoint" | "private-access" | "policies" | "ai-data" | "soc" | "deception" | "risk";
 const WORKSPACES: Array<{ id: Workspace; label: string }> = [
   { id: "overview", label: "Posture" },
   { id: "assurance", label: "Assurance runtime" },
   { id: "resources", label: "Inventory" },
   { id: "endpoint", label: "Endpoint/XDR" },
+  { id: "private-access", label: "Private access" },
   { id: "policies", label: "Policies" },
   { id: "ai-data", label: "AI & data" },
   { id: "soc", label: "Threat stories" },
@@ -90,6 +92,7 @@ export default function ControlPlanePage() {
       {workspace === "assurance" && <AssuranceRuntime resource={assurance} />}
       {workspace === "resources" && <Inventory resource={resources} canManage={canManage} onChanged={refresh} />}
       {workspace === "endpoint" && <EndpointWorkspace endpoints={endpoints} events={endpointEvents} canManage={canManage} onChanged={refresh} />}
+      {workspace === "private-access" && <PrivateAccessWorkspace policies={policies} canManage={canManage} />}
       {workspace === "policies" && <Policies resource={policies} canManage={canManage} onChanged={refresh} />}
       {workspace === "ai-data" && <AIDataWorkspace />}
       {workspace === "soc" && <SocWorkspace stories={stories} experience={experience} />}
@@ -183,6 +186,61 @@ function Policies({ resource, canManage, onChanged }: { resource: UseApiResource
   return <div className="grid gap-4 lg:grid-cols-[1fr_22rem]">
     <Card><CardHeader><CardTitle>Active policies</CardTitle></CardHeader><CardBody>{resource.loading && !resource.data ? <LoadingState label="Loading policies…" /> : resource.error ? <ErrorState message={resource.error} onRetry={resource.refetch} /> : !resource.data?.length ? <EmptyState title="No policies" description="Create a deterministic policy for access, web, data, or AI governance." /> : <div className="space-y-3">{resource.data.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line p-3"><div><p className="font-medium text-fg">{item.name}</p><p className="text-xs text-muted">{humanize(item.kind)} · {item.mode} · v{item.version}</p></div>{canManage && <Button size="sm" loading={evaluate.loading} onClick={() => void evaluate.run(item.id)}>Evaluate inventory</Button>}</div>)}</div>}</CardBody></Card>
     {canManage && <Card><CardHeader><CardTitle>Create policy</CardTitle></CardHeader><CardBody><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void create.run(); }}><Field label="Name" htmlFor="policy-name"><Input id="policy-name" required value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Control" htmlFor="policy-kind"><select id="policy-kind" className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm" value={kind} onChange={(event) => setKind(event.target.value as SecurityPolicyKind)}>{["ztna", "secure_web_gateway", "firewall", "dlp", "casb", "sspm", "ai_gateway", "ai_guard", "endpoint_isolation", "browser_isolation"].map((value) => <option key={value} value={value}>{humanize(value)}</option>)}</select></Field>{create.errorMessage && <p className="text-sm text-danger">{create.errorMessage}</p>}<Button type="submit" loading={create.loading}>Create baseline policy</Button></form></CardBody></Card>}
+  </div>;
+}
+
+function PrivateAccessWorkspace({ policies, canManage }: { policies: UseApiResourceResult<SecurityPolicy[]>; canManage: boolean }) {
+  const ztnaPolicies = (policies.data ?? []).filter((item) => item.kind === "ztna" && item.status === "active");
+  const [policyId, setPolicyId] = React.useState("");
+  const [form, setForm] = React.useState({
+    identity: "user:alice@example.com",
+    groups: "employees",
+    application: "app:internal-portal",
+    tags: "production",
+    posture: "managed,encrypted,edr_healthy",
+    country: "IN",
+    risk: 10,
+    minutes: 60,
+    mfa: true,
+  });
+  const [decision, setDecision] = React.useState<PrivateAccessDecision | null>(null);
+  React.useEffect(() => {
+    if (!policyId && ztnaPolicies[0]) setPolicyId(ztnaPolicies[0].id);
+  }, [policyId, ztnaPolicies]);
+  const split = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
+  const evaluate = useMutation(() => api.controlPlane.evaluatePrivateAccess({
+    policy_id: policyId,
+    request_id: crypto.randomUUID(),
+    identity_ref: form.identity,
+    groups: split(form.groups),
+    application_ref: form.application,
+    application_tags: split(form.tags),
+    device_posture: split(form.posture),
+    mfa: form.mfa,
+    source_country: form.country.toUpperCase(),
+    identity_risk_score: form.risk,
+    requested_session_minutes: form.minutes,
+  }), { onSuccess: setDecision });
+  if (policies.loading && !policies.data) return <LoadingState label="Loading private access policies…" />;
+  if (policies.error) return <ErrorState message={policies.error} onRetry={policies.refetch} />;
+  return <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+    <Card><CardHeader><CardTitle>Request-time private application access</CardTitle></CardHeader><CardBody>
+      {!canManage ? <EmptyState title="Read-only access" description="An integration manager can evaluate attested identity and device context." /> : !ztnaPolicies.length ? <EmptyState title="No active ZTNA policy" description="Create an active ZTNA policy with explicit identities or groups, device posture, MFA, geography, risk, and session rules." /> : <form className="grid gap-3 md:grid-cols-2" onSubmit={(event) => { event.preventDefault(); void evaluate.run(); }}>
+        <Field label="Policy" htmlFor="access-policy"><select id="access-policy" className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm" value={policyId} onChange={(event) => setPolicyId(event.target.value)}>{ztnaPolicies.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.mode}</option>)}</select></Field>
+        <Field label="Identity" htmlFor="access-identity"><Input id="access-identity" required value={form.identity} onChange={(event) => setForm({ ...form, identity: event.target.value })} /></Field>
+        <Field label="Groups (comma separated)" htmlFor="access-groups"><Input id="access-groups" value={form.groups} onChange={(event) => setForm({ ...form, groups: event.target.value })} /></Field>
+        <Field label="Private application" htmlFor="access-app"><Input id="access-app" required value={form.application} onChange={(event) => setForm({ ...form, application: event.target.value })} /></Field>
+        <Field label="Application tags" htmlFor="access-tags"><Input id="access-tags" value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} /></Field>
+        <Field label="Device posture" htmlFor="access-posture"><Input id="access-posture" value={form.posture} onChange={(event) => setForm({ ...form, posture: event.target.value })} /></Field>
+        <Field label="Country" htmlFor="access-country"><Input id="access-country" minLength={2} maxLength={2} value={form.country} onChange={(event) => setForm({ ...form, country: event.target.value })} /></Field>
+        <Field label="Identity risk (0–100)" htmlFor="access-risk"><Input id="access-risk" type="number" min="0" max="100" value={form.risk} onChange={(event) => setForm({ ...form, risk: Number(event.target.value) })} /></Field>
+        <Field label="Requested session minutes" htmlFor="access-minutes"><Input id="access-minutes" type="number" min="1" max="10080" value={form.minutes} onChange={(event) => setForm({ ...form, minutes: Number(event.target.value) })} /></Field>
+        <label className="flex items-end gap-2 pb-2 text-sm"><input type="checkbox" checked={form.mfa} onChange={(event) => setForm({ ...form, mfa: event.target.checked })} />MFA verified</label>
+        {evaluate.errorMessage && <p role="alert" className="text-sm text-danger md:col-span-2">{evaluate.errorMessage}</p>}
+        <div className="md:col-span-2"><Button type="submit" loading={evaluate.loading}>Evaluate access</Button></div>
+      </form>}
+    </CardBody></Card>
+    <Card><CardHeader><CardTitle>Decision</CardTitle></CardHeader><CardBody>{!decision ? <EmptyState title="No decision yet" description="Evaluate a request to produce an auditable allow or deny decision." /> : <div className="space-y-3"><Badge tone={decision.decision === "allow" && !decision.would_block ? "ok" : decision.enforced ? "danger" : "warn"}>{decision.decision}</Badge><p className="text-sm text-muted">{decision.enforced ? "Enforced" : "Observation only"} · session {decision.session_minutes} minutes</p><div className="space-y-1">{decision.reason_codes.map((code) => <p key={code} className="rounded bg-surface-2 px-3 py-2 text-sm">{humanize(code)}</p>)}</div><p className="font-mono text-xs text-muted">Event {decision.event_id}</p></div>}</CardBody></Card>
   </div>;
 }
 

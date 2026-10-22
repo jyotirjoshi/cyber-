@@ -206,6 +206,8 @@ import type {
   NativeAIPostureAssessment,
   NativeEndpointEventInput,
   NativeEndpointEventResult,
+  PrivateAccessDecision,
+  PrivateAccessEvaluateInput,
   SecurityCanary,
   SecurityEvent,
   SecurityExperienceSummary,
@@ -1000,6 +1002,8 @@ export const api = {
     }) => request<SecurityPolicy>("POST", "/control-plane/policies", { body }),
     evaluatePolicy: (id: string) =>
       request<SecurityPolicyEvaluation[]>("POST", `/control-plane/policies/${id}/evaluate`),
+    evaluatePrivateAccess: (body: PrivateAccessEvaluateInput) =>
+      request<PrivateAccessDecision>("POST", "/control-plane/private-access/evaluate", { body }),
     recommendations: (status?: string) =>
       request<SecurityRecommendation[]>("GET", "/control-plane/recommendations", {
         query: status ? { status } : undefined,

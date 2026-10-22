@@ -237,6 +237,11 @@ class CynuxClient:
     def assessments(self, **filters: Any) -> Iterator[dict[str, Any]]:
         return self.iter_all("/assessments", **filters)
 
+    def evaluate_private_access(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate and audit a native private-application access request."""
+
+        return self.request("POST", "/control-plane/private-access/evaluate", json=payload)
+
     def graphql(
         self,
         query: str,

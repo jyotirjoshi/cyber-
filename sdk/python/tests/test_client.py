@@ -75,3 +75,38 @@ async def test_async_asset_operations_share_inventory_routes():
     finally:
         await client.close()
     assert result["target_asset_id"] == "two"
+
+
+def test_private_access_evaluation_uses_native_control_plane_route():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path, request.read()))
+        return httpx.Response(
+            200,
+            json={
+                "policy_id": "d631db3e-85a4-4e9d-a43d-d98b82608e21",
+                "policy_version": 1,
+                "event_id": "c51ab53f-0901-478e-bb8a-a6d67d56be9e",
+                "decision": "allow",
+                "enforced": True,
+                "would_block": False,
+                "session_minutes": 30,
+                "reason_codes": ["explicit_group_allow"],
+            },
+        )
+
+    client = CynuxClient(
+        "https://cynux.example", "cynux_test", transport=httpx.MockTransport(handler)
+    )
+    result = client.evaluate_private_access(
+        {
+            "policy_id": "d631db3e-85a4-4e9d-a43d-d98b82608e21",
+            "request_id": "access-1",
+            "identity_ref": "user:alice@example.com",
+            "application_ref": "app:payments",
+        }
+    )
+
+    assert result["decision"] == "allow"
+    assert seen[0][0:2] == ("POST", "/api/v1/control-plane/private-access/evaluate")

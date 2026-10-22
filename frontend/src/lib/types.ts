@@ -3024,6 +3024,31 @@ export interface SecurityPolicyEvaluation {
   evaluated_at: IsoDateTime;
 }
 
+export interface PrivateAccessEvaluateInput {
+  policy_id: Uuid;
+  request_id: string;
+  identity_ref: string;
+  groups?: string[];
+  application_ref: string;
+  application_tags?: string[];
+  device_posture?: string[];
+  mfa?: boolean;
+  source_country?: string | null;
+  identity_risk_score?: number;
+  requested_session_minutes?: number;
+}
+
+export interface PrivateAccessDecision {
+  policy_id: Uuid;
+  policy_version: number;
+  event_id: Uuid;
+  decision: "allow" | "deny";
+  enforced: boolean;
+  would_block: boolean;
+  session_minutes: number;
+  reason_codes: string[];
+}
+
 export type SecurityRecommendationStatus =
   | "proposed" | "approved" | "applying" | "applied" | "rejected" | "failed" | "superseded";
 

@@ -98,6 +98,13 @@ class AsyncCynuxClient:
     ) -> dict[str, Any]:
         return await self._rest("POST", "/assets/relationships", json=payload)
 
+    async def evaluate_private_access(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate and audit a native private-application access request."""
+
+        return await self._rest(
+            "POST", "/control-plane/private-access/evaluate", json=payload
+        )
+
     async def import_assets_csv(
         self, content: bytes, *, filename: str = "assets.csv", dry_run: bool = True
     ) -> dict[str, Any]:
