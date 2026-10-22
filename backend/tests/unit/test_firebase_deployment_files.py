@@ -7,7 +7,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -94,4 +93,12 @@ def test_container_context_excludes_secrets_and_frontend_defaults_to_cloud_run_p
     assert "*.env" in dockerignore
     assert "PORT=8080" in dockerfile
     assert "EXPOSE 8080" in dockerfile
+
+
+def test_authenticated_pages_are_never_prerender_cached_across_revisions() -> None:
+    layout = (ROOT / "frontend" / "src" / "app" / "(app)" / "layout.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'export const dynamic = "force-dynamic"' in layout
 

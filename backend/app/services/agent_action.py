@@ -646,7 +646,7 @@ async def execute_approved_action(
         summary = f"{result.total} alerts synced"
         evidence = {
             "outcome": "synced", "source": "github", "record_count": int(result.total),
-            "missing_source_records": int(result.missing_source_records),
+            "missing_source_records": int(getattr(result, "missing_source_records", 0)),
         }
     elif proposed.action == "sync_gitlab_alerts":
         result = await external_alert_service.sync_gitlab_alerts(
@@ -860,8 +860,8 @@ async def execute_approved_action(
         evidence = {
             "outcome": "created",
             "resource": {"type": f"{provider}_ticket", "id": str(ticket.external_key)},
-            "ticket_link_id": str(ticket.id),
-            "ticket_url": ticket.url,
+            "ticket_link_id": str(getattr(ticket, "id", "")),
+            "ticket_url": getattr(ticket, "url", None),
         }
         evidence["canonical_finding_id" if "canonical_finding_id" in payload else "finding_id"] = str(
             ticket_target

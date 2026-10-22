@@ -36,7 +36,7 @@ from fastapi import APIRouter, Query, status
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import DbSession, PaginationDep, PrincipalDep, RedisDep, SettingsDep
+from app.api.deps import DbSession, PrincipalDep, RedisDep, SettingsDep
 from app.api.v1.projections import assessment_detail_out, assessment_out
 from app.core.errors import InvalidConfigurationError, ResourceNotFoundError
 from app.db.enums import Permission
@@ -49,6 +49,7 @@ from app.schemas.assessment import (
     AssessmentCreateIn,
     AssessmentDetailOut,
     AssessmentFilter,
+    AssessmentListQuery,
     AssessmentOut,
     CancelIn,
     EngagementChecklistUpdateIn,
@@ -58,7 +59,7 @@ from app.schemas.assessment import (
     ScanProfileOut,
     WorkerMetricsOut,
 )
-from app.schemas.common import Page
+from app.schemas.common import Page, PaginationParams, SortParams
 from app.services import assessment as assessment_service
 from app.services import audit as audit_service
 from app.services import recurring_scan as recurring_scan_service
@@ -276,12 +277,19 @@ def _seed_agent_run(
 async def list_assessments(
     principal: PrincipalDep,
     session: DbSession,
-    pagination: PaginationDep,
-    filters: Annotated[AssessmentFilter, Query()],
+    query: Annotated[AssessmentListQuery, Query()],
 ) -> Page[AssessmentOut]:
     """A page of the organization's assessments, newest first (FR-037)."""
+    pagination = PaginationParams(limit=query.limit, offset=query.offset)
+    filters = AssessmentFilter.model_validate(
+        query.model_dump(include=set(AssessmentFilter.model_fields))
+    )
     rows, total = await assessment_service.list_assessments(
-        session, principal, filters=filters, pagination=pagination
+        session,
+        principal,
+        filters=filters,
+        pagination=pagination,
+        sorting=SortParams(sort_by=query.sort_by, sort_dir=query.sort_dir),
     )
     return Page.build(
         [assessment_out(row) for row in rows],

@@ -293,6 +293,13 @@ class AssetFilter(BaseModel):
         return value
 
 
+class AssetListQuery(AssetFilter):
+    """One query model prevents pagination keys being rejected as filter extras."""
+
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
 class CmdbImportOut(BaseModel):
     dry_run: bool
     matched: int = Field(ge=0)
@@ -329,6 +336,7 @@ __all__ = [
     "AssetCriticalityIn",
     "AssetCsvImportOut",
     "AssetFilter",
+    "AssetListQuery",
     "AssetMergeIn",
     "AssetMergeOut",
     "AssetOut",

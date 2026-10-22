@@ -137,6 +137,10 @@ async def create_demo_workspace(
         assets_in_scope=3,
     )
     session.add(assessment)
+    # These rows are linked by scalar foreign-key ids rather than ORM relationships.
+    # Flush each dependency tier explicitly so SQLAlchemy cannot schedule children ahead
+    # of their parents when the whole synthetic workspace is inserted in one transaction.
+    await session.flush()
 
     asset_specs = [
         ("shop.cynux-demo.example", "domain", "critical", True, 0.93, ["nginx", "Node.js"]),
@@ -171,7 +175,9 @@ async def create_demo_workspace(
         session.add(asset)
         assets.append(asset)
 
-    finding_specs = [
+    await session.flush()
+
+    finding_specs: list[tuple[str, Asset, str, str, list[str], float]] = [
         (
             "web",
             assets[0],
@@ -273,7 +279,7 @@ async def create_demo_workspace(
     )
     session.add(case)
 
-    for kind, name, approved, risk in [
+    for kind, name, approved, risk_score_text in [
         ("ai_application", "Unapproved support copilot", False, "82.00"),
         ("ai_model", "Approved enterprise reasoning model", True, "18.00"),
         ("ai_agent", "Payments remediation agent", True, "35.00"),
@@ -294,7 +300,7 @@ async def create_demo_workspace(
                 internet_exposed=kind == "ai_application",
                 approved=approved,
                 posture_status="at_risk" if not approved else "healthy",
-                risk_score=Decimal(risk),
+                risk_score=Decimal(risk_score_text),
                 sensitivity="confidential",
                 classifications=["synthetic_demo"],
                 permissions={},

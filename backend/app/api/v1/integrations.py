@@ -318,7 +318,7 @@ async def sync_sonarqube_alerts(
     return IntegrationSyncOut(
         kind=IntegrationKind.SONARQUBE,
         alerts_staged=result.total,
-        absence_candidates=result.absence_candidates,
+        absence_candidates=int(getattr(result, "absence_candidates", 0)),
     )
 
 

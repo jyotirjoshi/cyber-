@@ -1905,8 +1905,7 @@ async def _stage_normalized_alerts(
         # RETURNING includes conflict-updated state; refresh identity-map objects
         # too if this session already loaded a row earlier in the workflow.
         result = await session.execute(
-            statement.returning(ExternalSecurityAlert),
-            execution_options={"populate_existing": True},
+            statement.returning(ExternalSecurityAlert).execution_options(populate_existing=True)
         )
         persisted.extend(result.scalars().all())
     # Reconcile lifecycle once for the complete snapshot. Projecting each chunk

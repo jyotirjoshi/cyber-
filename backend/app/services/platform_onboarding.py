@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
@@ -235,9 +235,12 @@ async def get_onboarding(session: AsyncSession, principal: Principal) -> Platfor
     org_id = principal.organization_id
     member_count = await _count(
         session,
-        tenant_select(Membership, org_id)
-        .with_only_columns(func.count())
-        .where(Membership.accepted_at.is_not(None)),
+        select(func.count())
+        .select_from(Membership)
+        .where(
+            Membership.organization_id == org_id,
+            Membership.accepted_at.is_not(None),
+        ),
     )
     verified_integrations = await _count(
         session,

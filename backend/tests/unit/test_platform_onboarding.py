@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
+from types import SimpleNamespace
+
+import pytest
+
+from app.db.enums import Role
+from app.services.context import Principal
 
 
 def test_onboarding_progress_uses_real_completion_and_one_next_action() -> None:
@@ -68,3 +75,34 @@ def test_platform_onboarding_route_is_mounted() -> None:
     from app.api.v1.router import api_router
 
     assert "/platform/onboarding" in {route.path for route in api_router.routes}
+
+
+@pytest.mark.asyncio
+async def test_onboarding_counts_memberships_without_tenant_repository(monkeypatch) -> None:
+    """Membership has an organization FK, but intentionally is not a TenantMixin model."""
+    from app.services import platform_onboarding
+
+    async def readiness(*_args, **_kwargs):
+        return SimpleNamespace(checks=[])
+
+    class Session:
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        async def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+    monkeypatch.setattr(platform_onboarding, "get_readiness", readiness)
+    session = Session()
+    principal = Principal(
+        user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER
+    )
+
+    result = await platform_onboarding.get_onboarding(session, principal)  # type: ignore[arg-type]
+
+    assert result.total == 8
+    assert len(session.statements) == 8
+    membership_sql = str(session.statements[0])
+    assert "memberships.organization_id" in membership_sql
+    assert "memberships.accepted_at IS NOT NULL" in membership_sql

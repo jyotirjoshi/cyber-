@@ -57,7 +57,7 @@ from app.db.models.scanner import ScannerJob
 from app.db.repository import TenantRepository, tenant_select
 from app.scanners.openapi_scope import OpenAPIScopeError, normalize_openapi_spec
 from app.schemas.assessment import AssessmentCreateIn, AssessmentFilter, CancelIn
-from app.schemas.common import PaginationParams
+from app.schemas.common import PaginationParams, SortParams
 from app.services import audit as audit_service
 from app.services.canonical_ingest import assessment_finding_counts
 from app.services.context import Principal
@@ -355,11 +355,13 @@ async def list_assessments(
     *,
     filters: AssessmentFilter | None = None,
     pagination: PaginationParams | None = None,
+    sorting: SortParams | None = None,
 ) -> tuple[Sequence[Assessment], int]:
     """Newest first. Returns ``(rows, total)`` so the caller can build a ``Page``."""
     principal.require(Permission.ASSESSMENT_READ)
     filters = filters or AssessmentFilter()
     page = pagination or PaginationParams()
+    sort = sorting or SortParams(sort_by="created_at", sort_dir="desc")
 
     conditions: list[Any] = []
     if filters.status is not None:
@@ -394,12 +396,20 @@ async def list_assessments(
             )
         ).scalar_one()
     )
+    sort_columns = {
+        "created_at": Assessment.created_at,
+        "reference": Assessment.reference,
+        "title": Assessment.title,
+        "status": Assessment.status,
+    }
+    sort_column = sort_columns.get(sort.sort_by or "created_at", Assessment.created_at)
+    order = sort_column.asc() if sort.sort_dir == "asc" else sort_column.desc()
     stmt = (
         tenant_select(Assessment, principal.organization_id, *_LIST_OPTIONS)
         .where(*conditions)
         # ``id`` breaks ties: two assessments created in the same transaction share
         # ``created_at``, and an unstable order makes paging skip rows.
-        .order_by(Assessment.created_at.desc(), Assessment.id.desc())
+        .order_by(order, Assessment.id.desc())
         .limit(page.limit)
         .offset(page.offset)
     )

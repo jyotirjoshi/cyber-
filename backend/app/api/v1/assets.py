@@ -36,7 +36,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
 
-from app.api.deps import DbSession, PaginationDep, PrincipalDep
+from app.api.deps import DbSession, PrincipalDep
 from app.core.errors import InvalidConfigurationError
 from app.schemas.asset import (
     AssetBulkUpdateIn,
@@ -45,6 +45,7 @@ from app.schemas.asset import (
     AssetCriticalityIn,
     AssetCsvImportOut,
     AssetFilter,
+    AssetListQuery,
     AssetMergeIn,
     AssetMergeOut,
     AssetOut,
@@ -54,7 +55,7 @@ from app.schemas.asset import (
     CmdbImportOut,
 )
 from app.schemas.asset_change import AssetChangePageOut
-from app.schemas.common import Page
+from app.schemas.common import Page, PaginationParams
 from app.schemas.policy_gate import PolicyGateOut
 from app.services import asset as asset_service
 from app.services import asset_change as asset_change_service
@@ -198,14 +199,17 @@ async def import_cmdb_assets(
 async def list_assets(
     principal: PrincipalDep,
     session: DbSession,
-    pagination: PaginationDep,
-    filters: Annotated[AssetFilter, Query()],
+    query: Annotated[AssetListQuery, Query()],
 ) -> Page[AssetOut]:
     """A page of the organization's inventory, highest risk first (FR-010, ASSET_READ).
 
     The filter set is ``extra="forbid"``, so an unrecognized query parameter is a 422 rather
     than a silently-ignored filter that returns the wrong assets.
     """
+    pagination = PaginationParams(limit=query.limit, offset=query.offset)
+    filters = AssetFilter.model_validate(
+        query.model_dump(include=set(AssetFilter.model_fields))
+    )
     rows, total = await asset_service.list_assets(
         session, principal, filters=filters, pagination=pagination
     )

@@ -368,6 +368,15 @@ class AssessmentFilter(BaseModel):
     q: str | None = Field(default=None, max_length=200)
 
 
+class AssessmentListQuery(AssessmentFilter):
+    """Validated filtering, paging and ordering for the assessment collection."""
+
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+    sort_by: Literal["created_at", "reference", "title", "status"] = "created_at"
+    sort_dir: Literal["asc", "desc"] = "desc"
+
+
 __all__ = [
     "MAX_TARGETS",
     "ApprovalOut",
@@ -375,6 +384,7 @@ __all__ = [
     "AssessmentCreateIn",
     "AssessmentDetailOut",
     "AssessmentFilter",
+    "AssessmentListQuery",
     "AssessmentOut",
     "AuthorizationIn",
     "CancelIn",
