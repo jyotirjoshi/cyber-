@@ -717,6 +717,21 @@ def _count(body: dict[str, Any], *keys: str) -> int:
     return 0
 
 
+def _statistics_total(value: object) -> int:
+    """Read the aggregate total emitted by current DefectDojo statistics blocks."""
+    if not isinstance(value, dict):
+        return 0
+    aggregate = value.get("total")
+    if isinstance(aggregate, dict):
+        aggregate = aggregate.get("total")
+    if isinstance(aggregate, bool):
+        return 0
+    try:
+        return max(0, int(aggregate))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _import_result(body: dict[str, Any], *, engagement_id: int, scan_type: str) -> DDImportResult:
     test_id = body.get("test") or body.get("test_id")
     if test_id is None:
@@ -727,14 +742,30 @@ def _import_result(body: dict[str, Any], *, engagement_id: int, scan_type: str) 
             "DefectDojo accepted the import but returned no test id.",
             context={"engagement_id": engagement_id, "scan_type": scan_type},
         )
+    created = _count(body, "findings_created", "new_findings")
+    closed = _count(body, "findings_closed", "closed_findings")
+    reactivated = _count(body, "findings_reactivated", "reactivated_findings")
+    untouched = _count(body, "findings_untouched", "untouched_findings")
+    statistics = body.get("statistics")
+    if isinstance(statistics, dict):
+        delta = statistics.get("delta")
+        if isinstance(delta, dict):
+            created = created or _statistics_total(delta.get("created"))
+            closed = closed or _statistics_total(delta.get("closed"))
+            reactivated = reactivated or _statistics_total(delta.get("reactivated"))
+            untouched = untouched or _statistics_total(delta.get("untouched"))
+        else:
+            # A first import has no "before" or "delta" block. Every finding in the
+            # resulting new test was created by this import.
+            created = created or _statistics_total(statistics.get("after"))
     return DDImportResult(
         test_id=int(test_id),
         engagement_id=engagement_id,
         scan_type=scan_type,
-        findings_created=_count(body, "findings_created", "new_findings"),
-        findings_closed=_count(body, "findings_closed", "closed_findings"),
-        findings_reactivated=_count(body, "findings_reactivated", "reactivated_findings"),
-        findings_untouched=_count(body, "findings_untouched", "untouched_findings"),
+        findings_created=created,
+        findings_closed=closed,
+        findings_reactivated=reactivated,
+        findings_untouched=untouched,
     )
 
 

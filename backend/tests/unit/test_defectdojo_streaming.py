@@ -8,6 +8,48 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_import_receipt_reads_current_defectdojo_statistics_shape() -> None:
+    from app.integrations.defectdojo import _import_result
+
+    result = _import_result(
+        {
+            "test": 41,
+            "statistics": {
+                "after": {"total": {"total": 3, "active": 3, "is_mitigated": 0}}
+            },
+        },
+        engagement_id=12,
+        scan_type="Nmap Scan",
+    )
+
+    assert result.findings_created == 3
+
+
+def test_reimport_receipt_reads_current_defectdojo_delta_shape() -> None:
+    from app.integrations.defectdojo import _import_result
+
+    result = _import_result(
+        {
+            "test": 42,
+            "statistics": {
+                "delta": {
+                    "created": {"total": {"total": 2}},
+                    "closed": {"total": {"total": 4}},
+                    "reactivated": {"total": {"total": 1}},
+                    "untouched": {"total": {"total": 7}},
+                }
+            },
+        },
+        engagement_id=12,
+        scan_type="Nmap Scan",
+    )
+
+    assert result.findings_created == 2
+    assert result.findings_closed == 4
+    assert result.findings_reactivated == 1
+    assert result.findings_untouched == 7
+
+
 @pytest.mark.asyncio
 async def test_defectdojo_pages_stream_past_legacy_2000_finding_cap() -> None:
     from app.integrations.defectdojo import DefectDojoClient

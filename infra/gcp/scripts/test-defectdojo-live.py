@@ -50,7 +50,8 @@ async def main() -> None:
     suffix = uuid.uuid4().hex[:12]
     today = dt.date.today().isoformat()
     try:
-        health = await client._require().get_json("/api/v2/users/", params={"limit": 1})
+        transport = client._require()
+        health = await transport.get_json("/api/v2/users/", params={"limit": 1})
         results["authenticated"] = isinstance(health, dict) and "results" in health
 
         product = await client.ensure_product(
@@ -96,6 +97,7 @@ async def main() -> None:
             tags=["cynux", "acceptance-test"],
         )
         results["reimport_test_id_matches"] = reimported.test_id == imported.test_id
+        results["reimport_closed"] = reimported.findings_closed
         after_findings = await client.list_findings(test_id=imported.test_id)
         results["active_after_reimport"] = sum(item.active for item in after_findings)
 
@@ -114,7 +116,11 @@ async def main() -> None:
         and results.get("product_created")
         and results.get("engagement_created")
         and isinstance(results.get("import_test_id"), int)
+        and results.get("import_created") == 1
+        and results.get("findings_read") == 1
         and results.get("reimport_test_id_matches")
+        and results.get("reimport_closed") == 1
+        and results.get("active_after_reimport") == 0
         and results.get("engagement_closed")
         and results.get("cleanup_status") in {200, 202, 204}
     )
