@@ -149,6 +149,9 @@ class OpRecorder:
         self.other.append(f"drop_constraint:{table_name}:{name}")
         self.events.append(f"drop_constraint:{table_name}:{name}")
 
+    def alter_column(self, table_name: str, column_name: str, **kwargs: Any) -> None:
+        self.other.append(f"alter_column:{table_name}:{column_name}")
+
     # -- misc ---------------------------------------------------------------
 
     def f(self, name: str) -> str:
@@ -197,6 +200,9 @@ class MetadataOp:
         column = self.metadata.tables[table_name].c[column_name]
         if "nullable" in kwargs:
             column.nullable = kwargs["nullable"]
+        if "server_default" in kwargs:
+            default = kwargs["server_default"]
+            column.server_default = sa.DefaultClause(default) if default is not None else None
 
     def create_unique_constraint(
         self, name: str, table_name: str, columns: list[str], **kwargs: Any
