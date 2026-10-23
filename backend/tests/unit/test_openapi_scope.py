@@ -256,7 +256,7 @@ def test_zap_authenticated_report_does_not_archive_bearer_token(tmp_path) -> Non
         timeout_seconds=60,
         options={"api_spec": _spec(), "api_auth_token": Secret(token)},
     )
-    report = tmp_path / "zap.json"
+    report = tmp_path / "zap.xml"
     report.write_text('{"evidence":"Authorization: Bearer ' + token + '"}', encoding="utf-8")
     artifacts = ZapAdapter().collect(request)
     assert len(artifacts) == 1
@@ -330,7 +330,7 @@ async def test_zap_api_scan_produces_importable_report_in_mock_container(tmp_pat
         def run(self, **kwargs):
             commands.append(kwargs["command"])
             environments.append(kwargs["environment"])
-            (tmp_path / "zap.json").write_text('{"site":[]}', encoding="utf-8")
+            (tmp_path / "zap.xml").write_text("<OWASPZAPReport/>", encoding="utf-8")
             return Container()
 
     async def fake_docker(self):
@@ -351,6 +351,8 @@ async def test_zap_api_scan_produces_importable_report_in_mock_container(tmp_pat
     assert result.exit_code == 0
     assert len(result.importable_artifacts) == 1
     assert commands[0][:2] == ["zap-api-scan.py", "-t"]
+    assert "-x" in commands[0]
+    assert "-J" not in commands[0]
     assert environments[0]["CYNUX_ZAP_API_TOKEN"] == token
     assert token not in repr(commands)
     assert token not in repr(result)

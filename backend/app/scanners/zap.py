@@ -12,8 +12,9 @@ Three implementation details that are not obvious and each caused a wrong first 
     concatenating a hard-coded ``/zap/wrk/`` onto the ``-J`` filename, so an absolute path
     produces ``/zap/wrk//work/out/zap.json`` and the report never reaches the host. The
     workdir is therefore mounted where ZAP already looks, which
-    :data:`~app.scanners.sandbox.ALLOWED_WORK_MOUNTS` permits explicitly, and ``-J`` gets a
-    bare filename. The report lands in the workdir root rather than ``out/``.
+    :data:`~app.scanners.sandbox.ALLOWED_WORK_MOUNTS` permits explicitly, and ``-x`` gets a
+    bare filename. The XML report lands in the workdir root rather than ``out/`` and matches
+    DefectDojo's ``ZAP Scan`` parser contract.
 *   **The image has no entrypoint.**  Unlike the Nmap and Nuclei images, ``zaproxy/zap-stable``
     starts a shell, so the argv must name the script.
 *   **uid 1000, not 65534.**  The image pre-creates ``/home/zap`` owned by its ``zap`` user, and
@@ -23,7 +24,7 @@ Three implementation details that are not obvious and each caused a wrong first 
 
 Exit codes are significant: baseline returns 1 for alerts configured as FAIL, 2 for
 WARN-only alerts, and 3 for a scan failure. A scan is complete only when it also produced
-its JSON report.
+its XML report.
 """
 
 from __future__ import annotations
@@ -95,7 +96,7 @@ class ZapAdapter(ScannerAdapter):
     requires_output = True
 
     SCRIPT = "zap-baseline.py"
-    REPORT_NAME = "zap.json"
+    REPORT_NAME = "zap.xml"
     AUTH_HOOK_NAME = "zap-auth-hook.py"
     AUTH_SENDER_NAME = "zap-auth-sender.js"
 
@@ -172,7 +173,7 @@ function responseReceived(msg, initiator, helper) {{}}
         if request.option("api_spec") is not None:
             argv = (
                 "zap-api-scan.py", "-t", self.container_path(SPEC_FILENAME),
-                "-f", "openapi", "-J", self.REPORT_NAME, "-I",
+                "-f", "openapi", "-x", self.REPORT_NAME, "-I",
             )
             if request.option("api_auth_token") is not None:
                 return (*argv, f"--hook={self.container_path(self.AUTH_HOOK_NAME)}")
@@ -192,7 +193,7 @@ function responseReceived(msg, initiator, helper) {{}}
             "-t",
             target,
             #: Bare filename: ZAP resolves it against the mount. See the module docstring.
-            "-J",
+            "-x",
             self.REPORT_NAME,
             #: Do not fail the run on warnings -- reported findings are the point.
             "-I",

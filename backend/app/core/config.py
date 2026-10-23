@@ -206,7 +206,7 @@ class ScannerSettings(BaseSettings):
 
     image_reconftw: str = "six2dez/reconftw:main"
     image_nmap: str = "instrumentisto/nmap:7.95"
-    image_nuclei: str = "projectdiscovery/nuclei:v3.3.7"
+    image_nuclei: str = "projectdiscovery/nuclei:v3.11.1"
     image_zap: str = "zaproxy/zap-stable:2.15.0"
     image_trivy: str = "aquasec/trivy:0.74.0"
     image_semgrep: str = "semgrep/semgrep:1.159.0"

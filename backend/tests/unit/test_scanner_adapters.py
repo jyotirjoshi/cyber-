@@ -62,8 +62,8 @@ def test_zap_job_completion_requires_success_code_and_report(
         (
             ArtifactFile(
                 kind=ArtifactKind.RAW_OUTPUT,
-                filename="zap.json",
-                path=tmp_path / "zap.json",
+                filename="zap.xml",
+                path=tmp_path / "zap.xml",
                 size_bytes=42,
                 sha256="0" * 64,
                 defectdojo_scan_type="ZAP Scan",
@@ -254,6 +254,22 @@ def test_recon_refuses_an_unreasonable_target_count(workdir: Path) -> None:
         adapter.validate(
             make_request(ScannerName.RECONFTW, workdir, *[f"h{i}.example.com" for i in range(51)])
         )
+
+
+def test_zap_emits_the_xml_contract_required_by_defectdojo(workdir: Path) -> None:
+    adapter = ZapAdapter()
+    argv = adapter.build_argv(
+        make_request(ScannerName.ZAP, workdir, "https://example.com")
+    )
+
+    assert "-x" in argv
+    assert argv[argv.index("-x") + 1] == "zap.xml"
+    assert "-J" not in argv
+    assert adapter.REPORT_NAME == "zap.xml"
+
+
+def test_nuclei_default_matches_the_production_worker_image() -> None:
+    assert ScannerSettings(_env_file=None).image_nuclei == "projectdiscovery/nuclei:v3.11.1"
 
 
 # ---------------------------------------------------------------------------
