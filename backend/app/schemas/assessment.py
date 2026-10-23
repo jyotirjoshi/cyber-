@@ -20,7 +20,7 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from app.db.enums import (
     ApprovalDecision,
@@ -209,6 +209,28 @@ class PlanStepOut(BaseModel):
     rationale: str | None = None
     requires_approval: bool = False
     status: StepStatus = StepStatus.PENDING
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_demo_step(cls, value: Any) -> Any:
+        """Project the one demo-plan shape emitted before the public contract was enforced."""
+        if (
+            isinstance(value, dict)
+            and value.get("step") == "synthetic_demo"
+            and value.get("status") == "completed"
+            and value.get("external_execution") is False
+            and not {"index", "stage", "title"}.intersection(value)
+        ):
+            return {
+                "index": 0,
+                "stage": "done",
+                "title": "Synthetic demo workspace provisioned",
+                "tool": None,
+                "rationale": "Populate a coherent sample company without external execution.",
+                "requires_approval": False,
+                "status": "completed",
+            }
+        return value
 
 
 class StageOut(BaseModel):

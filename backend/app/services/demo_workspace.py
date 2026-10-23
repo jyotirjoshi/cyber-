@@ -128,7 +128,17 @@ async def create_demo_workspace(
         started_at=now,
         completed_at=now,
         request_interpretation={"synthetic_demo": True, "version": _VERSION},
-        plan=[{"step": "synthetic_demo", "status": "completed", "external_execution": False}],
+        plan=[
+            {
+                "index": 0,
+                "stage": "done",
+                "title": "Synthetic demo workspace provisioned",
+                "tool": None,
+                "rationale": "Populate a coherent sample company without external execution.",
+                "requires_approval": False,
+                "status": "completed",
+            }
+        ],
         findings_total=3,
         findings_critical=1,
         findings_high=1,
