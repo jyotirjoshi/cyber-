@@ -35,6 +35,7 @@ from sqlalchemy import Select, and_, case, exists, func, literal, or_, select, t
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.v1.projections import assessment_out
 from app.core.config import Settings
 from app.db.enums import (
     AssessmentStatus,
@@ -354,11 +355,19 @@ async def _recent_assessments(
 ) -> Sequence[Assessment]:
     stmt = (
         tenant_select(Assessment, organization_id)
-        .options(selectinload(Assessment.created_by))
+        .options(
+            selectinload(Assessment.targets),
+            selectinload(Assessment.created_by),
+        )
         .order_by(Assessment.created_at.desc())
         .limit(_RECENT_ASSESSMENTS)
     )
     return (await session.execute(stmt)).scalars().all()
+
+
+def _project_recent_assessments(rows: Sequence[Assessment]) -> list[AssessmentOut]:
+    """Use the canonical assessment wire projection for relationship-backed fields."""
+    return [assessment_out(row) for row in rows]
 
 
 async def _top_findings(
@@ -492,9 +501,7 @@ async def build_dashboard(
         assets_critical=assets_critical,
         kev_findings=kev_findings,
         mean_time_to_remediate_days=mttr,
-        recent_assessments=[
-            AssessmentOut.model_validate(a) for a in await _recent_assessments(session, org)
-        ],
+        recent_assessments=_project_recent_assessments(await _recent_assessments(session, org)),
         top_findings=await _top_findings(session, org),
         activity=await _activity(session, org),
         integration_health=list(health),

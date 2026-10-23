@@ -9,7 +9,9 @@ from typing import Any
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.db.models.assessment import Assessment, AssessmentTarget
 from app.db.models.audit import AuditEvent
+from app.db.models.identity import User
 
 
 class _Result:
@@ -98,3 +100,70 @@ async def test_dashboard_activity_names_external_alert_triage() -> None:
         )
     )
     assert "'external_alert.triage'" in sql
+
+
+def test_dashboard_projects_recent_assessment_relationships() -> None:
+    """A demo assessment must render instead of exposing ORM relationships to Pydantic."""
+    from app.services import dashboard
+
+    org_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    now = dt.datetime(2026, 10, 23, tzinfo=dt.UTC)
+    user = User(
+        id=user_id,
+        email="owner@example.com",
+        password_hash="test-only",
+        is_active=True,
+        is_email_verified=True,
+        created_at=now,
+        updated_at=now,
+    )
+    target = AssessmentTarget(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        assessment_id=uuid.uuid4(),
+        raw_value="https://shop.example.com",
+        canonical_value="https://shop.example.com/",
+        target_type="url",
+        host="shop.example.com",
+        port=443,
+        host_count=1,
+        target_metadata={},
+        created_at=now,
+        updated_at=now,
+    )
+    assessment = Assessment(
+        id=target.assessment_id,
+        organization_id=org_id,
+        reference=1,
+        created_by_id=user_id,
+        title="Synthetic storefront review",
+        scope="external",
+        depth="standard",
+        engagement_type="web_application",
+        execution_mode="supervised",
+        status="COMPLETED",
+        current_stage="done",
+        progress_percent=100,
+        findings_total=3,
+        findings_critical=1,
+        findings_high=1,
+        findings_medium=1,
+        findings_low=0,
+        findings_info=0,
+        assets_discovered=3,
+        assets_in_scope=3,
+        degradations=[],
+        plan=[],
+        request_interpretation={},
+        extra_data={},
+        created_at=now,
+        updated_at=now,
+    )
+    assessment.created_by = user
+    assessment.targets = [target]
+
+    result = dashboard._project_recent_assessments([assessment])
+
+    assert result[0].created_by == "owner@example.com"
+    assert result[0].targets[0].host == "shop.example.com"
