@@ -477,7 +477,7 @@ async def transition(
         "assessment.completed"
         if to is AssessmentStatus.COMPLETED
         else "assessment.started"
-        if current is AssessmentStatus.DRAFT and to is AssessmentStatus.PLANNING
+        if current is AssessmentStatus.CREATED and to is AssessmentStatus.PLANNING
         else None
     )
     if trigger is not None:
