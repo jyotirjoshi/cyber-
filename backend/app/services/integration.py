@@ -147,6 +147,10 @@ _SECRET_KEY_MARKERS = (
     "passphrase",
 )
 
+# Public numeric/runtime settings whose names describe token *budgets*, not bearer
+# credentials. They remain subject to the per-kind config allowlist and value validation.
+_PUBLIC_TOKEN_CONFIG_KEYS = frozenset({"max_output_tokens"})
+
 
 @dataclass(frozen=True, slots=True)
 class _KindSpec:
@@ -853,7 +857,10 @@ def _hint(plaintext: str) -> str:
 
 def _reject_secret_shaped_config(config: Mapping[str, Any]) -> None:
     offenders = sorted(
-        key for key in config if any(marker in key.lower() for marker in _SECRET_KEY_MARKERS)
+        key
+        for key in config
+        if key not in _PUBLIC_TOKEN_CONFIG_KEYS
+        and any(marker in key.lower() for marker in _SECRET_KEY_MARKERS)
     )
     if offenders:
         raise InvalidConfigurationError(

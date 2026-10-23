@@ -14,6 +14,17 @@ from app.db.enums import IntegrationKind, Role
 from app.services.context import Principal
 
 
+def test_llm_output_token_limit_is_not_misclassified_as_a_credential() -> None:
+    """A supported numeric token limit must remain valid while secret token keys stay blocked."""
+    from app.core.errors import InvalidConfigurationError
+    from app.services.integration import _reject_secret_shaped_config
+
+    _reject_secret_shaped_config({"max_output_tokens": 1200})
+
+    with pytest.raises(InvalidConfigurationError):
+        _reject_secret_shaped_config({"api_token": "must-not-be-public"})
+
+
 @pytest.mark.asyncio
 async def test_kind_lookup_prefers_enabled_connection_over_older_disabled_one() -> None:
     from app.services.integration import find_integration
