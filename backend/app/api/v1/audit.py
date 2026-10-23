@@ -21,9 +21,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Response
 
-from app.api.deps import DbSession, PaginationDep, PrincipalDep
-from app.schemas.audit import AuditEventOut, AuditFilter
-from app.schemas.common import Page
+from app.api.deps import DbSession, PrincipalDep
+from app.schemas.audit import AuditEventOut, AuditFilter, AuditListQuery
+from app.schemas.common import Page, PaginationParams
 from app.services import audit as audit_service
 
 router = APIRouter(prefix="/audit", tags=["audit"])
@@ -33,14 +33,17 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 async def list_audit_events(
     principal: PrincipalDep,
     session: DbSession,
-    pagination: PaginationDep,
-    filters: Annotated[AuditFilter, Query()],
+    query: Annotated[AuditListQuery, Query()],
 ) -> Page[AuditEventOut]:
     """A page of audit events, newest first (FR-032).
 
     Filter by actor, action prefix (``assessment.`` selects the whole group), resource,
     outcome, a time window, or a free-text term matched against actor email, action and reason.
     """
+    pagination = PaginationParams(limit=query.limit, offset=query.offset)
+    filters = AuditFilter.model_validate(
+        query.model_dump(include=set(AuditFilter.model_fields))
+    )
     rows, total = await audit_service.list_audit_events(
         session, principal, filters=filters, pagination=pagination
     )

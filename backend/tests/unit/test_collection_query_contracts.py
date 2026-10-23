@@ -82,3 +82,39 @@ def test_fastapi_collection_contract_accepts_frontend_queries(
 
     assert response.status_code == 200, response.text
     assert response.json()["meta"]["limit"] == expected[0]
+
+
+def test_audit_collection_accepts_pagination_alongside_strict_filters(
+    monkeypatch,
+) -> None:
+    from app.api.v1 import audit
+
+    principal = Principal(
+        user_id=uuid.uuid4(), organization_id=uuid.uuid4(), role=Role.OWNER
+    )
+
+    async def database():
+        yield object()
+
+    async def empty_page(_session, _principal, *, filters, pagination):
+        assert (pagination.limit, pagination.offset) == (50, 0)
+        assert filters.action == "asset.update"
+        return [], 0
+
+    monkeypatch.setattr(audit.audit_service, "list_audit_events", empty_page)
+    app = FastAPI()
+    app.include_router(audit.router, prefix="/api/v1")
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.dependency_overrides[get_db] = database
+
+    response = TestClient(app).get(
+        "/api/v1/audit?limit=50&offset=0&action=asset.update"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["meta"] == {
+        "total": 0,
+        "limit": 50,
+        "offset": 0,
+        "has_more": False,
+    }

@@ -61,4 +61,16 @@ class AuditFilter(BaseModel):
     q: str | None = Field(default=None, max_length=200)
 
 
-__all__ = ["AuditEventOut", "AuditFilter"]
+class AuditListQuery(AuditFilter):
+    """The audit feed's complete query contract.
+
+    FastAPI query-model validation sees the whole query string. Keeping pagination in
+    this model prevents strict filter validation from rejecting the feed's own
+    ``limit`` and ``offset`` parameters.
+    """
+
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+__all__ = ["AuditEventOut", "AuditFilter", "AuditListQuery"]
