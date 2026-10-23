@@ -28,6 +28,7 @@ from app.core.config import ScannerSettings
 from app.core.errors import UnsafeScannerInvocationError
 from app.db.enums import ArtifactKind, JobStatus, ScannerName
 from app.scanners.base import ArtifactFile, ScannerAdapter, ScannerRequest, ScannerResult, tail
+from app.scanners.nuclei import NucleiAdapter
 from app.scanners.reconftw import FORBIDDEN_FLAGS, ReconFTWAdapter, hardening_config
 from app.scanners.registry import ALL_ADAPTERS, PRE_APPROVAL_SCANNERS
 from app.scanners.sandbox import (
@@ -269,7 +270,19 @@ def test_zap_emits_the_xml_contract_required_by_defectdojo(workdir: Path) -> Non
 
 
 def test_nuclei_default_matches_the_production_worker_image() -> None:
-    assert ScannerSettings(_env_file=None).image_nuclei == "projectdiscovery/nuclei:v3.11.1"
+    assert ScannerSettings(_env_file=None).image_nuclei == (
+        "asia-south1-docker.pkg.dev/cynux-security-prod/cynux/"
+        "nuclei:3.11.1-templates-10.5.0"
+    )
+
+
+def test_nuclei_uses_the_immutable_bundled_template_catalog(workdir: Path) -> None:
+    argv = NucleiAdapter().build_argv(
+        make_request(ScannerName.NUCLEI, workdir, "https://example.com")
+    )
+
+    assert argv[argv.index("-templates") + 1] == "/opt/nuclei-templates"
+    assert "-disable-update-check" in argv
 
 
 # ---------------------------------------------------------------------------

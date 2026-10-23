@@ -55,6 +55,7 @@ EXCLUDED_TAGS = "dos,intrusive,fuzz"
 #: a WAF and enough to hurt a small application. The agent may lower this but not raise it.
 DEFAULT_RATE_LIMIT = 50
 MAX_RATE_LIMIT = 150
+TEMPLATE_DIRECTORY = "/opt/nuclei-templates"
 
 
 class NucleiAdapter(ScannerAdapter):
@@ -119,6 +120,10 @@ class NucleiAdapter(ScannerAdapter):
             argv += ["-sf", self.container_path(self.AUTH_NAME), "-or"]
 
         argv += [
+            #: The production image carries a reviewed, immutable template release.  Do not
+            #: depend on a mutable download during a customer scan (or on a writable HOME).
+            "-templates",
+            TEMPLATE_DIRECTORY,
             #: One JSON object per line, written as findings are confirmed. See the module
             #: docstring: this is what makes a timed-out scan's output importable.
             "-jsonl",
@@ -199,6 +204,7 @@ __all__ = [
     "DEFAULT_RATE_LIMIT",
     "EXCLUDED_TAGS",
     "MAX_RATE_LIMIT",
+    "TEMPLATE_DIRECTORY",
     "ADAPTER",
     "NucleiAdapter",
 ]

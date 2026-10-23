@@ -45,8 +45,18 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=20), server_default="proposed", nullable=False),
         sa.Column("stop_reason", sa.String(length=80), nullable=True),
         sa.Column("organization_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.CheckConstraint("sequence > 0", name=op.f("ck_agent_decisions_valid_agent_decision_sequence")),
         sa.CheckConstraint(
             "status IN ('proposed','dispatched','stopped','degraded')",
