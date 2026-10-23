@@ -563,7 +563,7 @@ async def login(
     if user is None:
         # An unknown address still pays for one Argon2 verification so that response time
         # does not become a user-enumeration oracle.
-        verify_password(_dummy_password_hash(), payload.password)
+        verify_password(payload.password, _dummy_password_hash())
         await audit_service.record_independently(
             action=AuditAction.LOGIN_FAILED,
             outcome=AuditOutcome.FAILURE,
@@ -593,7 +593,7 @@ async def login(
             context={"user_id": str(user.id), "retry_after": locked_for},
         )
 
-    if not verify_password(user.password_hash, payload.password):
+    if not verify_password(payload.password, user.password_hash):
         await _register_failed_login(user.id, settings=settings)
         await audit_service.record_independently(
             action=AuditAction.LOGIN_FAILED,
@@ -897,7 +897,7 @@ async def confirm_password_reset(
 
     user = await _load_user(session, claims.subject)
     _assert_active(user)
-    if verify_password(user.password_hash, payload.new_password):
+    if verify_password(payload.new_password, user.password_hash):
         raise InvalidConfigurationError(
             "password reuse",
             user_message="Choose a password you have not used before.",
@@ -929,13 +929,13 @@ async def change_password(
     principal: Principal | None = None,
 ) -> None:
     """Change a signed-in user's password, ending every other session."""
-    if not verify_password(user.password_hash, payload.current_password):
+    if not verify_password(payload.current_password, user.password_hash):
         raise AuthenticationError(
             "current password incorrect",
             user_message="Your current password is incorrect.",
         )
     validate_password_strength(payload.new_password, settings)
-    if verify_password(user.password_hash, payload.new_password):
+    if verify_password(payload.new_password, user.password_hash):
         raise InvalidConfigurationError(
             "password reuse",
             user_message="Choose a password you have not used before.",

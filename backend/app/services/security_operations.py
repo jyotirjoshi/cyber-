@@ -144,10 +144,12 @@ def evaluate_native_endpoint_event(event: Mapping[str, Any]) -> dict[str, Any]:
         )
     if event_type == "ransomware_activity":
         detect(
-            "mass_file_modification",
+            "reported_ransomware_activity",
             95,
             "T1486",
-            "The endpoint reported a ransomware-like burst of file modifications.",
+            "The endpoint classified this event as ransomware activity; this verdict "
+            "relays the sensor classification and does not independently verify encryption "
+            "or a burst of file modifications.",
         )
 
     if event_type == "malware" and event.get("file_sha256") and event.get("malware_signature"):
