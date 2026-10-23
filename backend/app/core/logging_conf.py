@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import traceback
 from collections.abc import Mapping, MutableMapping
 from typing import Any
 
@@ -72,6 +73,21 @@ _TEXT_HINTS = (
 )
 
 REDACTED = "[REDACTED]"
+
+
+def safe_traceback_frames(exc: BaseException, *, limit: int = 12) -> list[dict[str, Any]]:
+    """Return traceback locations without exception messages or source-line contents.
+
+    Unexpected worker exceptions used to log only their type, which made production faults
+    impossible to locate.  Logging a normal formatted traceback is unsafe because exception
+    values and source lines can contain provider credentials or target data.  These bounded
+    location-only frames preserve the debugging signal while omitting those values.
+    """
+    extracted = traceback.extract_tb(exc.__traceback__, limit=max(1, limit))
+    return [
+        {"file": frame.filename.replace("\\", "/"), "line": frame.lineno, "function": frame.name}
+        for frame in extracted
+    ]
 
 
 def redact_text(text: str) -> str:

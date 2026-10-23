@@ -68,6 +68,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.registry import AgentDeps
 from app.agent.runner import AgentRunner, RunOutcome
 from app.core.config import Settings
+from app.core.logging_conf import safe_traceback_frames
 from app.core.errors import ConflictError, CynuxError, PermissionDeniedError
 from app.db.enums import AgentRunStatus, AssessmentStatus, ReportFormat, ReportStatus
 from app.db.models.agent import AgentRun
@@ -797,7 +798,12 @@ class AgentWorker:
             # advance settles graph failures internally, so this is an unexpected fault in its
             # own bookkeeping (e.g. the database blinked while settling). Do NOT ack -- leave the
             # message pending so reclaim retries once the fault clears.
-            log.error("worker.run_error", run_id=str(run_id), exc_type=type(exc).__name__)
+            log.error(
+                "worker.run_error",
+                run_id=str(run_id),
+                exc_type=type(exc).__name__,
+                traceback_frames=safe_traceback_frames(exc),
+            )
             try:
                 await self._schedule_retry(message_id, attempts)
             except RedisError as retry_exc:

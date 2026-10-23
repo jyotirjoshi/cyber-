@@ -72,6 +72,7 @@ from app.agent.registry import AgentDeps
 from app.agent.state import AssessmentState, initial_state, optional_state_uuid
 from app.core.config import Settings
 from app.core.errors import ConflictError, CynuxError
+from app.core.logging_conf import safe_traceback_frames
 from app.db.enums import (
     AgentRunStatus,
     AssessmentDepth,
@@ -549,6 +550,7 @@ class AgentRunner:
             error_code=error.code,
             error_category=error.category.value,
             exc_type=type(exc).__name__,
+            traceback_frames=safe_traceback_frames(exc),
         )
         recovered, stage = await self._recover_context(config)
         actor = principal or recovered

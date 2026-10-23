@@ -19,7 +19,13 @@ import logging
 
 import pytest
 
-from app.core.logging_conf import REDACTED, RedactProcessor, configure_logging, redact_text
+from app.core.logging_conf import (
+    REDACTED,
+    RedactProcessor,
+    configure_logging,
+    redact_text,
+    safe_traceback_frames,
+)
 
 # ---------------------------------------------------------------------------
 # Value-level redaction (secrets in the message body)
@@ -81,6 +87,23 @@ def test_redaction_keeps_the_line_readable() -> None:
 def test_empty_and_hintless_text_is_returned_unchanged() -> None:
     assert redact_text("") == ""
     assert redact_text("scan complete: 12 findings") == "scan complete: 12 findings"
+
+
+def test_safe_traceback_frames_identify_the_failure_site_without_exception_values() -> None:
+    """Unexpected worker faults must be debuggable without logging secret-bearing messages."""
+    try:
+        raise AttributeError("provider secret AQ.DO-NOT-LOG has no attribute 'result'")
+    except AttributeError as exc:
+        frames = safe_traceback_frames(exc)
+
+    assert frames
+    assert frames[-1]["function"] == (
+        "test_safe_traceback_frames_identify_the_failure_site_without_exception_values"
+    )
+    assert frames[-1]["line"] > 0
+    assert frames[-1]["file"].endswith("test_logging_redaction.py")
+    assert "AQ.DO-NOT-LOG" not in str(frames)
+    assert "result" not in str(frames)
 
 
 # ---------------------------------------------------------------------------
